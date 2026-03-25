@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.josipmusa</groupId>
+        <artifactId>idempotency4j</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>idempotency-test</artifactId>
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <!-- core contracts - everything in this module implements or tests these -->
+        <dependency>
+            <groupId>io.github.josipmusa</groupId>
+            <artifactId>idempotency-core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+
+        <!-- JUnit 5 - compile scope because IdempotencyStoreContract is an abstract test class -->
+        <!-- consumers need these on their test classpath -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>compile</scope>
+        </dependency>
+
+        <!-- AssertJ for assertions inside the contract test class -->
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- No tests in this module - it provides test infrastructure for others -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <failIfNoTests>false</failIfNoTests>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

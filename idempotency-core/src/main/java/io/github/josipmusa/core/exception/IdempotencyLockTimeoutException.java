@@ -16,6 +16,7 @@ public class IdempotencyLockTimeoutException extends IdempotencyException {
     public String getKey() {
         return key;
     }
+
     public Duration getLockTimeout() {
         return lockTimeout;
     }

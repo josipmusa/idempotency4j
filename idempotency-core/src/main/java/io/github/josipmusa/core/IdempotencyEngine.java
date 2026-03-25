@@ -1,7 +1,6 @@
 package io.github.josipmusa.core;
 
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
-
 import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -31,7 +30,8 @@ public final class IdempotencyEngine {
         return switch (store.tryAcquire(context)) {
             case AcquireResult.Acquired ignored -> runWithHeartbeat(context, action);
             case AcquireResult.Duplicate d -> new ExecutionResult.Duplicate(d.response());
-            case AcquireResult.LockTimeout ignored -> throw new IdempotencyLockTimeoutException(context.key(), context.lockTimeout());
+            case AcquireResult.LockTimeout ignored -> throw new IdempotencyLockTimeoutException(
+                    context.key(), context.lockTimeout());
         };
     }
 
@@ -61,7 +61,6 @@ public final class IdempotencyEngine {
                 },
                 intervalMs,
                 intervalMs,
-                TimeUnit.MILLISECONDS
-        );
+                TimeUnit.MILLISECONDS);
     }
 }
