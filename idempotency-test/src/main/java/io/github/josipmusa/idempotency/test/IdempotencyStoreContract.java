@@ -1,11 +1,13 @@
 package io.github.josipmusa.idempotency.test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.josipmusa.core.AcquireResult;
 import io.github.josipmusa.core.IdempotencyContext;
 import io.github.josipmusa.core.IdempotencyStore;
 import io.github.josipmusa.core.StoredResponse;
+import io.github.josipmusa.core.exception.IdempotencyStoreException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -284,5 +286,130 @@ public abstract class IdempotencyStoreContract {
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
         assertThat(duplicate.response().statusCode()).isEqualTo(200);
         assertThat(duplicate.response().body()).isEqualTo("hello".getBytes());
+    }
+
+    // --- extendLock contract ---
+
+    @Test
+    void extendLock_inProgressKey_preventsLockFromBeingStolen() throws Exception {
+        IdempotencyStore s = store();
+        String key = "extend-key";
+
+        // Acquire with short lock (100ms)
+        s.tryAcquire(contextFor(key, Duration.ofMillis(100)));
+
+        // Extend lock to 500ms from now
+        s.extendLock(key, Duration.ofMillis(500));
+
+        // Wait past the original 100ms lock expiry
+        Thread.sleep(150);
+
+        // Lock should still be valid — second caller should NOT steal it
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<AcquireResult> future = executor.submit(() -> s.tryAcquire(contextFor(key, Duration.ofMillis(100))));
+            AcquireResult result = future.get(5, TimeUnit.SECONDS);
+
+            assertThat(result)
+                    .as("Extended lock should not be stealable before new expiry")
+                    .isInstanceOf(AcquireResult.LockTimeout.class);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void extendLock_unknownKey_silentlyIgnored() {
+        IdempotencyStore s = store();
+
+        // Must not throw — heartbeat may fire after key is already gone
+        s.extendLock("nonexistent-key", Duration.ofSeconds(10));
+    }
+
+    @Test
+    void extendLock_completedKey_silentlyIgnored() {
+        IdempotencyStore s = store();
+        String key = "completed-extend-key";
+        StoredResponse response = sampleResponse();
+
+        s.tryAcquire(contextFor(key));
+        s.complete(key, response, Duration.ofHours(1));
+
+        // Must not throw — heartbeat may fire after completion
+        s.extendLock(key, Duration.ofSeconds(10));
+
+        // Key should still be a valid duplicate
+        AcquireResult result = s.tryAcquire(contextFor(key));
+        assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
+    }
+
+    // --- TTL durability ---
+
+    @Test
+    void completedKey_returnsDuplicateWithinTtlWindow() {
+        IdempotencyStore s = store();
+        String key = "ttl-durable-key";
+        StoredResponse response = sampleResponse();
+
+        s.tryAcquire(contextFor(key));
+        s.complete(key, response, Duration.ofHours(1));
+
+        // Immediately re-acquire — must still be Duplicate
+        AcquireResult result = s.tryAcquire(contextFor(key));
+
+        assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
+        AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
+        assertThat(duplicate.response().statusCode()).isEqualTo(200);
+    }
+
+    // --- Error contracts ---
+
+    @Test
+    void completeOnNonExistentKey_throwsStoreException() {
+        IdempotencyStore s = store();
+
+        assertThatThrownBy(() -> s.complete("ghost-key", sampleResponse(), Duration.ofHours(1)))
+                .isInstanceOf(IdempotencyStoreException.class);
+    }
+
+    @Test
+    void releaseOnNonExistentKey_throwsStoreException() {
+        IdempotencyStore s = store();
+
+        assertThatThrownBy(() -> s.release("ghost-key")).isInstanceOf(IdempotencyStoreException.class);
+    }
+
+    // --- Full lifecycle ---
+
+    @Test
+    void fullLifecycle_acquireCompleteTtlExpiresReacquireCompletes() throws InterruptedException {
+        IdempotencyStore s = store();
+        String key = "lifecycle-key";
+
+        // First generation: acquire → complete
+        AcquireResult first = s.tryAcquire(contextFor(key));
+        assertThat(first).isInstanceOf(AcquireResult.Acquired.class);
+
+        StoredResponse firstResponse = new StoredResponse(200, Map.of(), "first".getBytes(), Instant.now());
+        s.complete(key, firstResponse, Duration.ofMillis(1));
+
+        // Wait for TTL to expire
+        Thread.sleep(10);
+
+        // Second generation: re-acquire → complete with different response
+        AcquireResult second = s.tryAcquire(contextFor(key));
+        assertThat(second)
+                .as("Key should be acquirable again after TTL expires")
+                .isInstanceOf(AcquireResult.Acquired.class);
+
+        StoredResponse secondResponse = new StoredResponse(201, Map.of(), "second".getBytes(), Instant.now());
+        s.complete(key, secondResponse, Duration.ofHours(1));
+
+        // Verify the new response is stored, not the old one
+        AcquireResult third = s.tryAcquire(contextFor(key));
+        assertThat(third).isInstanceOf(AcquireResult.Duplicate.class);
+        AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
+        assertThat(duplicate.response().statusCode()).isEqualTo(201);
+        assertThat(duplicate.response().body()).isEqualTo("second".getBytes());
     }
 }

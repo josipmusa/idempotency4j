@@ -7,6 +7,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
+import io.github.josipmusa.core.exception.IdempotencyStoreException;
+import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -188,5 +190,60 @@ class IdempotencyEngineTest {
                 .size();
 
         assertThat(countAfterWait).isEqualTo(countAfterExecute);
+    }
+
+    // --- Context forwarding ---
+
+    @Test
+    void execute_forwardsContextToStore() throws Exception {
+        IdempotencyContext context = defaultContext("forwarded-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+
+        engine.execute(context, () -> {});
+
+        verify(store).tryAcquire(eq(context));
+    }
+
+    // --- Checked exception propagation ---
+
+    @Test
+    void actionThrowsCheckedException_propagatesUnwrapped() {
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        IOException expected = new IOException("disk full");
+
+        assertThatThrownBy(() -> engine.execute(defaultContext("checked-key"), () -> {
+                    throw expected;
+                }))
+                .isSameAs(expected);
+    }
+
+    // --- Cascading failure: release throws after action failure ---
+
+    @Test
+    void actionThrowsAndReleaseFails_originalExceptionPropagates() {
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        RuntimeException actionException = new RuntimeException("action failed");
+        IdempotencyStoreException releaseException = new IdempotencyStoreException("store unreachable", null);
+        doThrow(releaseException).when(store).release(any());
+
+        assertThatThrownBy(() -> engine.execute(defaultContext("cascade-key"), () -> {
+                    throw actionException;
+                }))
+                .isSameAs(actionException)
+                .satisfies(e -> assertThat(e.getSuppressed()).contains(releaseException));
+    }
+
+    // --- Store failure on tryAcquire ---
+
+    @Test
+    void storeThrowsOnTryAcquire_propagatesDirectly() {
+        IdempotencyStoreException storeFailure = new IdempotencyStoreException("connection refused", null);
+        when(store.tryAcquire(any())).thenThrow(storeFailure);
+
+        assertThatThrownBy(() -> engine.execute(defaultContext("store-fail-key"), () -> {}))
+                .isSameAs(storeFailure);
+
+        // Heartbeat should never have started
+        verify(store, never()).extendLock(any(), any());
     }
 }

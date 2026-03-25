@@ -41,7 +41,11 @@ public final class IdempotencyEngine {
             action.run();
             return new ExecutionResult.Executed();
         } catch (Exception e) {
-            store.release(context.key());
+            try {
+                store.release(context.key());
+            } catch (Exception releaseEx) {
+                e.addSuppressed(releaseEx);
+            }
             throw e;
         } finally {
             heartbeat.cancel(false);
