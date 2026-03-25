@@ -182,7 +182,7 @@ requires.
 ### Complete
 - idempotency-core (engine + unit tests with Mockito)
 - providers/idempotency-inmemory (InMemoryIdempotencyStore)
-- idempotency-test (IdempotencyStoreContract + InMemoryIdempotencyStoreTest)
+- idempotency-test (IdempotencyStoreContract)
 
 ### Not started — do not implement
 - providers/idempotency-jdbc
