@@ -5,11 +5,11 @@
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>io.github.josipmusa</groupId>
-        <artifactId>idp-parent</artifactId>
+        <artifactId>idempotency4j</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
 
-    <artifactId>idp-core</artifactId>
+    <artifactId>idempotency-core</artifactId>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>

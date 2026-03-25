@@ -5,10 +5,10 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>io.github.josipmusa</groupId>
-    <artifactId>idp-parent</artifactId>
+    <artifactId>idempotency4j</artifactId>
     <packaging>pom</packaging>
     <modules>
-        <module>idp-core</module>
+        <module>idempotency-core</module>
     </modules>
     <version>0.0.1-SNAPSHOT</version>
     <description>Parent POM for IDP project</description>
