@@ -10,12 +10,10 @@ import java.util.concurrent.TimeUnit;
 public final class IdempotencyEngine {
 
     private final IdempotencyStore store;
-    private final IdempotencyConfig config;
     private final ScheduledExecutorService scheduler;
 
-    public IdempotencyEngine(IdempotencyStore store, IdempotencyConfig config, ScheduledExecutorService scheduler) {
+    public IdempotencyEngine(IdempotencyStore store, ScheduledExecutorService scheduler) {
         this.store = Objects.requireNonNull(store);
-        this.config = Objects.requireNonNull(config);
         this.scheduler = Objects.requireNonNull(scheduler);
     }
 
