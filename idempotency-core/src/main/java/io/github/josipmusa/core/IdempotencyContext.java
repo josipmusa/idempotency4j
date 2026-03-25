@@ -3,6 +3,29 @@ package io.github.josipmusa.core;
 import java.time.Duration;
 import java.util.Objects;
 
+/**
+ * Fully resolved parameters for a single idempotent operation.
+ *
+ * <p>Built by the adapter layer (e.g. Spring interceptor) by merging
+ * {@link IdempotencyConfig} defaults with per-request values from the
+ * annotation and HTTP headers. Passed to {@link IdempotencyEngine#execute}
+ * and from there to the store.
+ *
+ * <p>All fields are required — no nulls, no optionals. The context must
+ * be fully resolved before it reaches the engine.
+ *
+ * @param key         the idempotency key, typically from an HTTP header
+ *                    (e.g. {@code Idempotency-Key}). Two requests with the
+ *                    same key are considered duplicates.
+ * @param ttl         how long a completed response is kept before the key
+ *                    can be reused. Determines the deduplication window.
+ * @param lockTimeout how long a second caller will wait for an in-flight
+ *                    request to complete before giving up with
+ *                    {@link AcquireResult.LockTimeout}. Also used as the
+ *                    initial lock expiration — if the holder crashes without
+ *                    completing or releasing, the lock becomes stealable
+ *                    after this duration.
+ */
 public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout) {
 
     public IdempotencyContext {

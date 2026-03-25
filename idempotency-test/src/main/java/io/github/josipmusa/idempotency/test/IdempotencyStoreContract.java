@@ -379,6 +379,29 @@ public abstract class IdempotencyStoreContract {
         assertThatThrownBy(() -> s.release("ghost-key")).isInstanceOf(IdempotencyStoreException.class);
     }
 
+    @Test
+    void completeOnCompletedKey_throwsStoreException() {
+        IdempotencyStore s = store();
+        String key = "double-complete-key";
+
+        s.tryAcquire(contextFor(key));
+        s.complete(key, sampleResponse(), Duration.ofHours(1));
+
+        assertThatThrownBy(() -> s.complete(key, sampleResponse(), Duration.ofHours(1)))
+                .isInstanceOf(IdempotencyStoreException.class);
+    }
+
+    @Test
+    void releaseOnCompletedKey_throwsStoreException() {
+        IdempotencyStore s = store();
+        String key = "release-completed-key";
+
+        s.tryAcquire(contextFor(key));
+        s.complete(key, sampleResponse(), Duration.ofHours(1));
+
+        assertThatThrownBy(() -> s.release(key)).isInstanceOf(IdempotencyStoreException.class);
+    }
+
     // --- Full lifecycle ---
 
     @Test

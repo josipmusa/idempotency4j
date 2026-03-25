@@ -8,7 +8,11 @@ import io.github.josipmusa.core.exception.IdempotencyStoreException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * An in-memory implementation of {@link IdempotencyStore}.
@@ -17,10 +21,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * deployments only. State is not persisted across restarts and is
  * not shared across multiple application instances.
  *
+ * <p>A background reaper thread periodically removes expired entries
+ * to prevent unbounded memory growth. Call {@link #close()} to shut
+ * down the reaper when the store is no longer needed.
+ *
  * <p><strong>Do not use in a horizontally scaled production environment.
  * Use idempotency-jdbc or idempotency-redis instead.</strong>
  */
-public class InMemoryIdempotencyStore implements IdempotencyStore {
+public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable {
+
+    private static final Duration DEFAULT_REAPER_INTERVAL = Duration.ofMinutes(1);
 
     private record Entry(Status status, StoredResponse response, Instant lockExpiresAt, Instant expiresAt) {}
 
@@ -32,13 +42,25 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final Clock clock;
+    private final ScheduledExecutorService reaper;
 
     public InMemoryIdempotencyStore() {
-        this(Clock.systemUTC());
+        this(Clock.systemUTC(), DEFAULT_REAPER_INTERVAL);
     }
 
     public InMemoryIdempotencyStore(Clock clock) {
-        this.clock = clock;
+        this(clock, DEFAULT_REAPER_INTERVAL);
+    }
+
+    public InMemoryIdempotencyStore(Clock clock, Duration reaperInterval) {
+        this.clock = Objects.requireNonNull(clock);
+        this.reaper = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "idempotency-store-reaper");
+            t.setDaemon(true);
+            return t;
+        });
+        long intervalMs = reaperInterval.toMillis();
+        reaper.scheduleAtFixedRate(this::evictExpired, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -100,27 +122,34 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void complete(String key, StoredResponse response, Duration ttl) {
-        Entry existing = store.get(key);
-        if (existing == null) {
-            throw new IdempotencyStoreException(
-                    "Cannot complete key '" + key + "': no entry exists. Was tryAcquire called?", null);
-        }
-
-        Entry completed =
-                new Entry(Status.COMPLETE, response, null, clock.instant().plus(ttl));
-        store.put(key, completed);
+        store.compute(key, (k, existing) -> {
+            if (existing == null) {
+                throw new IdempotencyStoreException(
+                        "Cannot complete key '" + key + "': no entry exists. Was tryAcquire called?", null);
+            }
+            if (existing.status() != Status.IN_PROGRESS) {
+                throw new IdempotencyStoreException(
+                        "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS",
+                        null);
+            }
+            return new Entry(Status.COMPLETE, response, null, clock.instant().plus(ttl));
+        });
     }
 
     @Override
     public void release(String key) {
-        Entry existing = store.get(key);
-        if (existing == null) {
-            throw new IdempotencyStoreException(
-                    "Cannot release key '" + key + "': no entry exists. Was tryAcquire called?", null);
-        }
-
-        Entry failed = new Entry(Status.FAILED, null, null, null);
-        store.put(key, failed);
+        store.compute(key, (k, existing) -> {
+            if (existing == null) {
+                throw new IdempotencyStoreException(
+                        "Cannot release key '" + key + "': no entry exists. Was tryAcquire called?", null);
+            }
+            if (existing.status() != Status.IN_PROGRESS) {
+                throw new IdempotencyStoreException(
+                        "Cannot release key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS",
+                        null);
+            }
+            return new Entry(Status.FAILED, null, null, null);
+        });
     }
 
     @Override
@@ -130,6 +159,29 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                 return entry;
             }
             return new Entry(Status.IN_PROGRESS, null, clock.instant().plus(extension), entry.expiresAt());
+        });
+    }
+
+    @Override
+    public void close() {
+        reaper.shutdownNow();
+    }
+
+    private void evictExpired() {
+        Instant now = clock.instant();
+        store.entrySet().removeIf(e -> {
+            Entry entry = e.getValue();
+            if (entry.status() == Status.COMPLETE
+                    && entry.expiresAt() != null
+                    && entry.expiresAt().isBefore(now)) {
+                return true;
+            }
+            if (entry.status() == Status.IN_PROGRESS
+                    && entry.lockExpiresAt() != null
+                    && entry.lockExpiresAt().isBefore(now)) {
+                return true;
+            }
+            return entry.status() == Status.FAILED;
         });
     }
 }
