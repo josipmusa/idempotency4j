@@ -373,6 +373,18 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
+    void completeOnReleasedKey_throwsStoreException() {
+        IdempotencyStore s = store();
+        String key = "failed-key";
+
+        s.tryAcquire(contextFor(key));
+        s.release(key);
+
+        assertThatThrownBy(() -> s.complete(key, sampleResponse(), Duration.ofHours(1)))
+                .isInstanceOf(IdempotencyStoreException.class);
+    }
+
+    @Test
     void releaseOnNonExistentKey_throwsStoreException() {
         IdempotencyStore s = store();
 

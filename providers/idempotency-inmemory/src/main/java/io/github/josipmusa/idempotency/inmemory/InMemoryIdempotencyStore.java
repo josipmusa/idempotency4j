@@ -60,6 +60,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
 
     public InMemoryIdempotencyStore(Clock clock, Duration reaperInterval, long pollIntervalMs) {
         this.clock = Objects.requireNonNull(clock);
+        if (pollIntervalMs <= 0) {
+            throw new IllegalArgumentException("pollIntervalMs must be positive, got: " + pollIntervalMs);
+        }
         this.pollIntervalMs = pollIntervalMs;
         this.reaper = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "idempotency-store-reaper");
@@ -75,9 +78,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
         Instant deadline = clock.instant().plus(context.lockTimeout());
 
         while (true) {
-            // Remove expired entries
+            // Remove expired COMPLETED entries
             store.computeIfPresent(context.key(), (key, entry) -> {
-                if (entry.expiresAt() != null && entry.expiresAt().isBefore(clock.instant())) {
+                if (entry.status() == Status.COMPLETE
+                        && entry.expiresAt() != null
+                        && entry.expiresAt().isBefore(clock.instant())) {
                     return null;
                 }
                 return entry;

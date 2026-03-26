@@ -51,7 +51,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static final String STEAL_LOCK =
             "UPDATE idempotency_records SET status = 'IN_PROGRESS', locked_at = ?, lock_expires_at = ?, "
-                    + "response_code = NULL, response_headers = NULL, response_body = NULL "
+                    + "response_code = NULL, response_headers = NULL, response_body = NULL, completed_at = NULL "
                     + "WHERE idempotency_key = ? AND (status = 'FAILED' OR (status = 'IN_PROGRESS' AND lock_expires_at < ?))";
 
     private static final String COMPLETE =
