@@ -28,9 +28,21 @@ import java.util.Objects;
  */
 public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout) {
 
+    private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(2);
+
     public IdempotencyContext {
         Objects.requireNonNull(key, "key must not be null");
         Objects.requireNonNull(ttl, "ttl must not be null");
         Objects.requireNonNull(lockTimeout, "lockTimeout must not be null");
+
+        if (key.isBlank()) {
+            throw new IllegalArgumentException("key must not be blank");
+        }
+        if (ttl.isZero() || ttl.isNegative()) {
+            throw new IllegalArgumentException("ttl must be positive");
+        }
+        if (lockTimeout.compareTo(MIN_LOCK_TIMEOUT) < 0) {
+            throw new IllegalArgumentException("lockTimeout must be at least 2ms");
+        }
     }
 }

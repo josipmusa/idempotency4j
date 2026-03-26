@@ -1,6 +1,7 @@
 package io.github.josipmusa.core;
 
 import java.time.Duration;
+import java.util.Objects;
 
 /**
  * Application-level defaults for idempotency behavior.
@@ -55,11 +56,13 @@ public final class IdempotencyConfig {
         private boolean keyRequired = true;
 
         public Builder defaultTtl(Duration ttl) {
+            Objects.requireNonNull(ttl, "defaultTtl must not be null");
             this.defaultTtl = ttl;
             return this;
         }
 
         public Builder defaultLockTimeout(Duration timeout) {
+            Objects.requireNonNull(timeout, "defaultLockTimeout must not be null");
             this.defaultLockTimeout = timeout;
             return this;
         }
@@ -70,6 +73,14 @@ public final class IdempotencyConfig {
         }
 
         public IdempotencyConfig build() {
+            if (defaultTtl.isZero() || defaultTtl.isNegative()) {
+                throw new IllegalArgumentException("defaultTtl must be positive, got: " + defaultTtl);
+            }
+            if (defaultLockTimeout.toMillis() < 2) {
+                throw new IllegalArgumentException(
+                        "defaultLockTimeout must be at least 2ms (engine divides by 2 for heartbeat interval), got: "
+                                + defaultLockTimeout);
+            }
             return new IdempotencyConfig(this);
         }
     }

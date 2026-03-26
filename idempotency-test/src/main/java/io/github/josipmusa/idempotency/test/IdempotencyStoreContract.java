@@ -435,4 +435,42 @@ public abstract class IdempotencyStoreContract {
         assertThat(duplicate.response().statusCode()).isEqualTo(201);
         assertThat(duplicate.response().body()).isEqualTo("second".getBytes());
     }
+
+    // --- Additional edge-case contracts ---
+
+    @Test
+    void extendLock_failedKey_silentlyIgnored() {
+        IdempotencyStore s = store();
+        String key = "failed-extend-key";
+
+        s.tryAcquire(contextFor(key));
+        s.release(key);
+
+        // Must not throw — FAILED is not IN_PROGRESS
+        s.extendLock(key, Duration.ofSeconds(10));
+    }
+
+    @Test
+    void releaseOnReleasedKey_throwsStoreException() {
+        IdempotencyStore s = store();
+        String key = "double-release-key";
+
+        s.tryAcquire(contextFor(key));
+        s.release(key);
+
+        assertThatThrownBy(() -> s.release(key)).isInstanceOf(IdempotencyStoreException.class);
+    }
+
+    @Test
+    void acquiredKey_secondAcquireTimesOut() {
+        IdempotencyStore s = store();
+        String key = "self-deadlock-key";
+
+        s.tryAcquire(contextFor(key, Duration.ofSeconds(30)));
+
+        // Second acquire on same key should timeout, not succeed
+        AcquireResult result = s.tryAcquire(contextFor(key, Duration.ofMillis(200)));
+
+        assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+    }
 }

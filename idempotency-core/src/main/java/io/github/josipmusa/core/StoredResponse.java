@@ -3,6 +3,7 @@ package io.github.josipmusa.core;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * A snapshot of an HTTP response stored for idempotent replay.
@@ -16,7 +17,7 @@ import java.util.Map;
  * mutation after storage.
  *
  * @param statusCode  the HTTP status code (e.g. 200, 201, 409)
- * @param headers     HTTP response headers — copied via {@link Map#copyOf}
+ * @param headers     HTTP response headers — deep-copied so inner lists are immutable
  * @param body        the raw response body bytes — cloned on construction
  * @param completedAt when the original request completed, useful for
  *                    debugging and audit logs
@@ -24,7 +25,8 @@ import java.util.Map;
 public record StoredResponse(int statusCode, Map<String, List<String>> headers, byte[] body, Instant completedAt) {
 
     public StoredResponse {
-        headers = Map.copyOf(headers);
+        headers = headers.entrySet().stream()
+                .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, e -> List.copyOf(e.getValue())));
         body = body.clone();
     }
 }

@@ -14,6 +14,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
@@ -35,7 +36,7 @@ import javax.sql.DataSource;
  */
 public class JdbcIdempotencyStore implements IdempotencyStore {
 
-    private static final long POLL_INTERVAL_MS = 100;
+    private static final long DEFAULT_POLL_INTERVAL_MS = 100;
 
     private static final String DELETE_EXPIRED =
             "DELETE FROM idempotency_records WHERE idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
@@ -45,7 +46,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     + "VALUES (?, 'IN_PROGRESS', ?, ?, ?)";
 
     private static final String SELECT_FOR_UPDATE =
-            "SELECT status, lock_expires_at, response_code, response_headers, response_body "
+            "SELECT status, lock_expires_at, response_code, response_headers, response_body, completed_at "
                     + "FROM idempotency_records WHERE idempotency_key = ? FOR UPDATE";
 
     private static final String STEAL_LOCK =
@@ -55,7 +56,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static final String COMPLETE =
             "UPDATE idempotency_records SET status = 'COMPLETE', response_code = ?, response_headers = ?, "
-                    + "response_body = ?, lock_expires_at = NULL, expires_at = ? "
+                    + "response_body = ?, completed_at = ?, lock_expires_at = NULL, expires_at = ? "
                     + "WHERE idempotency_key = ? AND status = 'IN_PROGRESS'";
 
     private static final String RELEASE =
@@ -72,13 +73,22 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             + "(status = 'IN_PROGRESS' AND lock_expires_at < ? AND expires_at < ?)";
 
     private final DataSource dataSource;
+    private final long pollIntervalMs;
 
     public JdbcIdempotencyStore(DataSource dataSource) {
         this(dataSource, false);
     }
 
     public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema) {
+        this(dataSource, initSchema, DEFAULT_POLL_INTERVAL_MS);
+    }
+
+    public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema, long pollIntervalMs) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
+        if (pollIntervalMs <= 0) {
+            throw new IllegalArgumentException("pollIntervalMs must be positive, got: " + pollIntervalMs);
+        }
+        this.pollIntervalMs = pollIntervalMs;
         if (initSchema) {
             initSchema();
         }
@@ -87,7 +97,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private void initSchema() {
         try (InputStream is = getClass().getResourceAsStream("/idempotency-schema.sql")) {
             if (is == null) {
-                throw new IdempotencyStoreException("Schema file /idempotency-schema.sql not found on classpath", null);
+                throw new IdempotencyStoreException("Schema file /idempotency-schema.sql not found on classpath");
             }
             String sql;
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
@@ -99,8 +109,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 sql = sb.toString().trim();
             }
             try (Connection conn = dataSource.getConnection();
-                    PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.execute();
+                    Statement stmt = conn.createStatement()) {
+                stmt.execute(sql);
             }
         } catch (IOException | SQLException e) {
             throw new IdempotencyStoreException("Failed to initialize schema", e);
@@ -111,78 +121,74 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     public AcquireResult tryAcquire(IdempotencyContext context) {
         Instant deadline = Instant.now().plus(context.lockTimeout());
 
-        while (Instant.now().isBefore(deadline)) {
-            // Step 1: Delete expired COMPLETE record for this key
-            try (Connection conn = dataSource.getConnection();
-                    PreparedStatement ps = conn.prepareStatement(DELETE_EXPIRED)) {
-                ps.setString(1, context.key());
-                ps.setTimestamp(2, Timestamp.from(Instant.now()));
-                ps.executeUpdate();
-            } catch (SQLException e) {
-                throw new IdempotencyStoreException(
-                        "Failed to delete expired record for key '" + context.key() + "'", e);
+        // Step 1: Delete expired COMPLETE record + attempt INSERT in one connection
+        try (Connection conn = dataSource.getConnection()) {
+            try (PreparedStatement delPs = conn.prepareStatement(DELETE_EXPIRED)) {
+                delPs.setString(1, context.key());
+                delPs.setTimestamp(2, Timestamp.from(Instant.now()));
+                delPs.executeUpdate();
             }
-
-            // Step 2: Attempt INSERT
-            try (Connection conn = dataSource.getConnection();
-                    PreparedStatement ps = conn.prepareStatement(INSERT)) {
+            try (PreparedStatement insPs = conn.prepareStatement(INSERT)) {
                 Instant insertNow = Instant.now();
-                ps.setString(1, context.key());
-                ps.setTimestamp(2, Timestamp.from(insertNow));
-                ps.setTimestamp(3, Timestamp.from(insertNow.plus(context.lockTimeout())));
-                ps.setTimestamp(4, Timestamp.from(insertNow.plus(context.ttl())));
-                ps.executeUpdate();
+                insPs.setString(1, context.key());
+                insPs.setTimestamp(2, Timestamp.from(insertNow));
+                insPs.setTimestamp(3, Timestamp.from(insertNow.plus(context.lockTimeout())));
+                insPs.setTimestamp(4, Timestamp.from(insertNow.plus(context.ttl())));
+                insPs.executeUpdate();
                 return AcquireResult.acquired();
             } catch (SQLException e) {
                 if (!isDuplicateKeyViolation(e)) {
                     throw new IdempotencyStoreException("Failed to insert record for key '" + context.key() + "'", e);
                 }
-                // Duplicate key — fall through to SELECT FOR UPDATE
             }
+        } catch (IdempotencyStoreException e) {
+            throw e;
+        } catch (SQLException e) {
+            throw new IdempotencyStoreException("Failed during initial acquire for key '" + context.key() + "'", e);
+        }
 
-            // Step 3: SELECT FOR UPDATE to check state
+        // Step 2: Poll loop — only reached if first INSERT was a duplicate
+        while (Instant.now().isBefore(deadline)) {
+            // SELECT FOR UPDATE to check state
             try (Connection conn = dataSource.getConnection()) {
                 conn.setAutoCommit(false);
                 try (PreparedStatement ps = conn.prepareStatement(SELECT_FOR_UPDATE)) {
                     ps.setString(1, context.key());
                     try (ResultSet rs = ps.executeQuery()) {
                         if (!rs.next()) {
-                            // Record disappeared between INSERT attempt and SELECT.
-                            // Commit and retry from the top of the loop.
+                            // Record disappeared — commit and retry INSERT below
                             conn.commit();
-                            continue;
-                        }
+                        } else {
+                            String status = rs.getString("status");
+                            Timestamp lockExpiresTs = rs.getTimestamp("lock_expires_at");
 
-                        String status = rs.getString("status");
-                        Timestamp lockExpiresTs = rs.getTimestamp("lock_expires_at");
-
-                        if ("COMPLETE".equals(status)) {
-                            StoredResponse response = readResponse(rs);
-                            conn.commit();
-                            return AcquireResult.duplicate(response);
-                        }
-
-                        if ("FAILED".equals(status) || isStaleInProgress(status, lockExpiresTs)) {
-                            // Attempt to steal
-                            Instant stealNow = Instant.now();
-                            Instant stealLockExpires = stealNow.plus(context.lockTimeout());
-                            try (PreparedStatement stealPs = conn.prepareStatement(STEAL_LOCK)) {
-                                stealPs.setTimestamp(1, Timestamp.from(stealNow));
-                                stealPs.setTimestamp(2, Timestamp.from(stealLockExpires));
-                                stealPs.setString(3, context.key());
-                                stealPs.setTimestamp(4, Timestamp.from(Instant.now()));
-                                int updated = stealPs.executeUpdate();
+                            if ("COMPLETE".equals(status)) {
+                                StoredResponse response = readResponse(rs);
                                 conn.commit();
-                                if (updated > 0) {
-                                    return AcquireResult.acquired();
+                                return AcquireResult.duplicate(response);
+                            }
+
+                            if ("FAILED".equals(status) || isStaleInProgress(status, lockExpiresTs)) {
+                                // Attempt to steal
+                                Instant stealNow = Instant.now();
+                                Instant stealLockExpires = stealNow.plus(context.lockTimeout());
+                                try (PreparedStatement stealPs = conn.prepareStatement(STEAL_LOCK)) {
+                                    stealPs.setTimestamp(1, Timestamp.from(stealNow));
+                                    stealPs.setTimestamp(2, Timestamp.from(stealLockExpires));
+                                    stealPs.setString(3, context.key());
+                                    stealPs.setTimestamp(4, Timestamp.from(Instant.now()));
+                                    int updated = stealPs.executeUpdate();
+                                    conn.commit();
+                                    if (updated > 0) {
+                                        return AcquireResult.acquired();
+                                    }
+                                    // Someone else stole it — continue polling
                                 }
-                                // Someone else stole it — continue polling
-                                continue;
+                            } else {
+                                // Active IN_PROGRESS — wait
+                                conn.commit();
                             }
                         }
-
-                        // Active IN_PROGRESS — wait
-                        conn.commit();
                     }
                 } catch (SQLException e) {
                     try {
@@ -200,10 +206,27 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
             // Sleep before next poll
             try {
-                Thread.sleep(POLL_INTERVAL_MS);
+                Thread.sleep(pollIntervalMs);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return AcquireResult.lockTimeout(context.key());
+            }
+
+            // Retry INSERT after record disappeared or was stolen
+            try (Connection conn = dataSource.getConnection();
+                    PreparedStatement ps = conn.prepareStatement(INSERT)) {
+                Instant insertNow = Instant.now();
+                ps.setString(1, context.key());
+                ps.setTimestamp(2, Timestamp.from(insertNow));
+                ps.setTimestamp(3, Timestamp.from(insertNow.plus(context.lockTimeout())));
+                ps.setTimestamp(4, Timestamp.from(insertNow.plus(context.ttl())));
+                ps.executeUpdate();
+                return AcquireResult.acquired();
+            } catch (SQLException e) {
+                if (!isDuplicateKeyViolation(e)) {
+                    throw new IdempotencyStoreException("Failed to insert record for key '" + context.key() + "'", e);
+                }
+                // Duplicate key — continue polling
             }
         }
 
@@ -218,18 +241,19 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void complete(String key, StoredResponse response, Duration ttl) {
-        Instant expiresAt = Instant.now().plus(ttl);
+        Instant now = Instant.now();
+        Instant expiresAt = now.plus(ttl);
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
             ps.setInt(1, response.statusCode());
             ps.setString(2, headersToJson(response.headers()));
             ps.setBytes(3, response.body());
-            ps.setTimestamp(4, Timestamp.from(expiresAt));
-            ps.setString(5, key);
+            ps.setTimestamp(4, Timestamp.from(now));
+            ps.setTimestamp(5, Timestamp.from(expiresAt));
+            ps.setString(6, key);
             int updated = ps.executeUpdate();
             if (updated == 0) {
-                throw new IdempotencyStoreException(
-                        "Cannot complete key '" + key + "': no IN_PROGRESS entry exists", null);
+                throw new IdempotencyStoreException("Cannot complete key '" + key + "': no IN_PROGRESS entry exists");
             }
         } catch (IdempotencyStoreException e) {
             throw e;
@@ -245,8 +269,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             ps.setString(1, key);
             int updated = ps.executeUpdate();
             if (updated == 0) {
-                throw new IdempotencyStoreException(
-                        "Cannot release key '" + key + "': no IN_PROGRESS entry exists", null);
+                throw new IdempotencyStoreException("Cannot release key '" + key + "': no IN_PROGRESS entry exists");
             }
         } catch (IdempotencyStoreException e) {
             throw e;
@@ -297,16 +320,18 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         int statusCode = rs.getInt("response_code");
         String headersJson = rs.getString("response_headers");
         byte[] body = rs.getBytes("response_body");
+        Timestamp completedAtTs = rs.getTimestamp("completed_at");
 
         Map<String, List<String>> headers = headersJson != null ? jsonToHeaders(headersJson) : Map.of();
         byte[] responseBody = body != null ? body : new byte[0];
+        Instant completedAt = completedAtTs != null ? completedAtTs.toInstant() : Instant.now();
 
-        return new StoredResponse(statusCode, headers, responseBody, Instant.now());
+        return new StoredResponse(statusCode, headers, responseBody, completedAt);
     }
 
     private boolean isDuplicateKeyViolation(SQLException e) {
         String sqlState = e.getSQLState();
-        return "23000".equals(sqlState);
+        return "23000".equals(sqlState) || "23505".equals(sqlState);
     }
 
     // --- JSON serialization (no external library) ---
@@ -392,7 +417,13 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 case '\n' -> sb.append("\\n");
                 case '\r' -> sb.append("\\r");
                 case '\t' -> sb.append("\\t");
-                default -> sb.append(c);
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
             }
         }
     }
@@ -434,6 +465,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     case 't' -> {
                         sb.append('\t');
                         i++;
+                    }
+                    case 'u' -> {
+                        if (i + 5 < s.length()) {
+                            String hex = s.substring(i + 2, i + 6);
+                            sb.append((char) Integer.parseInt(hex, 16));
+                            i += 5;
+                        } else {
+                            sb.append(c);
+                        }
                     }
                     default -> sb.append(c);
                 }

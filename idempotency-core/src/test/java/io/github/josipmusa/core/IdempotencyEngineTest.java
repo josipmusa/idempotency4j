@@ -223,7 +223,7 @@ class IdempotencyEngineTest {
     void actionThrowsAndReleaseFails_originalExceptionPropagates() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
         RuntimeException actionException = new RuntimeException("action failed");
-        IdempotencyStoreException releaseException = new IdempotencyStoreException("store unreachable", null);
+        IdempotencyStoreException releaseException = new IdempotencyStoreException("store unreachable");
         doThrow(releaseException).when(store).release(any());
 
         assertThatThrownBy(() -> engine.execute(defaultContext("cascade-key"), () -> {
@@ -237,7 +237,7 @@ class IdempotencyEngineTest {
 
     @Test
     void storeThrowsOnTryAcquire_propagatesDirectly() {
-        IdempotencyStoreException storeFailure = new IdempotencyStoreException("connection refused", null);
+        IdempotencyStoreException storeFailure = new IdempotencyStoreException("connection refused");
         when(store.tryAcquire(any())).thenThrow(storeFailure);
 
         assertThatThrownBy(() -> engine.execute(defaultContext("store-fail-key"), () -> {}))

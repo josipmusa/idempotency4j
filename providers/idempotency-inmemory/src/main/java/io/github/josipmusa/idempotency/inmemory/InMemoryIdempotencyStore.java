@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable {
 
     private static final Duration DEFAULT_REAPER_INTERVAL = Duration.ofMinutes(1);
+    private static final long DEFAULT_POLL_INTERVAL_MS = 50;
 
     private record Entry(Status status, StoredResponse response, Instant lockExpiresAt, Instant expiresAt) {}
 
@@ -43,17 +44,23 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final Clock clock;
     private final ScheduledExecutorService reaper;
+    private final long pollIntervalMs;
 
     public InMemoryIdempotencyStore() {
-        this(Clock.systemUTC(), DEFAULT_REAPER_INTERVAL);
+        this(Clock.systemUTC(), DEFAULT_REAPER_INTERVAL, DEFAULT_POLL_INTERVAL_MS);
     }
 
     public InMemoryIdempotencyStore(Clock clock) {
-        this(clock, DEFAULT_REAPER_INTERVAL);
+        this(clock, DEFAULT_REAPER_INTERVAL, DEFAULT_POLL_INTERVAL_MS);
     }
 
     public InMemoryIdempotencyStore(Clock clock, Duration reaperInterval) {
+        this(clock, reaperInterval, DEFAULT_POLL_INTERVAL_MS);
+    }
+
+    public InMemoryIdempotencyStore(Clock clock, Duration reaperInterval, long pollIntervalMs) {
         this.clock = Objects.requireNonNull(clock);
+        this.pollIntervalMs = pollIntervalMs;
         this.reaper = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "idempotency-store-reaper");
             t.setDaemon(true);
@@ -77,7 +84,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
             });
 
             // Attempt atomic insert
-            Entry newEntry = new Entry(Status.IN_PROGRESS, null, clock.instant().plus(context.lockTimeout()), null);
+            Entry newEntry = new Entry(
+                    Status.IN_PROGRESS,
+                    null,
+                    clock.instant().plus(context.lockTimeout()),
+                    clock.instant().plus(context.ttl()));
 
             Entry existing = store.putIfAbsent(context.key(), newEntry);
 
@@ -86,14 +97,6 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
             }
 
             // Key exists — check its state
-            if (existing.lockExpiresAt() != null && existing.lockExpiresAt().isBefore(clock.instant())) {
-                // Stale lock — attempt to steal
-                if (store.replace(context.key(), existing, newEntry)) {
-                    return AcquireResult.acquired();
-                }
-                continue;
-            }
-
             if (existing.status() == Status.COMPLETE) {
                 return AcquireResult.duplicate(existing.response());
             }
@@ -106,13 +109,21 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
                 continue;
             }
 
+            if (existing.lockExpiresAt() != null && existing.lockExpiresAt().isBefore(clock.instant())) {
+                // Stale lock — attempt to steal
+                if (store.replace(context.key(), existing, newEntry)) {
+                    return AcquireResult.acquired();
+                }
+                continue;
+            }
+
             // IN_PROGRESS with valid lock — wait
             if (clock.instant().isAfter(deadline)) {
                 return AcquireResult.lockTimeout(context.key());
             }
 
             try {
-                Thread.sleep(50);
+                Thread.sleep(pollIntervalMs);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return AcquireResult.lockTimeout(context.key());
@@ -125,12 +136,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
         store.compute(key, (k, existing) -> {
             if (existing == null) {
                 throw new IdempotencyStoreException(
-                        "Cannot complete key '" + key + "': no entry exists. Was tryAcquire called?", null);
+                        "Cannot complete key '" + key + "': no entry exists. Was tryAcquire called?");
             }
             if (existing.status() != Status.IN_PROGRESS) {
                 throw new IdempotencyStoreException(
-                        "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS",
-                        null);
+                        "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
             return new Entry(Status.COMPLETE, response, null, clock.instant().plus(ttl));
         });
@@ -141,14 +151,13 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
         store.compute(key, (k, existing) -> {
             if (existing == null) {
                 throw new IdempotencyStoreException(
-                        "Cannot release key '" + key + "': no entry exists. Was tryAcquire called?", null);
+                        "Cannot release key '" + key + "': no entry exists. Was tryAcquire called?");
             }
             if (existing.status() != Status.IN_PROGRESS) {
                 throw new IdempotencyStoreException(
-                        "Cannot release key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS",
-                        null);
+                        "Cannot release key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
-            return new Entry(Status.FAILED, null, null, null);
+            return new Entry(Status.FAILED, null, null, existing.expiresAt());
         });
     }
 
@@ -178,10 +187,14 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
             }
             if (entry.status() == Status.IN_PROGRESS
                     && entry.lockExpiresAt() != null
-                    && entry.lockExpiresAt().isBefore(now)) {
+                    && entry.lockExpiresAt().isBefore(now)
+                    && entry.expiresAt() != null
+                    && entry.expiresAt().isBefore(now)) {
                 return true;
             }
-            return entry.status() == Status.FAILED;
+            return entry.status() == Status.FAILED
+                    && entry.expiresAt() != null
+                    && entry.expiresAt().isBefore(now);
         });
     }
 }
