@@ -43,6 +43,11 @@ These rules are strict. Do not violate them.
 - `idempotency-spring` depends on core + Spring Web + Spring AOP
 - `idempotency-spring-boot-starter` depends on spring module + providers
 
+When adding dependencies to pom.xml - first think about where the version managing belongs.
+Ask yourself if it makes sense for the version management to be in the parent pom.xml under dependency management.
+Never provide version in the actual dependency declaration - all dependency versions should be declared under <properties>
+and then referenced in the actual dependency declaration.
+
 ## Core architecture
 
 The library is built around three responsibilities kept strictly separate:
@@ -177,15 +182,19 @@ requires.
 - Do not use `Optional` in `IdempotencyContext` — context must be
   fully resolved before reaching the engine
 
+## Instruction updating
+When you change any code, make sure to analyze if this document needs any changing and apply the changes.
+This includes the explanations and the current implementation status.
+
 ## Current implementation status
 
 ### Complete
 - idempotency-core (engine + unit tests with Mockito)
 - providers/idempotency-inmemory (InMemoryIdempotencyStore)
+- providers/idempotency-jdbc (JdbcIdempotencyStore with Testcontainers MySQL tests)
 - idempotency-test (IdempotencyStoreContract)
 
 ### Not started — do not implement
-- providers/idempotency-jdbc
 - providers/idempotency-redis
 - idempotency-spring
 - idempotency-spring-boot-starter

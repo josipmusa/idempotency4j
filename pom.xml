@@ -10,6 +10,7 @@
     <modules>
         <module>idempotency-core</module>
         <module>providers/idempotency-inmemory</module>
+        <module>providers/idempotency-jdbc</module>
         <module>idempotency-test</module>
     </modules>
     <version>0.0.1-SNAPSHOT</version>
