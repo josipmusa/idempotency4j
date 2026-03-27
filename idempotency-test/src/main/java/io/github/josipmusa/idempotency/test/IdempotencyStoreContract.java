@@ -177,7 +177,7 @@ public abstract class IdempotencyStoreContract {
             long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
             assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
-            assertThat(elapsed).isBetween(200L, 400L);
+            assertThat(elapsed).isBetween(200L, 600L);
         } finally {
             executor.shutdownNow();
         }

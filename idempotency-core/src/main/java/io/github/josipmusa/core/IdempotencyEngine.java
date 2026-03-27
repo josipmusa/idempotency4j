@@ -47,8 +47,8 @@ public final class IdempotencyEngine {
      *                  across engine instances, not created per-request
      */
     public IdempotencyEngine(IdempotencyStore store, ScheduledExecutorService scheduler) {
-        this.store = Objects.requireNonNull(store);
-        this.scheduler = Objects.requireNonNull(scheduler);
+        this.store = Objects.requireNonNull(store, "store must not be null");
+        this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
     }
 
     /**

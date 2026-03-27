@@ -200,6 +200,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                         e.addSuppressed(re);
                     }
                     throw new IdempotencyStoreException("Failed during poll for key '" + context.key() + "'", e);
+                } finally {
+                    try {
+                        conn.setAutoCommit(true);
+                    } catch (SQLException ignored) {
+                    }
                 }
             } catch (IdempotencyStoreException e) {
                 throw e;
