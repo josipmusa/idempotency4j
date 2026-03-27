@@ -79,6 +79,10 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
         Instant deadline = clock.instant().plus(context.lockTimeout());
 
         while (true) {
+            if (clock.instant().isAfter(deadline)) {
+                return AcquireResult.lockTimeout(context.key());
+            }
+
             // Remove expired COMPLETED entries
             store.computeIfPresent(context.key(), (key, entry) -> {
                 if (entry.status() == Status.COMPLETE

@@ -19,6 +19,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 public abstract class IdempotencyStoreContract {
@@ -471,6 +472,48 @@ public abstract class IdempotencyStoreContract {
         s.release(key);
 
         assertThatThrownBy(() -> s.release(key)).isInstanceOf(IdempotencyStoreException.class);
+    }
+
+    @Test
+    void failedKeyUnderContention_timeoutRespected() throws Exception {
+        IdempotencyStore s = store();
+        String key = "contended-failed-key";
+        int chaosThreadCount = 20;
+        AtomicBoolean stop = new AtomicBoolean(false);
+        CountDownLatch chaosReady = new CountDownLatch(chaosThreadCount);
+
+        // Put key in FAILED state
+        s.tryAcquire(contextFor(key, Duration.ofSeconds(10)));
+        s.release(key);
+
+        ExecutorService executor = Executors.newFixedThreadPool(chaosThreadCount + 1);
+        try {
+            // Chaos threads continuously steal and release the key, creating hot contention
+            for (int i = 0; i < chaosThreadCount; i++) {
+                executor.submit(() -> {
+                    chaosReady.countDown();
+                    while (!stop.get()) {
+                        AcquireResult r = s.tryAcquire(contextFor(key, Duration.ofSeconds(10)));
+                        if (r instanceof AcquireResult.Acquired) {
+                            s.release(key);
+                        }
+                    }
+                });
+            }
+            chaosReady.await(5, TimeUnit.SECONDS);
+
+            // Victim thread with short lockTimeout — must return within bounded time
+            Future<AcquireResult> victim = executor.submit(() -> s.tryAcquire(contextFor(key, Duration.ofMillis(200))));
+
+            // Without the fix, the victim can loop indefinitely under contention.
+            // victim.get(5s) will throw TimeoutException, failing the test.
+            AcquireResult result = victim.get(5, TimeUnit.SECONDS);
+
+            assertThat(result).isInstanceOfAny(AcquireResult.Acquired.class, AcquireResult.LockTimeout.class);
+        } finally {
+            stop.set(true);
+            executor.shutdownNow();
+        }
     }
 
     @Test
