@@ -5,7 +5,7 @@ and a Spring Boot adapter.
 
 ## Project structure
 
-\```
+```
 idempotency4j/
 ├── idempotency-core/        Pure Java. No framework dependencies.
 │                            Engine, SPI interfaces, domain models,
@@ -29,7 +29,7 @@ idempotency4j/
 │                            @Idempotent annotation and interceptor.
 └── idempotency-spring-boot-starter/  Autoconfiguration. Wires everything
                              together based on classpath detection.
-\```
+```
 
 ## Module dependency rules
 
@@ -75,12 +75,12 @@ and `store.extendLock()` via the heartbeat.
 
 Four methods:
 
-\```java
+```java
 AcquireResult tryAcquire(IdempotencyContext context);
 void complete(String key, StoredResponse response, Duration ttl);
 void release(String key);
 void extendLock(String key, Duration extension);
-\```
+```
 
 `tryAcquire` is responsible for all blocking logic internally.
 The engine never polls or waits — it calls `tryAcquire` once and
@@ -102,14 +102,14 @@ module, stop. The design is wrong.
 
 ## State machine for a key
 
-\```
+```
 [not exists] ──tryAcquire──→ IN_PROGRESS ──complete()──→ COMPLETE
                                   │
                               release()
                                   │
                                   ↓
                                FAILED ──tryAcquire──→ IN_PROGRESS
-\```
+```
 
 COMPLETE keys return `Duplicate` on subsequent `tryAcquire` calls
 until TTL expires, after which they are treated as new.
@@ -134,11 +134,11 @@ and must not throw.
 ### Naming
 
 All test methods follow the `Context_ExpectedResult` pattern:
-\```
+```
 newKey_returnsAcquired
 completedKey_returnsDuplicateWithCorrectResponse
 staleLock_isStolen
-\```
+```
 
 ### Contract tests
 
@@ -146,14 +146,14 @@ Every `IdempotencyStore` implementation must extend
 `IdempotencyStoreContract` from `idempotency-test` and implement
 `store()` to provide the implementation under test.
 
-\```java
+```java
 class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
     @Override
     protected IdempotencyStore store() {
         return new JdbcIdempotencyStore(dataSource);
     }
 }
-\```
+```
 
 The contract test suite is the single source of truth for store
 behavior. If a case is added to `IdempotencyStoreContract`, all
@@ -182,6 +182,25 @@ requires.
 - Do not use `Optional` in `IdempotencyContext` — context must be
   fully resolved before reaching the engine
 
+## Running tests
+
+This is a multi-module Maven project. Modules depend on each other as SNAPSHOT artifacts.
+
+**Always install before running a specific module's tests:**
+```bash
+mvn install -DskipTests -q   # install all modules into local repo first
+mvn test -pl providers/idempotency-inmemory   # then run a specific module
+```
+
+**To run all tests:**
+```bash
+mvn verify
+```
+
+Never try to run a single module's tests (`-pl <module>`) without first doing a root-level
+`mvn install -DskipTests`. Maven cannot resolve sibling SNAPSHOT dependencies otherwise, and
+you will waste many attempts trying flags like `--also-make` or `-Dsurefire.failIfNoSpecifiedTests`.
+
 ## Git workflow
 
 When the user mentions committing, pushing, or creating a PR/MR, follow this flow exactly:
@@ -192,13 +211,17 @@ When the user mentions committing, pushing, or creating a PR/MR, follow this flo
 - If the user doesn't provide one: default to `main`.
 
 ### 2. Create a feature branch
-- From the confirmed base branch, create a new branch.
+- From the confirmed base branch, create a new branch locally.
 - Name it sensibly based on the work being done (e.g. `feat/redis-provider`, `fix/lock-timeout-validation`).
 - Never commit or push directly to `main`/`master`.
 
-### 3. Do the work, then act
-- Perform only the git actions the user asked for (commit, push, or create PR/MR).
-- If creating a PR/MR: target it from the feature branch to the base branch established in step 1.
+### 3. Push and create PR using the GitHub MCP plugin
+Do NOT use `git push` (HTTPS credentials are not stored) or the `gh` CLI (not installed).
+Use the MCP tools instead:
+- `mcp__plugin_github_github__push_files` — push the changed files to the remote branch
+- `mcp__plugin_github_github__create_pull_request` — open the PR targeting the base branch
+
+The repo owner is `josipmusa` and the repo name is `idempotency4j`.
 
 ### What never to commit or push
 - Files generated during AI analysis or used only to complete a task (e.g. anything under `docs/superpowers/`, temporary plan files, scratch notes).
