@@ -182,6 +182,28 @@ requires.
 - Do not use `Optional` in `IdempotencyContext` — context must be
   fully resolved before reaching the engine
 
+## Git workflow
+
+When the user mentions committing, pushing, or creating a PR/MR, follow this flow exactly:
+
+### 1. Establish a base branch
+- Ask the user what the base branch should be.
+- If the user provides one: confirm it exists locally, then pull to get a clean start.
+- If the user doesn't provide one: default to `main`.
+
+### 2. Create a feature branch
+- From the confirmed base branch, create a new branch.
+- Name it sensibly based on the work being done (e.g. `feat/redis-provider`, `fix/lock-timeout-validation`).
+- Never commit or push directly to `main`/`master`.
+
+### 3. Do the work, then act
+- Perform only the git actions the user asked for (commit, push, or create PR/MR).
+- If creating a PR/MR: target it from the feature branch to the base branch established in step 1.
+
+### What never to commit or push
+- Files generated during AI analysis or used only to complete a task (e.g. anything under `docs/superpowers/`, temporary plan files, scratch notes).
+- Secrets, credentials, or `.env` files.
+
 ## Instruction updating
 When you change any code, make sure to analyze if this document needs any changing and apply the changes.
 This includes the explanations and the current implementation status.

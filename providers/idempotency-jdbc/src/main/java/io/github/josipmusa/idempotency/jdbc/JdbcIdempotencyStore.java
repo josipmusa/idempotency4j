@@ -149,6 +149,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
         // Step 2: Poll loop — only reached if first INSERT was a duplicate
         while (Instant.now().isBefore(deadline)) {
+            boolean recordGone = false;
+
             // SELECT FOR UPDATE to check state
             try (Connection conn = dataSource.getConnection()) {
                 conn.setAutoCommit(false);
@@ -156,8 +158,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     ps.setString(1, context.key());
                     try (ResultSet rs = ps.executeQuery()) {
                         if (!rs.next()) {
-                            // Record disappeared — commit and retry INSERT below
+                            // Record disappeared between our INSERT attempt and now
                             conn.commit();
+                            recordGone = true;
                         } else {
                             String status = rs.getString("status");
                             Timestamp lockExpiresTs = rs.getTimestamp("lock_expires_at");
@@ -212,21 +215,24 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 return AcquireResult.lockTimeout(context.key());
             }
 
-            // Retry INSERT after record disappeared or was stolen
-            try (Connection conn = dataSource.getConnection();
-                    PreparedStatement ps = conn.prepareStatement(INSERT)) {
-                Instant insertNow = Instant.now();
-                ps.setString(1, context.key());
-                ps.setTimestamp(2, Timestamp.from(insertNow));
-                ps.setTimestamp(3, Timestamp.from(insertNow.plus(context.lockTimeout())));
-                ps.setTimestamp(4, Timestamp.from(insertNow.plus(context.ttl())));
-                ps.executeUpdate();
-                return AcquireResult.acquired();
-            } catch (SQLException e) {
-                if (!isDuplicateKeyViolation(e)) {
-                    throw new IdempotencyStoreException("Failed to insert record for key '" + context.key() + "'", e);
+            // Only retry INSERT when the record actually disappeared
+            if (recordGone) {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement(INSERT)) {
+                    Instant insertNow = Instant.now();
+                    ps.setString(1, context.key());
+                    ps.setTimestamp(2, Timestamp.from(insertNow));
+                    ps.setTimestamp(3, Timestamp.from(insertNow.plus(context.lockTimeout())));
+                    ps.setTimestamp(4, Timestamp.from(insertNow.plus(context.ttl())));
+                    ps.executeUpdate();
+                    return AcquireResult.acquired();
+                } catch (SQLException e) {
+                    if (!isDuplicateKeyViolation(e)) {
+                        throw new IdempotencyStoreException(
+                                "Failed to insert record for key '" + context.key() + "'", e);
+                    }
+                    // Duplicate key — someone else inserted first, continue polling
                 }
-                // Duplicate key — continue polling
             }
         }
 
