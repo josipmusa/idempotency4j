@@ -184,22 +184,17 @@ requires.
 
 ## Running tests
 
-This is a multi-module Maven project. Modules depend on each other as SNAPSHOT artifacts.
-
-**Always install before running a specific module's tests:**
+**Run a specific module's tests:**
 ```bash
-mvn install -DskipTests -q   # install all modules into local repo first
-mvn test -pl providers/idempotency-inmemory   # then run a specific module
+mvn test -pl providers/idempotency-inmemory -am
 ```
 
-**To run all tests:**
+The `-am` flag (also-make) builds upstream sibling modules first so SNAPSHOT dependencies resolve.
+
+**Run all tests:**
 ```bash
 mvn verify
 ```
-
-Never try to run a single module's tests (`-pl <module>`) without first doing a root-level
-`mvn install -DskipTests`. Maven cannot resolve sibling SNAPSHOT dependencies otherwise, and
-you will waste many attempts trying flags like `--also-make` or `-Dsurefire.failIfNoSpecifiedTests`.
 
 ## Git workflow
 
@@ -215,7 +210,15 @@ When the user mentions committing, pushing, or creating a PR/MR, follow this flo
 - Name it sensibly based on the work being done (e.g. `feat/redis-provider`, `fix/lock-timeout-validation`).
 - Never commit or push directly to `main`/`master`.
 
-### 3. Push and create PR using the GitHub MCP plugin
+### 3. Commit, push, and create PR
+
+**Commit messages:** One short sentence per logical change. No long paragraphs, no bullet lists in the subject line.
+```
+Fix deadline bypass in InMemoryIdempotencyStore under contention
+Add failedKeyUnderContention contract test
+```
+
+**Push and create PR using the GitHub MCP plugin**
 Do NOT use `git push` (HTTPS credentials are not stored) or the `gh` CLI (not installed).
 Use the MCP tools instead:
 - `mcp__plugin_github_github__push_files` — push the changed files to the remote branch
