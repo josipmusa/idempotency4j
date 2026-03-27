@@ -218,13 +218,7 @@ Fix deadline bypass in InMemoryIdempotencyStore under contention
 Add failedKeyUnderContention contract test
 ```
 
-**Push and create PR using the GitHub MCP plugin**
-Do NOT use `git push` (HTTPS credentials are not stored) or the `gh` CLI (not installed).
-Use the MCP tools instead:
-- `mcp__plugin_github_github__push_files` — push the changed files to the remote branch
-- `mcp__plugin_github_github__create_pull_request` — open the PR targeting the base branch
-
-The repo owner is `josipmusa` and the repo name is `idempotency4j`.
+Push with `git push -u origin <branch>` and create the PR with `gh pr create`.
 
 ### What never to commit or push
 - Files generated during AI analysis or used only to complete a task (e.g. anything under `docs/superpowers/`, temporary plan files, scratch notes).
