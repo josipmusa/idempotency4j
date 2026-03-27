@@ -137,7 +137,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 insPs.executeUpdate();
                 return AcquireResult.acquired();
             } catch (SQLException e) {
-                if (!isDuplicateKeyViolation(e)) {
+                if (isNotDuplicateKeyViolation(e)) {
                     throw new IdempotencyStoreException("Failed to insert record for key '" + context.key() + "'", e);
                 }
             }
@@ -232,7 +232,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     ps.executeUpdate();
                     return AcquireResult.acquired();
                 } catch (SQLException e) {
-                    if (!isDuplicateKeyViolation(e)) {
+                    if (isNotDuplicateKeyViolation(e)) {
                         throw new IdempotencyStoreException(
                                 "Failed to insert record for key '" + context.key() + "'", e);
                     }
@@ -340,9 +340,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         return new StoredResponse(statusCode, headers, responseBody, completedAt);
     }
 
-    private boolean isDuplicateKeyViolation(SQLException e) {
+    private boolean isNotDuplicateKeyViolation(SQLException e) {
         String sqlState = e.getSQLState();
-        return "23000".equals(sqlState) || "23505".equals(sqlState);
+        return !"23000".equals(sqlState) && !"23505".equals(sqlState);
     }
 
     // --- JSON serialization (no external library) ---
