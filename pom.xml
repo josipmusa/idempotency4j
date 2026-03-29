@@ -14,7 +14,7 @@
         <module>idempotency-test</module>
     </modules>
     <version>0.0.1-SNAPSHOT</version>
-    <description>Parent POM for IDP project</description>
+    <description>Idempotency Java Library</description>
 
     <properties>
         <java.version>21</java.version>

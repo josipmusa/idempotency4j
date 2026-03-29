@@ -33,13 +33,20 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
     private static final Duration DEFAULT_REAPER_INTERVAL = Duration.ofMinutes(1);
     private static final long DEFAULT_POLL_INTERVAL_MS = 50;
 
-    private record Entry(Status status, StoredResponse response, Instant lockExpiresAt, Instant expiresAt) {}
-
     private enum Status {
         IN_PROGRESS,
         COMPLETE,
         FAILED
     }
+
+    /**
+     * {@code lockTimeout} is stored so that FAILED entries can be expired after the original lock
+     * duration rather than the full TTL — FAILED keys are immediately re-acquirable and are
+     * typically retried within seconds, so holding them for the full TTL would waste memory.
+     * {@code lockTimeout} is {@code null} for COMPLETE entries where it is not needed.
+     */
+    private record Entry(
+            Status status, StoredResponse response, Instant lockExpiresAt, Instant expiresAt, Duration lockTimeout) {}
 
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final Clock clock;
@@ -79,26 +86,25 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
         Instant deadline = clock.instant().plus(context.lockTimeout());
 
         while (true) {
-            if (clock.instant().isAfter(deadline)) {
+            Instant now = clock.instant();
+            if (now.isAfter(deadline)) {
                 return AcquireResult.lockTimeout(context.key());
             }
 
-            // Remove expired COMPLETED entries
-            store.computeIfPresent(context.key(), (key, entry) -> {
-                if (entry.status() == Status.COMPLETE
-                        && entry.expiresAt() != null
-                        && entry.expiresAt().isBefore(clock.instant())) {
-                    return null;
-                }
-                return entry;
-            });
+            // Evict expired COMPLETE entry for this key so a fresh insert can follow
+            store.computeIfPresent(
+                    context.key(),
+                    (key, entry) -> entry.status() == Status.COMPLETE
+                                    && entry.expiresAt().isBefore(now)
+                            ? null
+                            : entry);
 
-            // Attempt atomic insert
             Entry newEntry = new Entry(
                     Status.IN_PROGRESS,
                     null,
-                    clock.instant().plus(context.lockTimeout()),
-                    clock.instant().plus(context.ttl()));
+                    now.plus(context.lockTimeout()),
+                    now.plus(context.ttl()),
+                    context.lockTimeout());
 
             Entry existing = store.putIfAbsent(context.key(), newEntry);
 
@@ -106,32 +112,24 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
                 return AcquireResult.acquired();
             }
 
-            // Key exists — check its state
             if (existing.status() == Status.COMPLETE) {
                 return AcquireResult.duplicate(existing.response());
             }
 
-            if (existing.status() == Status.FAILED) {
-                // Failed entry — attempt to claim
+            // FAILED or stale IN_PROGRESS — attempt to claim the lock atomically
+            if (existing.status() == Status.FAILED
+                    || (existing.lockExpiresAt() != null
+                            && existing.lockExpiresAt().isBefore(now))) {
                 if (store.replace(context.key(), existing, newEntry)) {
                     return AcquireResult.acquired();
                 }
-                continue;
+                continue; // lost the race — re-inspect on next iteration
             }
 
-            if (existing.lockExpiresAt() != null && existing.lockExpiresAt().isBefore(clock.instant())) {
-                // Stale lock — attempt to steal
-                if (store.replace(context.key(), existing, newEntry)) {
-                    return AcquireResult.acquired();
-                }
-                continue;
-            }
-
-            // IN_PROGRESS with valid lock — wait
+            // Active IN_PROGRESS — wait before retrying
             if (clock.instant().isAfter(deadline)) {
                 return AcquireResult.lockTimeout(context.key());
             }
-
             try {
                 Thread.sleep(pollIntervalMs);
             } catch (InterruptedException e) {
@@ -152,7 +150,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
                 throw new IdempotencyStoreException(
                         "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
-            return new Entry(Status.COMPLETE, response, null, clock.instant().plus(ttl));
+            return new Entry(Status.COMPLETE, response, null, clock.instant().plus(ttl), null);
         });
     }
 
@@ -167,7 +165,10 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
                 throw new IdempotencyStoreException(
                         "Cannot release key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
-            return new Entry(Status.FAILED, null, null, existing.expiresAt());
+            // Expire after lockTimeout rather than full TTL — FAILED entries are immediately
+            // re-acquirable, so keeping them for the full TTL would unnecessarily retain memory.
+            Instant failedExpiry = clock.instant().plus(existing.lockTimeout());
+            return new Entry(Status.FAILED, null, null, failedExpiry, existing.lockTimeout());
         });
     }
 
@@ -177,7 +178,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
             if (entry.status() != Status.IN_PROGRESS) {
                 return entry;
             }
-            return new Entry(Status.IN_PROGRESS, null, clock.instant().plus(extension), entry.expiresAt());
+            return new Entry(
+                    Status.IN_PROGRESS, null, clock.instant().plus(extension), entry.expiresAt(), entry.lockTimeout());
         });
     }
 
@@ -188,23 +190,17 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
 
     private void evictExpired() {
         Instant now = clock.instant();
-        store.entrySet().removeIf(e -> {
-            Entry entry = e.getValue();
-            if (entry.status() == Status.COMPLETE
-                    && entry.expiresAt() != null
-                    && entry.expiresAt().isBefore(now)) {
-                return true;
-            }
-            if (entry.status() == Status.IN_PROGRESS
-                    && entry.lockExpiresAt() != null
+        store.entrySet().removeIf(e -> isExpired(e.getValue(), now));
+    }
+
+    private static boolean isExpired(Entry entry, Instant now) {
+        return switch (entry.status()) {
+            case COMPLETE, FAILED -> entry.expiresAt() != null
+                    && entry.expiresAt().isBefore(now);
+            case IN_PROGRESS -> entry.lockExpiresAt() != null
                     && entry.lockExpiresAt().isBefore(now)
                     && entry.expiresAt() != null
-                    && entry.expiresAt().isBefore(now)) {
-                return true;
-            }
-            return entry.status() == Status.FAILED
-                    && entry.expiresAt() != null
                     && entry.expiresAt().isBefore(now);
-        });
+        };
     }
 }

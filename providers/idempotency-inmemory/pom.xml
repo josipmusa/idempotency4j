@@ -24,6 +24,7 @@
             <groupId>io.github.josipmusa</groupId>
             <artifactId>idempotency-test</artifactId>
             <version>${project.version}</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 

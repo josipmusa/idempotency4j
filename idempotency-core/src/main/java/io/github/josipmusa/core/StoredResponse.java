@@ -28,6 +28,7 @@ public record StoredResponse(int statusCode, Map<String, List<String>> headers, 
     public StoredResponse {
         Objects.requireNonNull(headers, "headers must not be null");
         Objects.requireNonNull(body, "body must not be null");
+        Objects.requireNonNull(completedAt, "completedAt must not be null");
         headers = headers.entrySet().stream()
                 .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, e -> List.copyOf(e.getValue())));
         body = body.clone();

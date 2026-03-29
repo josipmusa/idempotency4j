@@ -1,3 +1,6 @@
+-- MySQL dialect. For PostgreSQL, replace:
+--   BLOB          -> BYTEA
+--   CURRENT_TIMESTAMP(6)  -> CURRENT_TIMESTAMP
 CREATE TABLE IF NOT EXISTS idempotency_records (
     idempotency_key   VARCHAR(255)  NOT NULL,
     status            VARCHAR(20)   NOT NULL,
