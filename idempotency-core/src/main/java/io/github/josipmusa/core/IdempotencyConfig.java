@@ -23,11 +23,13 @@ public final class IdempotencyConfig {
     private final Duration defaultTtl;
     private final Duration defaultLockTimeout;
     private final boolean keyRequired;
+    private final String keyHeader;
 
     private IdempotencyConfig(Builder builder) {
         this.defaultTtl = builder.defaultTtl;
         this.defaultLockTimeout = builder.defaultLockTimeout;
         this.keyRequired = builder.keyRequired;
+        this.keyHeader = builder.keyHeader;
     }
 
     public static Builder builder() {
@@ -50,10 +52,15 @@ public final class IdempotencyConfig {
         return keyRequired;
     }
 
+    public String keyHeader() {
+        return keyHeader;
+    }
+
     public static final class Builder {
         private Duration defaultTtl = Duration.ofHours(24);
         private Duration defaultLockTimeout = Duration.ofSeconds(10);
         private boolean keyRequired = true;
+        private String keyHeader = "Idempotency-Key";
 
         public Builder defaultTtl(Duration ttl) {
             Objects.requireNonNull(ttl, "defaultTtl must not be null");
@@ -72,6 +79,11 @@ public final class IdempotencyConfig {
             return this;
         }
 
+        public Builder keyHeader(String keyHeader) {
+            this.keyHeader = keyHeader;
+            return this;
+        }
+
         public IdempotencyConfig build() {
             if (defaultTtl.isZero() || defaultTtl.isNegative()) {
                 throw new IllegalArgumentException("defaultTtl must be positive, got: " + defaultTtl);
@@ -80,6 +92,9 @@ public final class IdempotencyConfig {
                 throw new IllegalArgumentException(
                         "defaultLockTimeout must be at least 2ms (engine divides by 2 for heartbeat interval), got: "
                                 + defaultLockTimeout);
+            }
+            if (keyHeader == null || keyHeader.isBlank()) {
+                throw new IllegalArgumentException("keyHeader must not be blank");
             }
             return new IdempotencyConfig(this);
         }
