@@ -12,6 +12,7 @@
         <module>providers/idempotency-inmemory</module>
         <module>providers/idempotency-jdbc</module>
         <module>idempotency-test</module>
+        <module>idempotency-spring</module>
     </modules>
     <version>0.0.1-SNAPSHOT</version>
     <description>Idempotency Java Library</description>
@@ -25,6 +26,7 @@
         <junit-jupiter.version>5.11.4</junit-jupiter.version>
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.14.2</mockito.version>
+        <spring.version>6.2.3</spring.version>
     </properties>
 
     <dependencyManagement>
@@ -43,6 +45,16 @@
                 <groupId>org.mockito</groupId>
                 <artifactId>mockito-core</artifactId>
                 <version>${mockito.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-webmvc</artifactId>
+                <version>${spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-test</artifactId>
+                <version>${spring.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
