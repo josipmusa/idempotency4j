@@ -1,6 +1,7 @@
 package io.github.josipmusa.idempotency.spring;
 
 import io.github.josipmusa.core.IdempotencyConfig;
+import java.lang.reflect.Method;
 import java.time.DateTimeException;
 import java.time.Duration;
 import java.util.HashMap;
@@ -24,7 +25,7 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
 
     private final RequestMappingHandlerMapping handlerMapping;
     private final IdempotencyConfig config;
-    private volatile Map<HandlerMethod, ResolvedIdempotent> cache = Map.of();
+    private volatile Map<Method, ResolvedIdempotent> cache = Map.of();
 
     public IdempotentHandlerRegistry(RequestMappingHandlerMapping handlerMapping, IdempotencyConfig config) {
         this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
@@ -33,14 +34,15 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
 
     @Override
     public void afterSingletonsInstantiated() {
-        Map<HandlerMethod, ResolvedIdempotent> builtAnnotationCache = new HashMap<>();
-        handlerMapping.getHandlerMethods().forEach((info, method) -> {
-            Idempotent annotation = method.getMethodAnnotation(Idempotent.class);
+        Map<Method, ResolvedIdempotent> builtAnnotationCache = new HashMap<>();
+        handlerMapping.getHandlerMethods().forEach((info, handlerMethod) -> {
+            Idempotent annotation = handlerMethod.getMethodAnnotation(Idempotent.class);
             if (annotation == null) return;
 
-            Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl(), method);
+            Method method = handlerMethod.getMethod();
+            Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl(), handlerMethod);
             Duration lockTimeout =
-                    parseDuration(annotation.lockTimeout(), "lockTimeout", config.defaultLockTimeout(), method);
+                    parseDuration(annotation.lockTimeout(), "lockTimeout", config.defaultLockTimeout(), handlerMethod);
             builtAnnotationCache.put(method, new ResolvedIdempotent(annotation, ttl, lockTimeout));
         });
         this.cache = Map.copyOf(builtAnnotationCache);
@@ -48,7 +50,7 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
 
     @Nullable
     public ResolvedIdempotent resolve(HandlerMethod handlerMethod) {
-        return cache.get(handlerMethod);
+        return cache.get(handlerMethod.getMethod());
     }
 
     private static Duration parseDuration(String raw, String attribute, Duration defaultValue, HandlerMethod method) {

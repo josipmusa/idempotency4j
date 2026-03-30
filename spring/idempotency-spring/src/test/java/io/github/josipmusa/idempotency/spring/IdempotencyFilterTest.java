@@ -10,6 +10,7 @@ import io.github.josipmusa.core.*;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.http.HttpServletResponse;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -55,6 +56,7 @@ class IdempotencyFilterTest {
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
         when(handlerMapping.getHandler(request)).thenReturn(chain);
+        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
 
         filter.doFilter(request, response, filterChain);
 
@@ -274,6 +276,7 @@ class IdempotencyFilterTest {
         HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
 
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
+        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
         registry.afterSingletonsInstantiated();
         when(handlerMapping.getHandler(request)).thenReturn(chain);
     }

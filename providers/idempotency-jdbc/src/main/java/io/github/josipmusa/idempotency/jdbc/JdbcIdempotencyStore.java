@@ -32,6 +32,8 @@ import javax.sql.DataSource;
  * stealing and blocking. Compatible with any database that supports
  * row-level locking (MySQL, PostgreSQL, etc.).
  *
+ * <p>Initializes schema by default</p>
+ *
  * <p>No Spring dependencies — only requires a {@link DataSource}.
  *
  * <p><strong>Database compatibility:</strong> The bundled schema
@@ -106,7 +108,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private final long pollIntervalMs;
 
     public JdbcIdempotencyStore(DataSource dataSource) {
-        this(dataSource, false);
+        this(dataSource, true);
     }
 
     public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema) {
@@ -192,6 +194,80 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
 
         return AcquireResult.lockTimeout(context.key());
+    }
+
+    @Override
+    public void complete(String key, StoredResponse response, Duration ttl) {
+        Instant now = Instant.now();
+        try (Connection conn = dataSource.getConnection()) {
+            try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
+                ps.setInt(1, response.statusCode());
+                ps.setString(2, headersToJson(response.headers()));
+                ps.setBytes(3, response.body());
+                ps.setTimestamp(4, Timestamp.from(now));
+                ps.setTimestamp(5, Timestamp.from(now.plus(ttl)));
+                ps.setString(6, key);
+                int updated = ps.executeUpdate();
+                if (updated == 0) {
+                    throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, "complete"));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IdempotencyStoreException("Failed to complete key '" + key + "'", e);
+        }
+    }
+
+    @Override
+    public void release(String key) {
+        try (Connection conn = dataSource.getConnection()) {
+            try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
+                ps.setString(1, key);
+                int updated = ps.executeUpdate();
+                if (updated == 0) {
+                    throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, "release"));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IdempotencyStoreException("Failed to release key '" + key + "'", e);
+        }
+    }
+
+    @Override
+    public void extendLock(String key, Duration extension) {
+        Instant newExpiry = Instant.now().plus(extension);
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(EXTEND_LOCK)) {
+            ps.setTimestamp(1, Timestamp.from(newExpiry));
+            ps.setString(2, key);
+            ps.executeUpdate();
+            // Silently ignore if no rows updated — heartbeat may fire after completion
+        } catch (SQLException e) {
+            throw new IdempotencyStoreException("Failed to extend lock for key '" + key + "'", e);
+        }
+    }
+
+    /**
+     * Deletes stale records from the database in a single query.
+     *
+     * <p>Removes COMPLETE and FAILED rows whose {@code expires_at} is in
+     * the past, and IN_PROGRESS rows where both {@code lock_expires_at}
+     * and {@code expires_at} are in the past.
+     *
+     * @return the number of rows deleted
+     */
+    public int purgeExpired() {
+        Instant now = Instant.now();
+        Timestamp ts = Timestamp.from(now);
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
+            ps.setTimestamp(1, ts);
+            ps.setTimestamp(2, ts);
+            ps.setTimestamp(3, ts);
+            ps.setTimestamp(4, ts);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IdempotencyStoreException("Failed to purge expired records", e);
+        }
     }
 
     /**
@@ -287,80 +363,6 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static boolean isStale(Timestamp lockExpiresTs) {
         return lockExpiresTs != null && lockExpiresTs.toInstant().isBefore(Instant.now());
-    }
-
-    @Override
-    public void complete(String key, StoredResponse response, Duration ttl) {
-        Instant now = Instant.now();
-        try (Connection conn = dataSource.getConnection()) {
-            try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
-                ps.setInt(1, response.statusCode());
-                ps.setString(2, headersToJson(response.headers()));
-                ps.setBytes(3, response.body());
-                ps.setTimestamp(4, Timestamp.from(now));
-                ps.setTimestamp(5, Timestamp.from(now.plus(ttl)));
-                ps.setString(6, key);
-                int updated = ps.executeUpdate();
-                if (updated == 0) {
-                    throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, "complete"));
-                }
-            }
-        } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to complete key '" + key + "'", e);
-        }
-    }
-
-    @Override
-    public void release(String key) {
-        try (Connection conn = dataSource.getConnection()) {
-            try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
-                ps.setString(1, key);
-                int updated = ps.executeUpdate();
-                if (updated == 0) {
-                    throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, "release"));
-                }
-            }
-        } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to release key '" + key + "'", e);
-        }
-    }
-
-    @Override
-    public void extendLock(String key, Duration extension) {
-        Instant newExpiry = Instant.now().plus(extension);
-        try (Connection conn = dataSource.getConnection();
-                PreparedStatement ps = conn.prepareStatement(EXTEND_LOCK)) {
-            ps.setTimestamp(1, Timestamp.from(newExpiry));
-            ps.setString(2, key);
-            ps.executeUpdate();
-            // Silently ignore if no rows updated — heartbeat may fire after completion
-        } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to extend lock for key '" + key + "'", e);
-        }
-    }
-
-    /**
-     * Deletes stale records from the database in a single query.
-     *
-     * <p>Removes COMPLETE and FAILED rows whose {@code expires_at} is in
-     * the past, and IN_PROGRESS rows where both {@code lock_expires_at}
-     * and {@code expires_at} are in the past.
-     *
-     * @return the number of rows deleted
-     */
-    public int purgeExpired() {
-        Instant now = Instant.now();
-        Timestamp ts = Timestamp.from(now);
-        try (Connection conn = dataSource.getConnection();
-                PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
-            ps.setTimestamp(1, ts);
-            ps.setTimestamp(2, ts);
-            ps.setTimestamp(3, ts);
-            ps.setTimestamp(4, ts);
-            return ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to purge expired records", e);
-        }
     }
 
     /**
