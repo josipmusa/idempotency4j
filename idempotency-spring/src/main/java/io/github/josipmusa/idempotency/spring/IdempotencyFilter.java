@@ -1,5 +1,7 @@
 package io.github.josipmusa.idempotency.spring;
 
+import static io.github.josipmusa.idempotency.spring.IdempotentHandlerRegistry.*;
+
 import io.github.josipmusa.core.ExecutionResult;
 import io.github.josipmusa.core.IdempotencyConfig;
 import io.github.josipmusa.core.IdempotencyContext;
@@ -12,18 +14,16 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.time.DateTimeException;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.springframework.lang.NonNull;
+import org.springframework.lang.Nullable;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerExecutionChain;
@@ -47,36 +47,45 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private static final String ERROR_MISSING_KEY = "Idempotency-Key header is required";
     private static final String ERROR_KEY_TOO_LONG = "Idempotency-Key must not exceed 255 characters";
     private static final String ERROR_LOCK_TIMEOUT = "Request with this key is already being processed";
+
     private final IdempotencyEngine engine;
     private final IdempotencyStore store;
     private final IdempotencyConfig config;
     private final RequestMappingHandlerMapping handlerMapping;
+    private final IdempotentHandlerRegistry registry;
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
             IdempotencyStore store,
             IdempotencyConfig config,
-            RequestMappingHandlerMapping handlerMapping) {
+            RequestMappingHandlerMapping handlerMapping,
+            IdempotentHandlerRegistry registry) {
         this.engine = Objects.requireNonNull(engine, "engine must not be null");
         this.store = Objects.requireNonNull(store, "store must not be null");
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
+        this.registry = Objects.requireNonNull(registry, "registry must not be null");
     }
 
     @Override
     protected void doFilterInternal(
             @NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull FilterChain chain)
             throws ServletException, IOException {
-        Idempotent annotation = resolveAnnotation(request);
-        if (annotation == null) {
+        HandlerMethod handlerMethod = resolveHandlerMethod(request);
+        if (handlerMethod == null) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        ResolvedIdempotent resolvedIdempotent = registry.resolve(handlerMethod);
+        if (resolvedIdempotent == null) {
             chain.doFilter(request, response);
             return;
         }
 
         String key = request.getHeader(config.keyHeader());
         if (key == null || key.isBlank()) {
-            // annotation.required() is authoritative here; config.keyRequired() is for the starter layer
-            if (annotation.required()) {
+            if (resolvedIdempotent.annotation().required()) {
                 writeJsonError(response, 422, ERROR_MISSING_KEY);
                 return;
             }
@@ -84,11 +93,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             return;
         }
 
-        Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl());
-        Duration lockTimeout = parseDuration(annotation.lockTimeout(), "lockTimeout", config.defaultLockTimeout());
         IdempotencyContext context;
         try {
-            context = new IdempotencyContext(key, ttl, lockTimeout);
+            context = new IdempotencyContext(key, resolvedIdempotent.ttl(), resolvedIdempotent.lockTimeout());
         } catch (IllegalArgumentException e) {
             writeJsonError(response, 422, ERROR_KEY_TOO_LONG);
             return;
@@ -129,14 +136,21 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             case ExecutionResult.Duplicate d -> {
                 StoredResponse stored = d.response();
                 response.setStatus(stored.statusCode());
-                stored.headers().forEach((name, values) -> values.forEach(value -> response.addHeader(name, value)));
+                stored.headers().forEach((name, values) -> {
+                    if (name.equalsIgnoreCase("content-type")) {
+                        response.setContentType(values.getFirst());
+                    } else {
+                        values.forEach(value -> response.addHeader(name, value));
+                    }
+                });
                 response.setHeader(HEADER_IDEMPOTENT_REPLAYED, "true");
                 response.getOutputStream().write(stored.body());
             }
         }
     }
 
-    private Idempotent resolveAnnotation(HttpServletRequest request) {
+    @Nullable
+    private HandlerMethod resolveHandlerMethod(HttpServletRequest request) {
         HandlerExecutionChain handlerChain;
         try {
             handlerChain = handlerMapping.getHandler(request);
@@ -147,23 +161,28 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                     e);
             return null;
         }
-        if (handlerChain == null || !(handlerChain.getHandler() instanceof HandlerMethod handlerMethod)) {
+        if (handlerChain == null || !(handlerChain.getHandler() instanceof HandlerMethod hm)) {
             return null;
         }
-        return handlerMethod.getMethodAnnotation(Idempotent.class);
+        return hm;
     }
 
     private Map<String, List<String>> collectHeaders(ContentCachingResponseWrapper response) {
         Map<String, List<String>> headers = new HashMap<>();
-        response.getHeaderNames()
-                .forEach(
-                        name -> headers.put(name.toLowerCase(Locale.ROOT), new ArrayList<>(response.getHeaders(name))));
+        response.getHeaderNames().forEach(name -> headers.put(name, new ArrayList<>(response.getHeaders(name))));
+
+        // Content-Type may be set directly on the response, not surfaced via getHeaderNames()
+        String contentType = response.getContentType();
+        if (contentType != null && headers.keySet().stream().noneMatch(k -> k.equalsIgnoreCase("content-type"))) {
+            headers.put("Content-Type", List.of(contentType));
+        }
         return headers;
     }
 
     private void writeJsonError(HttpServletResponse response, int status, String message) throws IOException {
         response.setStatus(status);
         response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
         response.getWriter().write("{\"error\": \"" + escapeJson(message) + "\"}");
     }
 
@@ -172,30 +191,5 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                 .replace("\"", "\\\"")
                 .replace("\n", "\\n")
                 .replace("\r", "\\r");
-    }
-
-    /**
-     * Parses an ISO-8601 duration string from an {@link Idempotent} annotation attribute.
-     * Returns {@code defaultValue} when {@code raw} is empty.
-     *
-     * <p>Validation is lazy — an invalid duration string will not be caught until the first
-     * request hits the annotated handler. The {@link IllegalArgumentException} propagates
-     * uncaught, signalling a configuration error in the annotation.
-     *
-     * @throws IllegalArgumentException if {@code raw} is non-empty but not a valid ISO-8601 duration
-     */
-    private static Duration parseDuration(String raw, String attributeName, Duration defaultValue) {
-        if (raw.isEmpty()) {
-            return defaultValue;
-        }
-        try {
-            return Duration.parse(raw);
-        } catch (DateTimeException e) {
-            throw new IllegalArgumentException(
-                    "@Idempotent(" + attributeName + " = \"" + raw
-                            + "\") is not a valid ISO-8601 duration (e.g. \"PT10S\", \"PT1H\"): "
-                            + e.getMessage(),
-                    e);
-        }
     }
 }

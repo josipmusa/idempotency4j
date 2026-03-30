@@ -6,16 +6,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
-import io.github.josipmusa.core.ExecutionResult;
-import io.github.josipmusa.core.IdempotencyConfig;
-import io.github.josipmusa.core.IdempotencyEngine;
-import io.github.josipmusa.core.IdempotencyStore;
-import io.github.josipmusa.core.StoredResponse;
-import io.github.josipmusa.core.ThrowingRunnable;
+import io.github.josipmusa.core.*;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.http.HttpServletResponse;
-import java.lang.annotation.Annotation;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -26,14 +20,15 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerExecutionChain;
+import org.springframework.web.servlet.mvc.method.RequestMappingInfo;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 class IdempotencyFilterTest {
 
     private IdempotencyEngine engine;
     private IdempotencyStore store;
-    private IdempotencyConfig config;
     private RequestMappingHandlerMapping handlerMapping;
+    private IdempotentHandlerRegistry registry;
     private IdempotencyFilter filter;
 
     private MockHttpServletRequest request;
@@ -44,58 +39,15 @@ class IdempotencyFilterTest {
     void setUp() {
         engine = mock(IdempotencyEngine.class);
         store = mock(IdempotencyStore.class);
-        config = IdempotencyConfig.defaults();
         handlerMapping = mock(RequestMappingHandlerMapping.class);
-        filter = new IdempotencyFilter(engine, store, config, handlerMapping);
+        IdempotencyConfig idempotencyConfig = IdempotencyConfig.defaults();
+        registry = new IdempotentHandlerRegistry(handlerMapping, idempotencyConfig);
+        filter = new IdempotencyFilter(engine, store, idempotencyConfig, handlerMapping, registry);
 
         request = new MockHttpServletRequest();
         response = new MockHttpServletResponse();
         filterChain = mock(FilterChain.class);
     }
-
-    // ---- helpers ----
-
-    private void setupAnnotatedHandler(Idempotent annotation) throws Exception {
-        HandlerMethod handlerMethod = mock(HandlerMethod.class);
-        when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(annotation);
-        HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
-        when(handlerMapping.getHandler(request)).thenReturn(chain);
-    }
-
-    private Idempotent annotation(boolean required) {
-        return annotation(required, "", "");
-    }
-
-    private Idempotent annotation(boolean required, String ttl, String lockTimeout) {
-        return new Idempotent() {
-            @Override
-            public String ttl() {
-                return ttl;
-            }
-
-            @Override
-            public String lockTimeout() {
-                return lockTimeout;
-            }
-
-            @Override
-            public boolean required() {
-                return required;
-            }
-
-            @Override
-            public Class<? extends Annotation> annotationType() {
-                return Idempotent.class;
-            }
-        };
-    }
-
-    private StoredResponse storedResponse() {
-        return new StoredResponse(
-                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"1\"}".getBytes(), Instant.now());
-    }
-
-    // ---- tests ----
 
     @Test
     void nonAnnotatedHandler_proceedsNormally() throws Exception {
@@ -112,19 +64,19 @@ class IdempotencyFilterTest {
 
     @Test
     void missingKeyAndRequired_returns422() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
 
         filter.doFilter(request, response, filterChain);
 
         assertThat(response.getStatus()).isEqualTo(422);
         assertThat(response.getContentAsString()).isEqualTo("{\"error\": \"Idempotency-Key header is required\"}");
-        assertThat(response.getContentType()).isEqualTo("application/json");
+        assertThat(response.getContentType()).isEqualTo("application/json;charset=UTF-8");
         verifyNoInteractions(engine);
     }
 
     @Test
     void missingKeyAndNotRequired_proceedsNormally() throws Exception {
-        setupAnnotatedHandler(annotation(false));
+        setupAnnotatedHandler(AnnotationHelper.annotation(false));
 
         filter.doFilter(request, response, filterChain);
 
@@ -134,7 +86,7 @@ class IdempotencyFilterTest {
 
     @Test
     void executedResult_storesResponseAndCopiesBody() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
 
         doAnswer(invocation -> {
@@ -146,7 +98,7 @@ class IdempotencyFilterTest {
                 .execute(any(), any());
 
         doAnswer(invocation -> {
-                    HttpServletResponse resp = (HttpServletResponse) invocation.getArgument(1);
+                    HttpServletResponse resp = invocation.getArgument(1);
                     resp.setStatus(201);
                     resp.setContentType("application/json");
                     resp.getWriter().write("{\"id\":\"1\"}");
@@ -164,7 +116,7 @@ class IdempotencyFilterTest {
 
     @Test
     void annotationTtlOverride_passesCustomTtlToStore() throws Exception {
-        setupAnnotatedHandler(annotation(true, "PT2H", ""));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true, "PT2H", ""));
         request.addHeader("Idempotency-Key", "test-key");
 
         doAnswer(invocation -> {
@@ -181,19 +133,8 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void annotationInvalidTtl_throwsIllegalArgumentException() throws Exception {
-        setupAnnotatedHandler(annotation(true, "2h", ""));
-        request.addHeader("Idempotency-Key", "test-key");
-
-        assertThatThrownBy(() -> filter.doFilter(request, response, filterChain))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("@Idempotent(ttl = \"2h\")")
-                .hasMessageContaining("PT");
-    }
-
-    @Test
     void duplicateResult_replaysStoredResponse() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         StoredResponse stored = storedResponse();
         when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(stored));
@@ -206,7 +147,7 @@ class IdempotencyFilterTest {
 
     @Test
     void duplicateResult_setsReplayedHeader() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse()));
 
@@ -217,7 +158,7 @@ class IdempotencyFilterTest {
 
     @Test
     void lockTimeoutException_returns503() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         when(engine.execute(any(), any()))
                 .thenThrow(new IdempotencyLockTimeoutException("test-key", Duration.ofSeconds(10)));
@@ -227,12 +168,12 @@ class IdempotencyFilterTest {
         assertThat(response.getStatus()).isEqualTo(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
         assertThat(response.getContentAsString())
                 .isEqualTo("{\"error\": \"Request with this key is already being processed\"}");
-        assertThat(response.getContentType()).isEqualTo("application/json");
+        assertThat(response.getContentType()).isEqualTo("application/json;charset=UTF-8");
     }
 
     @Test
     void actionThrows_releaseIsCalledByEngine() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         RuntimeException actionException = new RuntimeException("action failed");
         when(engine.execute(any(), any())).thenThrow(actionException);
@@ -245,7 +186,7 @@ class IdempotencyFilterTest {
 
     @Test
     void executedResult_storeCompleteThrows_bodyStillWritten() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
 
         doAnswer(invocation -> {
@@ -257,7 +198,7 @@ class IdempotencyFilterTest {
                 .execute(any(), any());
 
         doAnswer(invocation -> {
-                    HttpServletResponse resp = (HttpServletResponse) invocation.getArgument(1);
+                    HttpServletResponse resp = invocation.getArgument(1);
                     resp.setStatus(200);
                     resp.setContentType("application/json");
                     resp.getWriter().write("{\"id\":\"1\"}");
@@ -276,7 +217,7 @@ class IdempotencyFilterTest {
 
     @Test
     void executedResult_storeCompleteThrows_retryBeforeLockExpiry_receives503() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
 
         doAnswer(invocation -> {
@@ -288,7 +229,7 @@ class IdempotencyFilterTest {
                 .execute(any(), any());
 
         doAnswer(invocation -> {
-                    HttpServletResponse resp = (HttpServletResponse) invocation.getArgument(1);
+                    HttpServletResponse resp = invocation.getArgument(1);
                     resp.setStatus(200);
                     resp.getWriter().write("{}");
                     return null;
@@ -316,7 +257,7 @@ class IdempotencyFilterTest {
 
     @Test
     void keyTooLong_returns422() throws Exception {
-        setupAnnotatedHandler(annotation(true));
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "k".repeat(256));
 
         filter.doFilter(request, response, filterChain);
@@ -327,14 +268,18 @@ class IdempotencyFilterTest {
         verifyNoInteractions(engine);
     }
 
-    @Test
-    void annotationInvalidLockTimeout_throwsIllegalArgumentException() throws Exception {
-        setupAnnotatedHandler(annotation(true, "", "10s"));
-        request.addHeader("Idempotency-Key", "test-key");
+    private void setupAnnotatedHandler(Idempotent annotation) throws Exception {
+        HandlerMethod handlerMethod = mock(HandlerMethod.class);
+        when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(annotation);
+        HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
 
-        assertThatThrownBy(() -> filter.doFilter(request, response, filterChain))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("@Idempotent(lockTimeout = \"10s\")")
-                .hasMessageContaining("PT");
+        when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
+        registry.afterSingletonsInstantiated();
+        when(handlerMapping.getHandler(request)).thenReturn(chain);
+    }
+
+    private StoredResponse storedResponse() {
+        return new StoredResponse(
+                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"1\"}".getBytes(), Instant.now());
     }
 }
