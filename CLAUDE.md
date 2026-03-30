@@ -25,8 +25,8 @@ idempotency4j/
 │   └── idempotency-redis/   Redis implementation of IdempotencyStore.
 │                            Depends on core only. No Spring dependency.
 ├── idempotency-spring/      Spring MVC adapter. Depends on core +
-│                            Spring Web + Spring AOP. Contains
-│                            @Idempotent annotation and interceptor.
+│                            Spring Web. Contains @Idempotent annotation
+│                            and filter.
 └── idempotency-spring-boot-starter/  Autoconfiguration. Wires everything
                              together based on classpath detection.
 ```
@@ -40,7 +40,7 @@ These rules are strict. Do not violate them.
 - `idempotency-jdbc` depends on core only — no Spring
 - `idempotency-redis` depends on core only — no Spring
 - `idempotency-test` depends on idempotency-inmemory + JUnit 5 + AssertJ
-- `idempotency-spring` depends on core + Spring Web + Spring AOP
+- `idempotency-spring` depends on core + Spring Web
 - `idempotency-spring-boot-starter` depends on spring module + providers
 
 When adding dependencies to pom.xml - first think about where the version managing belongs.

@@ -63,15 +63,19 @@ class IdempotencyFilterTest {
     }
 
     private Idempotent annotation(boolean required) {
+        return annotation(required, "", "");
+    }
+
+    private Idempotent annotation(boolean required, String ttl, String lockTimeout) {
         return new Idempotent() {
             @Override
             public String ttl() {
-                return "";
+                return ttl;
             }
 
             @Override
             public String lockTimeout() {
-                return "";
+                return lockTimeout;
             }
 
             @Override
@@ -107,12 +111,12 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void missingKeyAndRequired_returns400() throws Exception {
+    void missingKeyAndRequired_returns422() throws Exception {
         setupAnnotatedHandler(annotation(true));
 
         filter.doFilter(request, response, filterChain);
 
-        assertThat(response.getStatus()).isEqualTo(HttpServletResponse.SC_BAD_REQUEST);
+        assertThat(response.getStatus()).isEqualTo(422);
         assertThat(response.getContentAsString()).isEqualTo("{\"error\": \"Idempotency-Key header is required\"}");
         assertThat(response.getContentType()).isEqualTo("application/json");
         verifyNoInteractions(engine);
@@ -156,6 +160,35 @@ class IdempotencyFilterTest {
         verify(store).complete(eq("test-key"), any(StoredResponse.class), any(Duration.class));
         assertThat(response.getContentAsString()).isEqualTo("{\"id\":\"1\"}");
         assertThat(response.getStatus()).isEqualTo(201);
+    }
+
+    @Test
+    void annotationTtlOverride_passesCustomTtlToStore() throws Exception {
+        setupAnnotatedHandler(annotation(true, "PT2H", ""));
+        request.addHeader("Idempotency-Key", "test-key");
+
+        doAnswer(invocation -> {
+                    ThrowingRunnable action = invocation.getArgument(1);
+                    action.run();
+                    return ExecutionResult.executed();
+                })
+                .when(engine)
+                .execute(any(), any());
+
+        filter.doFilter(request, response, filterChain);
+
+        verify(store).complete(eq("test-key"), any(StoredResponse.class), eq(Duration.ofHours(2)));
+    }
+
+    @Test
+    void annotationInvalidTtl_throwsIllegalArgumentException() throws Exception {
+        setupAnnotatedHandler(annotation(true, "2h", ""));
+        request.addHeader("Idempotency-Key", "test-key");
+
+        assertThatThrownBy(() -> filter.doFilter(request, response, filterChain))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("@Idempotent(ttl = \"2h\")")
+                .hasMessageContaining("PT");
     }
 
     @Test
