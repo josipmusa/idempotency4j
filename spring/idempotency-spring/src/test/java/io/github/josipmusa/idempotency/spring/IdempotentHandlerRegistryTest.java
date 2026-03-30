@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.core.IdempotencyConfig;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -74,6 +75,8 @@ class IdempotentHandlerRegistryTest {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
+        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+
         registry.afterSingletonsInstantiated();
 
         assertThat(registry.resolve(handlerMethod)).isNull();
@@ -83,6 +86,7 @@ class IdempotentHandlerRegistryTest {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(annotation);
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
+        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
         return handlerMethod;
     }
 }
