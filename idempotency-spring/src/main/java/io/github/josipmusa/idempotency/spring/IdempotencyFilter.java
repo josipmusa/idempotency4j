@@ -19,7 +19,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-
 import org.springframework.lang.NonNull;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.method.HandlerMethod;
@@ -57,7 +56,8 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     }
 
     @Override
-    protected void doFilterInternal(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull FilterChain chain)
+    protected void doFilterInternal(
+            @NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull FilterChain chain)
             throws ServletException, IOException {
         Idempotent annotation = resolveAnnotation(request);
         if (annotation == null) {
@@ -87,10 +87,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         try {
             result = engine.execute(context, () -> chain.doFilter(request, wrappedResponse));
         } catch (IdempotencyLockTimeoutException e) {
-            writeJsonError(
-                    response,
-                    HttpServletResponse.SC_SERVICE_UNAVAILABLE,
-                    ERROR_LOCK_TIMEOUT);
+            writeJsonError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, ERROR_LOCK_TIMEOUT);
             return;
         } catch (ServletException | IOException | RuntimeException e) {
             throw e;
