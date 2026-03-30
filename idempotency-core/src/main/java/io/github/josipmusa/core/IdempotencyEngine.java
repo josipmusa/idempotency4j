@@ -65,8 +65,12 @@ public final class IdempotencyEngine {
      *   <li>Capturing the HTTP response produced by the action</li>
      *   <li>Calling {@link IdempotencyStore#complete} with that response</li>
      * </ol>
-     * Failure to complete will leave the key IN_PROGRESS until the lock expires,
-     * at which point a subsequent request will steal the lock and re-execute.
+     * If {@code complete} throws after a successful execution, the response has
+     * already been produced and should still be sent to the client. The key
+     * remains IN_PROGRESS until the lock expires. Any retry from the same client
+     * before expiry will receive {@link IdempotencyLockTimeoutException} (503),
+     * consistent with the concurrent-request behavior. Once the lock expires, the
+     * next caller steals it and re-executes the action.
      *
      * @param context fully resolved idempotency context (key, ttl, lockTimeout)
      * @param action  the business logic to execute — only runs for new keys
@@ -86,6 +90,14 @@ public final class IdempotencyEngine {
         };
     }
 
+    /**
+     * Runs the action with an active heartbeat and releases the lock if the action throws.
+     *
+     * <p>The {@link ScheduledExecutorService} is intentionally <em>not</em> owned by the engine.
+     * Callers should share a single scheduler across all engine instances and shut it down when
+     * the application stops (e.g., via a Spring {@code @PreDestroy} method or a
+     * {@link java.io.Closeable} wrapper).
+     */
     private ExecutionResult runWithHeartbeat(IdempotencyContext context, ThrowingRunnable action) throws Exception {
         ScheduledFuture<?> heartbeat = startHeartbeat(context);
         try {

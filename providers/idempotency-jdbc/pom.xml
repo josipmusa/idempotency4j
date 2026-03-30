@@ -12,8 +12,6 @@
     </parent>
 
     <properties>
-        <testcontainers-mysql.version>1.20.4</testcontainers-mysql.version>
-        <testcontainers-junit-jupiter.version>1.20.4</testcontainers-junit-jupiter.version>
         <mysql-connector-j.version>9.1.0</mysql-connector-j.version>
     </properties>
 
@@ -26,7 +24,6 @@
             <artifactId>idempotency-core</artifactId>
             <version>${project.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -38,6 +35,11 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>io.github.josipmusa</groupId>
             <artifactId>idempotency-test</artifactId>
             <version>${project.version}</version>
@@ -46,13 +48,11 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>mysql</artifactId>
-            <version>${testcontainers-mysql.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>${testcontainers-junit-jupiter.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>

@@ -1,10 +1,20 @@
 package io.github.josipmusa.idempotency.jdbc;
 
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import com.mysql.cj.jdbc.MysqlDataSource;
+import io.github.josipmusa.core.IdempotencyContext;
 import io.github.josipmusa.core.IdempotencyStore;
+import io.github.josipmusa.core.exception.IdempotencyStoreException;
 import io.github.josipmusa.idempotency.test.IdempotencyStoreContract;
+import java.sql.SQLException;
+import java.time.Duration;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -30,5 +40,21 @@ class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
     @Override
     protected IdempotencyStore store() {
         return new JdbcIdempotencyStore(dataSource);
+    }
+
+    @Test
+    void initSchema_calledTwice_doesNotThrow() {
+        assertThatCode(() -> new JdbcIdempotencyStore(dataSource, true)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void connectionExhausted_throwsIdempotencyStoreException() throws Exception {
+        DataSource exhaustedDs = mock(DataSource.class);
+        when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
+
+        JdbcIdempotencyStore failingStore = new JdbcIdempotencyStore(exhaustedDs);
+        IdempotencyContext context = new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5));
+
+        assertThatThrownBy(() -> failingStore.tryAcquire(context)).isInstanceOf(IdempotencyStoreException.class);
     }
 }
