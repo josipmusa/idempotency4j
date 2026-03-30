@@ -7,6 +7,9 @@
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency4j</artifactId>
     <packaging>pom</packaging>
+    <version>0.0.1-SNAPSHOT</version>
+    <description>Idempotency Java Library</description>
+
     <modules>
         <module>idempotency-core</module>
         <module>providers/idempotency-inmemory</module>
@@ -14,8 +17,6 @@
         <module>idempotency-test</module>
         <module>idempotency-spring</module>
     </modules>
-    <version>0.0.1-SNAPSHOT</version>
-    <description>Idempotency Java Library</description>
 
     <properties>
         <java.version>21</java.version>
