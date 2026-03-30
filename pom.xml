@@ -15,7 +15,7 @@
         <module>providers/idempotency-inmemory</module>
         <module>providers/idempotency-jdbc</module>
         <module>idempotency-test</module>
-        <module>idempotency-spring</module>
+        <module>spring/idempotency-spring</module>
     </modules>
 
     <properties>

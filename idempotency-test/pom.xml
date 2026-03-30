@@ -20,8 +20,6 @@
             <artifactId>idempotency-core</artifactId>
             <version>${project.version}</version>
         </dependency>
-
-
         <!-- JUnit 5 - compile scope because IdempotencyStoreContract is an abstract test class -->
         <!-- consumers need these on their test classpath -->
         <dependency>
@@ -29,7 +27,6 @@
             <artifactId>junit-jupiter</artifactId>
             <scope>compile</scope>
         </dependency>
-
         <!-- AssertJ for assertions inside the contract test class -->
         <dependency>
             <groupId>org.assertj</groupId>
