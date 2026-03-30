@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import org.apache.commons.logging.Log;
@@ -42,7 +43,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
     private static final Log log = LogFactory.getLog(IdempotencyFilter.class);
 
+    private static final String HEADER_IDEMPOTENT_REPLAYED = "Idempotent-Replayed";
     private static final String ERROR_MISSING_KEY = "Idempotency-Key header is required";
+    private static final String ERROR_KEY_TOO_LONG = "Idempotency-Key must not exceed 255 characters";
     private static final String ERROR_LOCK_TIMEOUT = "Request with this key is already being processed";
     private final IdempotencyEngine engine;
     private final IdempotencyStore store;
@@ -83,7 +86,13 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
         Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl());
         Duration lockTimeout = parseDuration(annotation.lockTimeout(), "lockTimeout", config.defaultLockTimeout());
-        IdempotencyContext context = new IdempotencyContext(key, ttl, lockTimeout);
+        IdempotencyContext context;
+        try {
+            context = new IdempotencyContext(key, ttl, lockTimeout);
+        } catch (IllegalArgumentException e) {
+            writeJsonError(response, 422, ERROR_KEY_TOO_LONG);
+            return;
+        }
 
         ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
         ExecutionResult result;
@@ -121,7 +130,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                 StoredResponse stored = d.response();
                 response.setStatus(stored.statusCode());
                 stored.headers().forEach((name, values) -> values.forEach(value -> response.addHeader(name, value)));
-                response.setHeader("X-Idempotent-Replayed", "true");
+                response.setHeader(HEADER_IDEMPOTENT_REPLAYED, "true");
                 response.getOutputStream().write(stored.body());
             }
         }
@@ -146,7 +155,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
     private Map<String, List<String>> collectHeaders(ContentCachingResponseWrapper response) {
         Map<String, List<String>> headers = new HashMap<>();
-        response.getHeaderNames().forEach(name -> headers.put(name, new ArrayList<>(response.getHeaders(name))));
+        response.getHeaderNames()
+                .forEach(
+                        name -> headers.put(name.toLowerCase(Locale.ROOT), new ArrayList<>(response.getHeaders(name))));
         return headers;
     }
 
@@ -166,6 +177,10 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     /**
      * Parses an ISO-8601 duration string from an {@link Idempotent} annotation attribute.
      * Returns {@code defaultValue} when {@code raw} is empty.
+     *
+     * <p>Validation is lazy — an invalid duration string will not be caught until the first
+     * request hits the annotated handler. The {@link IllegalArgumentException} propagates
+     * uncaught, signalling a configuration error in the annotation.
      *
      * @throws IllegalArgumentException if {@code raw} is non-empty but not a valid ISO-8601 duration
      */

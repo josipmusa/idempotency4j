@@ -41,7 +41,7 @@ class IdempotencyFilterTest {
     private FilterChain filterChain;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() {
         engine = mock(IdempotencyEngine.class);
         store = mock(IdempotencyStore.class);
         config = IdempotencyConfig.defaults();
@@ -212,7 +212,7 @@ class IdempotencyFilterTest {
 
         filter.doFilter(request, response, filterChain);
 
-        assertThat(response.getHeader("X-Idempotent-Replayed")).isEqualTo("true");
+        assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
     }
 
     @Test
@@ -241,5 +241,100 @@ class IdempotencyFilterTest {
                 .isSameAs(actionException);
 
         verify(store, never()).release(any());
+    }
+
+    @Test
+    void executedResult_storeCompleteThrows_bodyStillWritten() throws Exception {
+        setupAnnotatedHandler(annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+
+        doAnswer(invocation -> {
+                    ThrowingRunnable action = invocation.getArgument(1);
+                    action.run();
+                    return ExecutionResult.executed();
+                })
+                .when(engine)
+                .execute(any(), any());
+
+        doAnswer(invocation -> {
+                    HttpServletResponse resp = (HttpServletResponse) invocation.getArgument(1);
+                    resp.setStatus(200);
+                    resp.setContentType("application/json");
+                    resp.getWriter().write("{\"id\":\"1\"}");
+                    return null;
+                })
+                .when(filterChain)
+                .doFilter(any(), any());
+
+        doThrow(new RuntimeException("store unavailable")).when(store).complete(any(), any(), any());
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getContentAsString()).isEqualTo("{\"id\":\"1\"}");
+        assertThat(response.getStatus()).isEqualTo(200);
+    }
+
+    @Test
+    void executedResult_storeCompleteThrows_retryBeforeLockExpiry_receives503() throws Exception {
+        setupAnnotatedHandler(annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+
+        doAnswer(invocation -> {
+                    ThrowingRunnable action = invocation.getArgument(1);
+                    action.run();
+                    return ExecutionResult.executed();
+                })
+                .when(engine)
+                .execute(any(), any());
+
+        doAnswer(invocation -> {
+                    HttpServletResponse resp = (HttpServletResponse) invocation.getArgument(1);
+                    resp.setStatus(200);
+                    resp.getWriter().write("{}");
+                    return null;
+                })
+                .when(filterChain)
+                .doFilter(any(), any());
+
+        doThrow(new RuntimeException("store down")).when(store).complete(any(), any(), any());
+
+        filter.doFilter(request, response, filterChain);
+        assertThat(response.getStatus()).isEqualTo(200);
+
+        // Key is still IN_PROGRESS because complete failed — retry sees lock timeout
+        MockHttpServletResponse response2 = new MockHttpServletResponse();
+        doThrow(new IdempotencyLockTimeoutException("test-key", Duration.ofSeconds(10)))
+                .when(engine)
+                .execute(any(), any());
+
+        filter.doFilter(request, response2, filterChain);
+
+        assertThat(response2.getStatus()).isEqualTo(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+        assertThat(response2.getContentAsString())
+                .isEqualTo("{\"error\": \"Request with this key is already being processed\"}");
+    }
+
+    @Test
+    void keyTooLong_returns422() throws Exception {
+        setupAnnotatedHandler(annotation(true));
+        request.addHeader("Idempotency-Key", "k".repeat(256));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(422);
+        assertThat(response.getContentAsString())
+                .isEqualTo("{\"error\": \"Idempotency-Key must not exceed 255 characters\"}");
+        verifyNoInteractions(engine);
+    }
+
+    @Test
+    void annotationInvalidLockTimeout_throwsIllegalArgumentException() throws Exception {
+        setupAnnotatedHandler(annotation(true, "", "10s"));
+        request.addHeader("Idempotency-Key", "test-key");
+
+        assertThatThrownBy(() -> filter.doFilter(request, response, filterChain))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("@Idempotent(lockTimeout = \"10s\")")
+                .hasMessageContaining("PT");
     }
 }

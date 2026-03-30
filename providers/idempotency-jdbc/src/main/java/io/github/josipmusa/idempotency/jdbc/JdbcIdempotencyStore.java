@@ -67,7 +67,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     + "WHERE idempotency_key = ? AND status = 'IN_PROGRESS'";
 
     private static final String RELEASE =
-            "UPDATE idempotency_records SET status = 'FAILED', locked_at = NULL, lock_expires_at = NULL, "
+            "UPDATE idempotency_records SET status = 'FAILED', expires_at = lock_expires_at, locked_at = NULL, lock_expires_at = NULL, "
                     + "response_code = NULL, response_headers = NULL, response_body = NULL "
                     + "WHERE idempotency_key = ? AND status = 'IN_PROGRESS'";
 
@@ -124,6 +124,13 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
+    /**
+     * Executes the schema DDL from the bundled {@code idempotency-schema.sql} file. The schema
+     * uses {@code CREATE TABLE IF NOT EXISTS}, so calling this method more than once is safe.
+     *
+     * <p><strong>Note:</strong> the entire SQL file is executed as a single statement. If the
+     * schema ever grows to multiple statements, switch to executing each statement individually.
+     */
     private void initSchema() {
         try (InputStream is = getClass().getResourceAsStream("/idempotency-schema.sql")) {
             if (is == null) {
@@ -360,6 +367,10 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * Queries the current row state to build a precise error message when a {@code complete} or
      * {@code release} call finds no IN_PROGRESS row — distinguishing "key missing" from "key in
      * wrong state".
+     *
+     * <p><strong>Note:</strong> there is an inherent TOCTOU race between the failed UPDATE and
+     * this diagnostic SELECT. Another thread may change the key's state in between, so the
+     * message is best-effort and should only be used for logging or debugging, not control flow.
      */
     private String diagnoseMissingInProgress(Connection conn, String key, String operation) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(SELECT_STATUS)) {
@@ -379,10 +390,13 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         String headersJson = rs.getString("response_headers");
         byte[] body = rs.getBytes("response_body");
         Timestamp completedAtTs = rs.getTimestamp("completed_at");
+        if (completedAtTs == null) {
+            throw new IdempotencyStoreException("Completed request doesn't have completed_at value");
+        }
 
         Map<String, List<String>> headers = headersJson != null ? jsonToHeaders(headersJson) : Map.of();
         byte[] responseBody = body != null ? body : new byte[0];
-        Instant completedAt = completedAtTs != null ? completedAtTs.toInstant() : Instant.now();
+        Instant completedAt = completedAtTs.toInstant();
 
         return new StoredResponse(statusCode, headers, responseBody, completedAt);
     }

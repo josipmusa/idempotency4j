@@ -67,6 +67,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
 
     public InMemoryIdempotencyStore(Clock clock, Duration reaperInterval, long pollIntervalMs) {
         Objects.requireNonNull(reaperInterval, "reaper interval must not be null");
+        if (reaperInterval.isZero() || reaperInterval.isNegative()) {
+            throw new IllegalArgumentException("reaper interval must be positive");
+        }
         this.clock = Objects.requireNonNull(clock);
         if (pollIntervalMs <= 0) {
             throw new IllegalArgumentException("pollIntervalMs must be positive, got: " + pollIntervalMs);
@@ -198,9 +201,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
             case COMPLETE, FAILED -> entry.expiresAt() != null
                     && entry.expiresAt().isBefore(now);
             case IN_PROGRESS -> entry.lockExpiresAt() != null
-                    && entry.lockExpiresAt().isBefore(now)
-                    && entry.expiresAt() != null
-                    && entry.expiresAt().isBefore(now);
+                    && entry.lockExpiresAt().isBefore(now);
         };
     }
 }
