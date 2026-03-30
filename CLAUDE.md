@@ -240,5 +240,3 @@ This includes the explanations and the current implementation status.
 ### Not started — do not implement
 - providers/idempotency-redis
 - idempotency-spring-boot-starter
-
-claude --resume c1966137-a8ce-4a03-9a80-f251bf9953fe 
