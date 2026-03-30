@@ -27,6 +27,7 @@
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.14.2</mockito.version>
         <spring.version>6.2.3</spring.version>
+        <jakarta.servlet-api.version>6.1.0</jakarta.servlet-api.version>
     </properties>
 
     <dependencyManagement>
@@ -55,6 +56,12 @@
                 <groupId>org.springframework</groupId>
                 <artifactId>spring-test</artifactId>
                 <version>${spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>jakarta.servlet</groupId>
+                <artifactId>jakarta.servlet-api</artifactId>
+                <version>${jakarta.servlet-api.version}</version>
+                <scope>provided</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>

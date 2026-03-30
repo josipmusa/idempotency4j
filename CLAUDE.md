@@ -235,8 +235,10 @@ This includes the explanations and the current implementation status.
 - providers/idempotency-inmemory (InMemoryIdempotencyStore)
 - providers/idempotency-jdbc (JdbcIdempotencyStore with Testcontainers MySQL tests)
 - idempotency-test (IdempotencyStoreContract)
+- idempotency-spring (IdempotencyFilter + @Idempotent annotation)
 
 ### Not started — do not implement
 - providers/idempotency-redis
-- idempotency-spring
 - idempotency-spring-boot-starter
+
+claude --resume c1966137-a8ce-4a03-9a80-f251bf9953fe 
