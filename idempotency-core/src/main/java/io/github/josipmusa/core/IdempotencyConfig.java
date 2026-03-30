@@ -14,8 +14,12 @@ import java.util.Objects;
  * <ul>
  *   <li>{@code defaultTtl} = 24 hours — how long completed responses are kept</li>
  *   <li>{@code defaultLockTimeout} = 10 seconds — how long a second caller waits</li>
- *   <li>{@code keyRequired} = true — whether requests without an idempotency key
- *       should be rejected (true) or passed through without idempotency (false)</li>
+ *   <li>{@code keyRequired} = true — global default for whether requests without an idempotency
+ *       key should be rejected (true) or passed through without idempotency (false).
+ *       <strong>Note:</strong> the {@code idempotency-spring} adapter does <em>not</em> read this
+ *       field. The {@link io.github.josipmusa.idempotency.spring.Idempotent#required()} attribute
+ *       on each handler method is authoritative in that adapter. This field is reserved for the
+ *       starter layer, which will use it as the default for routes that lack the annotation.</li>
  * </ul>
  */
 public final class IdempotencyConfig {

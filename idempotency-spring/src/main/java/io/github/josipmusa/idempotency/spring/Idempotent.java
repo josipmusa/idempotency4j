@@ -1,5 +1,6 @@
 package io.github.josipmusa.idempotency.spring;
 
+import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -14,6 +15,7 @@ import java.lang.annotation.Target;
  * <p>Attribute values override {@link io.github.josipmusa.core.IdempotencyConfig} defaults
  * when non-empty.
  */
+@Documented
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 public @interface Idempotent {
@@ -31,7 +33,7 @@ public @interface Idempotent {
     String lockTimeout() default "";
 
     /**
-     * Whether a missing idempotency key header should be rejected with 400.
+     * Whether a missing idempotency key header should be rejected with 422 Unprocessable Entity.
      * When false, requests without a key pass through without idempotency enforcement.
      */
     boolean required() default true;
