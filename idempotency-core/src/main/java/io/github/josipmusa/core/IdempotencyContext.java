@@ -29,6 +29,7 @@ import java.util.Objects;
 public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout) {
 
     private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(2);
+    private static final int MAX_KEY_LENGTH = 255;
 
     public IdempotencyContext {
         Objects.requireNonNull(key, "key must not be null");
@@ -37,6 +38,9 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout)
 
         if (key.isBlank()) {
             throw new IllegalArgumentException("key must not be blank");
+        }
+        if (key.length() > MAX_KEY_LENGTH) {
+            throw new IllegalArgumentException("key length must be less than " + MAX_KEY_LENGTH);
         }
         if (ttl.isZero() || ttl.isNegative()) {
             throw new IllegalArgumentException("ttl must be positive");
