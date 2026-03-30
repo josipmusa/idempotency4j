@@ -19,6 +19,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+
+import org.springframework.lang.NonNull;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerExecutionChain;
@@ -36,6 +38,8 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
  */
 public class IdempotencyFilter extends OncePerRequestFilter {
 
+    private static final String ERROR_MISSING_KEY = "Idempotency-Key header is required";
+    private static final String ERROR_LOCK_TIMEOUT = "Request with this key is already being processed";
     private final IdempotencyEngine engine;
     private final IdempotencyStore store;
     private final IdempotencyConfig config;
@@ -53,7 +57,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     }
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+    protected void doFilterInternal(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull FilterChain chain)
             throws ServletException, IOException {
         Idempotent annotation = resolveAnnotation(request);
         if (annotation == null) {
@@ -63,8 +67,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
         String key = request.getHeader(config.keyHeader());
         if (key == null || key.isBlank()) {
+            // annotation.required() is authoritative here; config.keyRequired() is for the starter layer
             if (annotation.required()) {
-                writeJsonError(response, HttpServletResponse.SC_BAD_REQUEST, "Idempotency-Key header is required");
+                writeJsonError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_MISSING_KEY);
                 return;
             }
             chain.doFilter(request, response);
@@ -85,11 +90,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             writeJsonError(
                     response,
                     HttpServletResponse.SC_SERVICE_UNAVAILABLE,
-                    "Request with this key is already being processed");
+                    ERROR_LOCK_TIMEOUT);
             return;
-        } catch (ServletException | IOException e) {
-            throw e;
-        } catch (RuntimeException e) {
+        } catch (ServletException | IOException | RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new ServletException(e);

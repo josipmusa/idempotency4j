@@ -6,7 +6,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
-import io.github.josipmusa.core.AcquireResult;
 import io.github.josipmusa.core.ExecutionResult;
 import io.github.josipmusa.core.IdempotencyConfig;
 import io.github.josipmusa.core.IdempotencyEngine;
@@ -89,10 +88,7 @@ class IdempotencyFilterTest {
 
     private StoredResponse storedResponse() {
         return new StoredResponse(
-                200,
-                Map.of("Content-Type", List.of("application/json")),
-                "{\"id\":\"1\"}".getBytes(),
-                Instant.now());
+                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"1\"}".getBytes(), Instant.now());
     }
 
     // ---- tests ----
