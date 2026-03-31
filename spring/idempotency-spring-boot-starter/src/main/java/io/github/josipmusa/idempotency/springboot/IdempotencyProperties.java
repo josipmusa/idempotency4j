@@ -12,6 +12,7 @@ public class IdempotencyProperties {
     private Duration defaultTtl = Duration.ofHours(24);
     private Duration defaultLockTimeout = Duration.ofSeconds(10);
     private int filterOrder = Ordered.HIGHEST_PRECEDENCE + 1;
+    private Purge purge = new Purge();
 
     public String getKeyHeader() {
         return keyHeader;
@@ -51,5 +52,35 @@ public class IdempotencyProperties {
 
     public void setFilterOrder(int filterOrder) {
         this.filterOrder = filterOrder;
+    }
+
+    public Purge getPurge() {
+        return purge;
+    }
+
+    public void setPurge(Purge purge) {
+        this.purge = purge;
+    }
+
+    public static class Purge {
+
+        private boolean enabled = true;
+        private String cron = "0 0 * * * *";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getCron() {
+            return cron;
+        }
+
+        public void setCron(String cron) {
+            this.cron = cron;
+        }
     }
 }
