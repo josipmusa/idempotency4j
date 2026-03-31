@@ -1,5 +1,8 @@
 package io.github.josipmusa.idempotency.jdbc;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.core.AcquireResult;
 import io.github.josipmusa.core.IdempotencyContext;
 import io.github.josipmusa.core.IdempotencyStore;
@@ -19,8 +22,6 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -109,6 +110,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private final DataSource dataSource;
     private final long pollIntervalMs;
     private final Clock clock;
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
 
     public JdbcIdempotencyStore(DataSource dataSource) {
         this(dataSource, true);
@@ -467,153 +470,24 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    // --- JSON serialization (no external library) ---
+    // --- JSON serialization ---
 
     static String headersToJson(Map<String, List<String>> headers) {
-        StringBuilder sb = new StringBuilder();
-        sb.append('{');
-        boolean firstEntry = true;
-        for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
-            if (!firstEntry) {
-                sb.append(',');
-            }
-            firstEntry = false;
-            sb.append('"');
-            escapeJson(sb, entry.getKey());
-            sb.append("\":[");
-            boolean firstVal = true;
-            for (String val : entry.getValue()) {
-                if (!firstVal) {
-                    sb.append(',');
-                }
-                firstVal = false;
-                sb.append('"');
-                escapeJson(sb, val);
-                sb.append('"');
-            }
-            sb.append(']');
+        try {
+            return OBJECT_MAPPER.writeValueAsString(headers);
+        } catch (JsonProcessingException e) {
+            throw new IdempotencyStoreException("Failed to serialize response headers to JSON", e);
         }
-        sb.append('}');
-        return sb.toString();
     }
 
     static Map<String, List<String>> jsonToHeaders(String json) {
-        Map<String, List<String>> result = new LinkedHashMap<>();
         if (json == null || json.equals("{}")) {
-            return result;
+            return Map.of();
         }
-        // Strip outer braces
-        String inner = json.substring(1, json.length() - 1).trim();
-        if (inner.isEmpty()) {
-            return result;
+        try {
+            return OBJECT_MAPPER.readValue(json, HEADERS_TYPE);
+        } catch (JsonProcessingException e) {
+            throw new IdempotencyStoreException("Failed to deserialize response headers from JSON", e);
         }
-        int pos = 0;
-        while (pos < inner.length()) {
-            // Read key
-            pos = inner.indexOf('"', pos) + 1;
-            int keyEnd = findUnescapedQuote(inner, pos);
-            String key = unescapeJson(inner.substring(pos, keyEnd));
-            pos = keyEnd + 1;
-            // Skip ':'
-            pos = inner.indexOf(':', pos) + 1;
-            // Skip '['
-            pos = inner.indexOf('[', pos) + 1;
-            // Read values
-            List<String> values = new ArrayList<>();
-            while (pos < inner.length() && inner.charAt(pos) != ']') {
-                if (inner.charAt(pos) == ',') {
-                    pos++;
-                }
-                if (inner.charAt(pos) == '"') {
-                    pos++;
-                    int valEnd = findUnescapedQuote(inner, pos);
-                    values.add(unescapeJson(inner.substring(pos, valEnd)));
-                    pos = valEnd + 1;
-                }
-            }
-            pos++; // skip ']'
-            result.put(key, List.copyOf(values));
-            // Skip comma if present
-            if (pos < inner.length() && inner.charAt(pos) == ',') {
-                pos++;
-            }
-        }
-        return Map.copyOf(result);
-    }
-
-    private static void escapeJson(StringBuilder sb, String value) {
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            switch (c) {
-                case '"' -> sb.append("\\\"");
-                case '\\' -> sb.append("\\\\");
-                case '\n' -> sb.append("\\n");
-                case '\r' -> sb.append("\\r");
-                case '\t' -> sb.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        sb.append(c);
-                    }
-                }
-            }
-        }
-    }
-
-    private static int findUnescapedQuote(String s, int from) {
-        for (int i = from; i < s.length(); i++) {
-            if (s.charAt(i) == '\\') {
-                i++; // skip escaped character
-            } else if (s.charAt(i) == '"') {
-                return i;
-            }
-        }
-        return s.length();
-    }
-
-    private static String unescapeJson(String s) {
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '\\' && i + 1 < s.length()) {
-                char next = s.charAt(i + 1);
-                switch (next) {
-                    case '"' -> {
-                        sb.append('"');
-                        i++;
-                    }
-                    case '\\' -> {
-                        sb.append('\\');
-                        i++;
-                    }
-                    case 'n' -> {
-                        sb.append('\n');
-                        i++;
-                    }
-                    case 'r' -> {
-                        sb.append('\r');
-                        i++;
-                    }
-                    case 't' -> {
-                        sb.append('\t');
-                        i++;
-                    }
-                    case 'u' -> {
-                        if (i + 5 <= s.length()) {
-                            String hex = s.substring(i + 2, i + 6);
-                            sb.append((char) Integer.parseInt(hex, 16));
-                            i += 5;
-                        } else {
-                            sb.append(c);
-                        }
-                    }
-                    default -> sb.append(c);
-                }
-            } else {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
     }
 }

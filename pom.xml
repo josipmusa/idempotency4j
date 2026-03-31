@@ -34,6 +34,7 @@
         <testcontainers-mysql.version>1.20.4</testcontainers-mysql.version>
         <testcontainers-postgresql.version>1.20.4</testcontainers-postgresql.version>
         <testcontainers-junit-jupiter.version>1.20.4</testcontainers-junit-jupiter.version>
+        <jackson.version>2.18.2</jackson.version>
     </properties>
 
     <dependencyManagement>
@@ -74,6 +75,11 @@
                 <groupId>jakarta.servlet</groupId>
                 <artifactId>jakarta.servlet-api</artifactId>
                 <version>${jakarta.servlet-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.testcontainers</groupId>

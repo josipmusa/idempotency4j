@@ -246,4 +246,17 @@ class IdempotencyEngineTest {
         // Heartbeat should never have started
         verify(store, never()).extendLock(any(), any());
     }
+
+    @Test
+    void When_HeartbeatExtendLockThrows_Expect_HeartbeatContinues() throws Exception {
+        IdempotencyContext context =
+                new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100));
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any());
+
+        engine.execute(context, () -> Thread.sleep(300));
+
+        // Heartbeat should have been called multiple times despite throwing each time
+        verify(store, atLeast(2)).extendLock(eq("hb-error-key"), eq(Duration.ofMillis(100)));
+    }
 }
