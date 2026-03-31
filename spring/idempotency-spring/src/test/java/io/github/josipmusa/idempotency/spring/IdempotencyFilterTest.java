@@ -65,6 +65,21 @@ class IdempotencyFilterTest {
     }
 
     @Test
+    void When_NonAnnotatedHandlerWithIdempotencyKey_Expect_ProceedsNormally() throws Exception {
+        HandlerMethod handlerMethod = mock(HandlerMethod.class);
+        when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
+        HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
+        when(handlerMapping.getHandler(request)).thenReturn(chain);
+        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        request.addHeader("Idempotency-Key", "test-key");
+
+        filter.doFilter(request, response, filterChain);
+
+        verify(filterChain).doFilter(request, response);
+        verifyNoInteractions(engine);
+    }
+
+    @Test
     void When_MissingKeyAndRequired_Expect_Returns422() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
 
@@ -156,6 +171,20 @@ class IdempotencyFilterTest {
         filter.doFilter(request, response, filterChain);
 
         assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
+    }
+
+    @Test
+    void When_DuplicateResponseReplayed_Expect_ContentLengthSet() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        byte[] body = "hello".getBytes();
+        StoredResponse stored =
+                new StoredResponse(200, Map.of("Content-Type", List.of("application/json")), body, Instant.now());
+        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(stored));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getContentLength()).isEqualTo(body.length);
     }
 
     @Test

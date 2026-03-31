@@ -28,17 +28,16 @@ public class IdempotencyAutoConfiguration {
     IdempotencyConfig idempotencyConfig(IdempotencyProperties idempotencyProperties) {
         return IdempotencyConfig.builder()
                 .keyHeader(idempotencyProperties.getKeyHeader())
-                .keyRequired(idempotencyProperties.isKeyRequired())
                 .defaultTtl(idempotencyProperties.getDefaultTtl())
                 .defaultLockTimeout(idempotencyProperties.getDefaultLockTimeout())
                 .build();
     }
 
-    @Bean
+    @Bean(destroyMethod = "shutdownNow")
     @ConditionalOnMissingBean(name = "idempotencyScheduler")
     public ScheduledExecutorService idempotencyScheduler() {
         return Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "idempotency-lock-cleanup");
+            Thread t = new Thread(r, "idempotency-heartbeat");
             t.setDaemon(true);
             return t;
         });

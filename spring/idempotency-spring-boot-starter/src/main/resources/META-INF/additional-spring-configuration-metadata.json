@@ -1,0 +1,40 @@
+{
+  "properties": [
+    {
+      "name": "idempotency.key-header",
+      "type": "java.lang.String",
+      "description": "HTTP header name used to carry the idempotency key.",
+      "defaultValue": "Idempotency-Key"
+    },
+    {
+      "name": "idempotency.default-ttl",
+      "type": "java.time.Duration",
+      "description": "Default time-to-live for stored idempotency records. After this duration, records become eligible for purging.",
+      "defaultValue": "24h"
+    },
+    {
+      "name": "idempotency.default-lock-timeout",
+      "type": "java.time.Duration",
+      "description": "Maximum duration to wait when acquiring a lock for an in-flight idempotency key.",
+      "defaultValue": "10s"
+    },
+    {
+      "name": "idempotency.filter-order",
+      "type": "java.lang.Integer",
+      "description": "Order of the idempotency servlet filter in the filter chain. Lower values execute earlier.",
+      "defaultValue": -2147483647
+    },
+    {
+      "name": "idempotency.purge.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether automatic purging of expired idempotency records is enabled.",
+      "defaultValue": true
+    },
+    {
+      "name": "idempotency.purge.cron",
+      "type": "java.lang.String",
+      "description": "Cron expression controlling how often expired idempotency records are purged.",
+      "defaultValue": "0 0 * * * *"
+    }
+  ]
+}

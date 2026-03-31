@@ -40,7 +40,7 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout)
             throw new IllegalArgumentException("key must not be blank");
         }
         if (key.length() > MAX_KEY_LENGTH) {
-            throw new IllegalArgumentException("key length must be less than " + MAX_KEY_LENGTH);
+            throw new IllegalArgumentException("key length must not exceed " + MAX_KEY_LENGTH + " characters");
         }
         if (ttl.isZero() || ttl.isNegative()) {
             throw new IllegalArgumentException("ttl must be positive");

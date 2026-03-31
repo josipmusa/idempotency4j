@@ -1,5 +1,6 @@
 package io.github.josipmusa.idempotency.jdbc;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -10,17 +11,23 @@ import io.github.josipmusa.core.IdempotencyContext;
 import io.github.josipmusa.core.IdempotencyStore;
 import io.github.josipmusa.core.exception.IdempotencyStoreException;
 import io.github.josipmusa.idempotency.test.IdempotencyStoreContract;
+import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 @Testcontainers
-class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
+class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
 
     @Container
     static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0").withDatabaseName("idempotency_test");
@@ -35,6 +42,14 @@ class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
         ds.setPassword(MYSQL.getPassword());
         dataSource = ds;
         new JdbcIdempotencyStore(dataSource, true);
+    }
+
+    @BeforeEach
+    void cleanTable() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("DELETE FROM idempotency_records");
+        }
     }
 
     @Override
@@ -56,5 +71,12 @@ class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
         IdempotencyContext context = new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5));
 
         assertThatThrownBy(() -> failingStore.tryAcquire(context)).isInstanceOf(IdempotencyStoreException.class);
+    }
+
+    @Test
+    void When_CustomClockProvided_Expect_StoreConstructsSuccessfully() {
+        Clock fixedClock = Clock.fixed(Instant.parse("2025-01-01T00:00:00Z"), ZoneOffset.UTC);
+        var store = new JdbcIdempotencyStore(dataSource, true, 100L, fixedClock);
+        assertThat(store).isNotNull();
     }
 }
