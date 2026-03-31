@@ -13,11 +13,7 @@ import org.springframework.scheduling.support.CronExpression;
 
 @AutoConfiguration(after = IdempotencyAutoConfiguration.class)
 @ConditionalOnBean(IdempotencyStore.class)
-@ConditionalOnProperty(
-        prefix = "idempotency.purge",
-        name = "enabled",
-        havingValue = "true",
-        matchIfMissing = true)
+@ConditionalOnProperty(prefix = "idempotency.purge", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(IdempotencyProperties.class)
 public class IdempotencyPurgeAutoConfiguration {
 
@@ -30,8 +26,7 @@ public class IdempotencyPurgeAutoConfiguration {
         try {
             CronExpression.parse(cron);
         } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException(
-                    "Invalid idempotency.purge.cron value: '" + cron + "'");
+            throw new IllegalArgumentException("Invalid idempotency.purge.cron value: '" + cron + "'");
         }
         return taskRegistrar -> taskRegistrar.addCronTask(
                 () -> {

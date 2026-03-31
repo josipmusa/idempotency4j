@@ -27,7 +27,7 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
-    void invalidTtl_throwsIllegalStateException() {
+    void When_InvalidTtl_Expect_ThrowsIllegalStateException() {
         setupHandler(AnnotationHelper.annotation(true, "2h", ""));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
@@ -37,7 +37,7 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
-    void invalidLockTimeout_throwsIllegalStateException() {
+    void When_InvalidLockTimeout_Expect_ThrowsIllegalStateException() {
         setupHandler(AnnotationHelper.annotation(true, "", "10s"));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
@@ -47,7 +47,7 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
-    void validAnnotation_resolvesCorrectDurations() {
+    void When_ValidAnnotation_Expect_ResolvesCorrectDurations() {
         HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "PT2H", "PT30S"));
         registry.afterSingletonsInstantiated();
 
@@ -59,7 +59,7 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
-    void emptyDurations_fallBackToConfigDefaults() {
+    void When_EmptyDurations_Expect_FallBackToConfigDefaults() {
         HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "", ""));
         registry.afterSingletonsInstantiated();
 
@@ -71,7 +71,7 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
-    void nonAnnotatedHandler_notRegistered() {
+    void When_NonAnnotatedHandler_Expect_NotRegistered() {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));

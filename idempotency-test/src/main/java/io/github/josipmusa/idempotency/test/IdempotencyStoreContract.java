@@ -39,14 +39,14 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void newKey_returnsAcquired() {
+    void When_NewKey_Expect_ReturnsAcquired() {
         AcquireResult result = store().tryAcquire(contextFor("new-key"));
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
     }
 
     @Test
-    void completedKey_returnsDuplicateWithCorrectResponse() {
+    void When_CompletedKey_Expect_ReturnsDuplicateWithCorrectResponse() {
         IdempotencyStore s = store();
         String key = "complete-key";
         StoredResponse response = sampleResponse();
@@ -64,7 +64,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void releasedKey_canBeAcquiredAgain() {
+    void When_ReleasedKey_Expect_CanBeAcquiredAgain() {
         IdempotencyStore s = store();
         String key = "release-key";
 
@@ -77,7 +77,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void expiredKey_treatedAsNew() throws InterruptedException {
+    void When_ExpiredKey_Expect_TreatedAsNew() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "expired-key";
 
@@ -92,7 +92,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void staleLock_isStolen() throws InterruptedException {
+    void When_StaleLock_Expect_IsStolen() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "stale-key";
 
@@ -107,7 +107,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void inFlightKey_blocksAndReturnsDuplicateAfterCompletion() throws Exception {
+    void When_InFlightKey_Expect_BlocksAndReturnsDuplicateAfterCompletion() throws Exception {
         IdempotencyStore s = store();
         String key = "inflight-key";
         StoredResponse response = sampleResponse();
@@ -151,7 +151,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void inFlightKey_lockTimeoutExceeded_returnsLockTimeout() throws Exception {
+    void When_InFlightKeyLockTimeoutExceeded_Expect_ReturnsLockTimeout() throws Exception {
         IdempotencyStore s = store();
         String key = "timeout-key";
 
@@ -185,7 +185,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void concurrentRequests_onlyOneAcquires() throws Exception {
+    void When_ConcurrentRequests_Expect_OnlyOneAcquires() throws Exception {
         IdempotencyStore s = store();
         String key = "concurrent-key";
         StoredResponse response = sampleResponse();
@@ -247,7 +247,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void differentKeys_acquireIndependently() throws Exception {
+    void When_DifferentKeys_Expect_AcquireIndependently() throws Exception {
         IdempotencyStore s = store();
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -266,7 +266,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void releaseAllowsRetry_actionCanSucceedOnSecondAttempt() {
+    void When_ReleaseAllowsRetry_Expect_ActionCanSucceedOnSecondAttempt() {
         IdempotencyStore s = store();
         String key = "retry-key";
         StoredResponse response = sampleResponse();
@@ -292,7 +292,7 @@ public abstract class IdempotencyStoreContract {
     // --- extendLock contract ---
 
     @Test
-    void extendLock_inProgressKey_preventsLockFromBeingStolen() throws Exception {
+    void When_ExtendLockInProgressKey_Expect_LockNotStolen() throws Exception {
         IdempotencyStore s = store();
         String key = "extend-key";
 
@@ -320,7 +320,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void extendLock_unknownKey_silentlyIgnored() {
+    void When_ExtendLockUnknownKey_Expect_SilentlyIgnored() {
         IdempotencyStore s = store();
 
         // Must not throw — heartbeat may fire after key is already gone
@@ -328,7 +328,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void extendLock_completedKey_silentlyIgnored() {
+    void When_ExtendLockCompletedKey_Expect_SilentlyIgnored() {
         IdempotencyStore s = store();
         String key = "completed-extend-key";
         StoredResponse response = sampleResponse();
@@ -347,7 +347,7 @@ public abstract class IdempotencyStoreContract {
     // --- TTL durability ---
 
     @Test
-    void completedKey_returnsDuplicateWithinTtlWindow() {
+    void When_CompletedKeyWithinTtl_Expect_ReturnsDuplicate() {
         IdempotencyStore s = store();
         String key = "ttl-durable-key";
         StoredResponse response = sampleResponse();
@@ -366,7 +366,7 @@ public abstract class IdempotencyStoreContract {
     // --- Error contracts ---
 
     @Test
-    void completeOnNonExistentKey_throwsStoreException() {
+    void When_CompleteOnNonExistentKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
 
         assertThatThrownBy(() -> s.complete("ghost-key", sampleResponse(), Duration.ofHours(1)))
@@ -374,7 +374,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void completeOnReleasedKey_throwsStoreException() {
+    void When_CompleteOnReleasedKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
         String key = "failed-key";
 
@@ -386,14 +386,14 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void releaseOnNonExistentKey_throwsStoreException() {
+    void When_ReleaseOnNonExistentKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
 
         assertThatThrownBy(() -> s.release("ghost-key")).isInstanceOf(IdempotencyStoreException.class);
     }
 
     @Test
-    void completeOnCompletedKey_throwsStoreException() {
+    void When_CompleteOnCompletedKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
         String key = "double-complete-key";
 
@@ -405,7 +405,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void releaseOnCompletedKey_throwsStoreException() {
+    void When_ReleaseOnCompletedKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
         String key = "release-completed-key";
 
@@ -418,7 +418,7 @@ public abstract class IdempotencyStoreContract {
     // --- Full lifecycle ---
 
     @Test
-    void fullLifecycle_acquireCompleteTtlExpiresReacquireCompletes() throws InterruptedException {
+    void When_FullLifecycle_Expect_AcquireCompleteTtlExpiresReacquireCompletes() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "lifecycle-key";
 
@@ -452,7 +452,7 @@ public abstract class IdempotencyStoreContract {
     // --- Additional edge-case contracts ---
 
     @Test
-    void extendLock_failedKey_silentlyIgnored() {
+    void When_ExtendLockFailedKey_Expect_SilentlyIgnored() {
         IdempotencyStore s = store();
         String key = "failed-extend-key";
 
@@ -464,7 +464,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void releaseOnReleasedKey_throwsStoreException() {
+    void When_ReleaseOnReleasedKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
         String key = "double-release-key";
 
@@ -475,7 +475,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void failedKeyUnderContention_timeoutRespected() throws Exception {
+    void When_FailedKeyUnderContention_Expect_TimeoutRespected() throws Exception {
         IdempotencyStore s = store();
         String key = "contended-failed-key";
         int chaosThreadCount = 20;
@@ -517,7 +517,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void acquiredKey_secondAcquireTimesOut() {
+    void When_AcquiredKey_Expect_SecondAcquireTimesOut() {
         IdempotencyStore s = store();
         String key = "self-deadlock-key";
 

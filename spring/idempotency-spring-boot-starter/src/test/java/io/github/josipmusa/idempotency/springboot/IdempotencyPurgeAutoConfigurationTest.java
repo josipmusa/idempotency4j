@@ -47,7 +47,9 @@ class IdempotencyPurgeAutoConfigurationTest {
                 .withPropertyValues("idempotency.purge.cron=0 0 12 * * *")
                 .run(context -> {
                     assertThat(context).hasSingleBean(SchedulingConfigurer.class);
-                    assertThat(context.getBean(IdempotencyProperties.class).getPurge().getCron())
+                    assertThat(context.getBean(IdempotencyProperties.class)
+                                    .getPurge()
+                                    .getCron())
                             .isEqualTo("0 0 12 * * *");
                 });
     }
@@ -70,17 +72,15 @@ class IdempotencyPurgeAutoConfigurationTest {
         IdempotencyStore throwingStore = mock(IdempotencyStore.class);
         doThrow(new RuntimeException("DB connection lost")).when(throwingStore).purgeExpired();
 
-        contextRunner
-                .withBean(IdempotencyStore.class, () -> throwingStore)
-                .run(context -> {
-                    SchedulingConfigurer configurer = context.getBean(SchedulingConfigurer.class);
-                    ScheduledTaskRegistrar registrar = mock(ScheduledTaskRegistrar.class);
-                    configurer.configureTasks(registrar);
+        contextRunner.withBean(IdempotencyStore.class, () -> throwingStore).run(context -> {
+            SchedulingConfigurer configurer = context.getBean(SchedulingConfigurer.class);
+            ScheduledTaskRegistrar registrar = mock(ScheduledTaskRegistrar.class);
+            configurer.configureTasks(registrar);
 
-                    ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
-                    verify(registrar).addCronTask(taskCaptor.capture(), anyString());
+            ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
+            verify(registrar).addCronTask(taskCaptor.capture(), anyString());
 
-                    assertThatCode(() -> taskCaptor.getValue().run()).doesNotThrowAnyException();
-                });
+            assertThatCode(() -> taskCaptor.getValue().run()).doesNotThrowAnyException();
+        });
     }
 }

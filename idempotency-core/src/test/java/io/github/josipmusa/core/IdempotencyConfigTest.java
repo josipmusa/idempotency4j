@@ -8,19 +8,19 @@ import org.junit.jupiter.api.Test;
 class IdempotencyConfigTest {
 
     @Test
-    void defaults_keyHeaderIsIdempotencyKey() {
+    void When_DefaultsUsed_Expect_KeyHeaderIsIdempotencyKey() {
         assertThat(IdempotencyConfig.defaults().keyHeader()).isEqualTo("Idempotency-Key");
     }
 
     @Test
-    void builder_customKeyHeader() {
+    void When_CustomKeyHeaderSet_Expect_KeyHeaderIsCustom() {
         IdempotencyConfig config =
                 IdempotencyConfig.builder().keyHeader("X-Request-Id").build();
         assertThat(config.keyHeader()).isEqualTo("X-Request-Id");
     }
 
     @Test
-    void builder_blankKeyHeader_throws() {
+    void When_BlankKeyHeaderProvided_Expect_ThrowsIllegalArgumentException() {
         assertThatThrownBy(() -> IdempotencyConfig.builder().keyHeader("  ").build())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("keyHeader must not be blank");
