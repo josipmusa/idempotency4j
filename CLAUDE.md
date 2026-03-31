@@ -118,6 +118,10 @@ Fully resolved at construction. No optionals, no nulls.
 Built by the adapter using `IdempotencyConfig` defaults +
 annotation/request values before being passed to the engine.
 
+Fields: `key`, `ttl`, `lockTimeout`, `requestFingerprint`.
+The `requestFingerprint` is a SHA-256 hex digest of the request body,
+computed by the adapter layer (`RequestFingerprint.of(body)`).
+
 ### `IdempotencyConfig`
 
 Holds defaults (ttl, lockTimeout, keyHeader, keyRequired).
@@ -139,6 +143,9 @@ module, stop. The design is wrong.
 
 COMPLETE keys return `Duplicate` on subsequent `tryAcquire` calls
 until TTL expires, after which they are treated as new.
+
+COMPLETE keys return `FingerprintMismatch` when the incoming request
+fingerprint differs from the one stored with the original request.
 
 IN_PROGRESS keys whose `lockExpiresAt` is in the past are considered
 stale and can be stolen by the next `tryAcquire` caller.
@@ -253,6 +260,20 @@ Push with `git push -u origin <branch>` and create the PR with `gh pr create`.
 ## Instruction updating
 When you change any code, make sure to analyze if this document needs any changing and apply the changes.
 This includes the explanations and the current implementation status.
+
+## Request fingerprinting
+
+Every request's body is hashed (SHA-256) and stored alongside the
+idempotency key. When a subsequent request arrives with the same key
+but a different body hash, the store returns `FingerprintMismatch`
+instead of `Duplicate`, and the adapter returns HTTP 422.
+
+- **Computed in:** `RequestFingerprint.of(byte[] body)` in `idempotency-spring`
+- **Stored in:** `request_fingerprint VARCHAR(64)` column (JDBC) or
+  `requestFingerprint` field on `Entry` record (in-memory)
+- **Compared at:** store level in `tryAcquire()` when status is COMPLETE
+- **Engine mapping:** `FingerprintMismatch` → `IdempotencyFingerprintMismatchException`
+- **HTTP response:** 422 with `{"error": "Idempotency-Key reused with a different request body"}`
 
 ## Security considerations
 

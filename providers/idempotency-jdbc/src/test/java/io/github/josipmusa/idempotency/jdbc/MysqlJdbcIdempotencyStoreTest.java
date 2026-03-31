@@ -68,7 +68,8 @@ class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
         when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
 
         JdbcIdempotencyStore failingStore = new JdbcIdempotencyStore(exhaustedDs, false);
-        IdempotencyContext context = new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5));
+        IdempotencyContext context =
+                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "test-fingerprint");
 
         assertThatThrownBy(() -> failingStore.tryAcquire(context)).isInstanceOf(IdempotencyStoreException.class);
     }

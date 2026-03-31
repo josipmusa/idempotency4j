@@ -1,5 +1,6 @@
 package io.github.josipmusa.core;
 
+import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
@@ -87,6 +88,8 @@ public final class IdempotencyEngine {
             case AcquireResult.Duplicate d -> ExecutionResult.duplicate(d.response());
             case AcquireResult.LockTimeout ignored -> throw new IdempotencyLockTimeoutException(
                     context.key(), context.lockTimeout());
+            case AcquireResult.FingerprintMismatch fm -> throw new IdempotencyFingerprintMismatchException(
+                    context.key(), fm.storedFingerprint(), fm.receivedFingerprint());
         };
     }
 

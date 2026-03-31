@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import io.github.josipmusa.core.exception.IdempotencyStoreException;
 import java.io.IOException;
@@ -39,7 +40,7 @@ class IdempotencyEngineTest {
     }
 
     private IdempotencyContext defaultContext(String key) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5));
+        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), "test-fingerprint");
     }
 
     private StoredResponse anyStoredResponse() {
@@ -132,7 +133,8 @@ class IdempotencyEngineTest {
 
     @Test
     void When_LongRunningAction_Expect_HeartbeatExtendsLock() throws Exception {
-        IdempotencyContext context = new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100));
+        IdempotencyContext context =
+                new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         engine.execute(context, () -> Thread.sleep(300));
@@ -142,7 +144,8 @@ class IdempotencyEngineTest {
 
     @Test
     void When_ActionCompletes_Expect_HeartbeatStops() throws Exception {
-        IdempotencyContext context = new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100));
+        IdempotencyContext context =
+                new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         engine.execute(context, () -> {});
@@ -167,7 +170,7 @@ class IdempotencyEngineTest {
     @Test
     void When_ActionThrows_Expect_HeartbeatStops() throws Exception {
         IdempotencyContext context =
-                new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100));
+                new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         try {
@@ -190,6 +193,18 @@ class IdempotencyEngineTest {
                 .size();
 
         assertThat(countAfterWait).isEqualTo(countAfterExecute);
+    }
+
+    @Test
+    void When_FingerprintMismatch_Expect_ThrowsFingerprintMismatchException() throws Exception {
+        IdempotencyContext context = defaultContext("fp-mismatch-key");
+        when(store.tryAcquire(context)).thenReturn(AcquireResult.fingerprintMismatch("stored-hash", "received-hash"));
+
+        assertThatThrownBy(() -> engine.execute(context, () -> {}))
+                .isInstanceOf(IdempotencyFingerprintMismatchException.class)
+                .hasMessageContaining("fp-mismatch-key")
+                .hasMessageContaining("stored-hash")
+                .hasMessageContaining("received-hash");
     }
 
     // --- Context forwarding ---
@@ -250,7 +265,7 @@ class IdempotencyEngineTest {
     @Test
     void When_HeartbeatExtendLockThrows_Expect_HeartbeatContinues() throws Exception {
         IdempotencyContext context =
-                new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100));
+                new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
         doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any());
 
