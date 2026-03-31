@@ -254,6 +254,20 @@ Push with `git push -u origin <branch>` and create the PR with `gh pr create`.
 When you change any code, make sure to analyze if this document needs any changing and apply the changes.
 This includes the explanations and the current implementation status.
 
+## Security considerations
+
+The idempotency store persists full HTTP response bodies and headers.
+This may include sensitive data such as PII, authentication tokens,
+or financial information.
+
+For compliance-sensitive environments:
+- Enable encryption at rest on the backing database
+- Use short TTL values to limit the retention window of cached responses
+- Consider the scheduled purge feature (`idempotency.purge.cron`) to
+  remove expired entries promptly
+- Audit which endpoints are annotated with `@Idempotent` and whether
+  their responses contain sensitive data
+
 ## Current implementation status
 
 ### Complete

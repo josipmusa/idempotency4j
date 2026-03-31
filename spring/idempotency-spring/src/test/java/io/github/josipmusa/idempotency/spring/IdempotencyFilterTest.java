@@ -102,6 +102,29 @@ class IdempotencyFilterTest {
     }
 
     @Test
+    void When_BlankKeyAndRequired_Expect_Returns422() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "   ");
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(422);
+        assertThat(response.getContentAsString()).isEqualTo("{\"error\": \"Idempotency-Key header is required\"}");
+        verifyNoInteractions(engine);
+    }
+
+    @Test
+    void When_BlankKeyAndNotRequired_Expect_ProceedsNormally() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(false));
+        request.addHeader("Idempotency-Key", "   ");
+
+        filter.doFilter(request, response, filterChain);
+
+        verify(filterChain).doFilter(request, response);
+        verifyNoInteractions(engine);
+    }
+
+    @Test
     void When_ExecutedResult_Expect_StoresResponseAndCopiesBody() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
