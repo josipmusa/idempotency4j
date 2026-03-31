@@ -11,6 +11,7 @@
     <description>Idempotency Java Library</description>
 
     <modules>
+        <module>idempotency-bom</module>
         <module>idempotency-core</module>
         <module>providers/idempotency-inmemory</module>
         <module>providers/idempotency-jdbc</module>
@@ -28,9 +29,7 @@
         <junit-jupiter.version>5.11.4</junit-jupiter.version>
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.14.2</mockito.version>
-        <spring.version>6.2.3</spring.version>
         <spring-boot.version>3.5.6</spring-boot.version>
-        <jakarta.servlet-api.version>6.1.0</jakarta.servlet-api.version>
         <testcontainers-mysql.version>1.20.4</testcontainers-mysql.version>
         <testcontainers-postgresql.version>1.20.4</testcontainers-postgresql.version>
         <testcontainers-junit-jupiter.version>1.20.4</testcontainers-junit-jupiter.version>
@@ -55,26 +54,11 @@
                 <version>${mockito.version}</version>
             </dependency>
             <dependency>
-                <groupId>org.springframework</groupId>
-                <artifactId>spring-webmvc</artifactId>
-                <version>${spring.version}</version>
-            </dependency>
-            <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
                 <version>${spring-boot.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>org.springframework</groupId>
-                <artifactId>spring-test</artifactId>
-                <version>${spring.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>jakarta.servlet</groupId>
-                <artifactId>jakarta.servlet-api</artifactId>
-                <version>${jakarta.servlet-api.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
