@@ -25,8 +25,11 @@ import java.util.Objects;
  *                    initial lock expiration — if the holder crashes without
  *                    completing or releasing, the lock becomes stealable
  *                    after this duration.
+ * @param requestFingerprint a hash of the request body (e.g. SHA-256 hex).
+ *                           Used to detect when the same idempotency key is
+ *                           reused with a different request payload.
  */
-public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout) {
+public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout, String requestFingerprint) {
 
     private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(2);
     private static final int MAX_KEY_LENGTH = 255;
@@ -47,6 +50,10 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout)
         }
         if (lockTimeout.compareTo(MIN_LOCK_TIMEOUT) < 0) {
             throw new IllegalArgumentException("lockTimeout must be at least 2ms");
+        }
+        Objects.requireNonNull(requestFingerprint, "requestFingerprint must not be null");
+        if (requestFingerprint.isBlank()) {
+            throw new IllegalArgumentException("requestFingerprint must not be blank");
         }
     }
 }

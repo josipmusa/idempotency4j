@@ -10,11 +10,15 @@ package io.github.josipmusa.core;
  *     case AcquireResult.Acquired a   -> // run the action
  *     case AcquireResult.Duplicate d  -> // replay d.response()
  *     case AcquireResult.LockTimeout t -> // timeout, reject request
+ *     case AcquireResult.FingerprintMismatch fm -> // reject: key reused with different body
  * }
  * }</pre>
  */
 public sealed interface AcquireResult
-        permits AcquireResult.Acquired, AcquireResult.Duplicate, AcquireResult.LockTimeout {
+        permits AcquireResult.Acquired,
+                AcquireResult.Duplicate,
+                AcquireResult.LockTimeout,
+                AcquireResult.FingerprintMismatch {
 
     /**
      * Lock obtained — this caller owns the key and should execute the action.
@@ -36,6 +40,13 @@ public sealed interface AcquireResult
      */
     record LockTimeout(String key) implements AcquireResult {}
 
+    /**
+     * Key was already completed but the request fingerprint does not match
+     * the one stored with the original request. The caller should return
+     * HTTP 422 to indicate the key was reused with a different payload.
+     */
+    record FingerprintMismatch(String storedFingerprint, String receivedFingerprint) implements AcquireResult {}
+
     static AcquireResult acquired() {
         return new Acquired();
     }
@@ -46,5 +57,9 @@ public sealed interface AcquireResult
 
     static AcquireResult lockTimeout(String key) {
         return new LockTimeout(key);
+    }
+
+    static AcquireResult fingerprintMismatch(String storedFingerprint, String receivedFingerprint) {
+        return new FingerprintMismatch(storedFingerprint, receivedFingerprint);
     }
 }

@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.core.*;
+import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.http.HttpServletResponse;
@@ -320,6 +321,36 @@ class IdempotencyFilterTest {
         assertThat(response.getContentAsString())
                 .isEqualTo("{\"error\": \"Idempotency-Key must not exceed 255 characters\"}");
         verifyNoInteractions(engine);
+    }
+
+    @Test
+    void When_FingerprintMismatch_Expect_Returns422() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "key-1");
+        request.setContent("{\"amount\":100}".getBytes());
+        when(engine.execute(any(), any()))
+                .thenThrow(new IdempotencyFingerprintMismatchException("key-1", "stored-hash", "received-hash"));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(422);
+        assertThat(response.getContentAsString()).contains("Idempotency-Key reused with a different request body");
+    }
+
+    @Test
+    void When_SameBodyResubmitted_Expect_Replayed() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "key-1");
+        request.setContent("{\"amount\":100}".getBytes());
+
+        StoredResponse storedResponse = new StoredResponse(
+                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes(), Instant.now());
+        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(200);
+        assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
     }
 
     private void setupAnnotatedHandler(Idempotent annotation) throws Exception {

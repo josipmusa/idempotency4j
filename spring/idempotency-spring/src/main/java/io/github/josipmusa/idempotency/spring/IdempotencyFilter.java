@@ -8,6 +8,7 @@ import io.github.josipmusa.core.IdempotencyContext;
 import io.github.josipmusa.core.IdempotencyEngine;
 import io.github.josipmusa.core.IdempotencyStore;
 import io.github.josipmusa.core.StoredResponse;
+import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -28,6 +29,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerExecutionChain;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
+import org.springframework.web.util.ContentCachingRequestWrapper;
 import org.springframework.web.util.ContentCachingResponseWrapper;
 
 /**
@@ -47,6 +49,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private static final String ERROR_MISSING_KEY = "Idempotency-Key header is required";
     private static final String ERROR_KEY_TOO_LONG = "Idempotency-Key must not exceed 255 characters";
     private static final String ERROR_LOCK_TIMEOUT = "Request with this key is already being processed";
+    private static final String ERROR_FINGERPRINT_MISMATCH = "Idempotency-Key reused with a different request body";
 
     private final IdempotencyEngine engine;
     private final IdempotencyStore store;
@@ -93,9 +96,15 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             return;
         }
 
+        ContentCachingRequestWrapper wrappedRequest = new ContentCachingRequestWrapper(request);
+        // Force reading the body so ContentCachingRequestWrapper caches it
+        wrappedRequest.getInputStream().readAllBytes();
+        String fingerprint = RequestFingerprint.of(wrappedRequest.getContentAsByteArray());
+
         IdempotencyContext context;
         try {
-            context = new IdempotencyContext(key, resolvedIdempotent.ttl(), resolvedIdempotent.lockTimeout());
+            context = new IdempotencyContext(
+                    key, resolvedIdempotent.ttl(), resolvedIdempotent.lockTimeout(), fingerprint);
         } catch (IllegalArgumentException e) {
             writeJsonError(response, 422, ERROR_KEY_TOO_LONG);
             return;
@@ -104,7 +113,10 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
         ExecutionResult result;
         try {
-            result = engine.execute(context, () -> chain.doFilter(request, wrappedResponse));
+            result = engine.execute(context, () -> chain.doFilter(wrappedRequest, wrappedResponse));
+        } catch (IdempotencyFingerprintMismatchException e) {
+            writeJsonError(response, 422, ERROR_FINGERPRINT_MISMATCH);
+            return;
         } catch (IdempotencyLockTimeoutException e) {
             writeJsonError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, ERROR_LOCK_TIMEOUT);
             return;

@@ -52,17 +52,18 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             "DELETE FROM idempotency_records WHERE idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
 
     private static final String INSERT =
-            "INSERT INTO idempotency_records (idempotency_key, status, locked_at, lock_expires_at, expires_at) "
-                    + "VALUES (?, 'IN_PROGRESS', ?, ?, ?)";
+            "INSERT INTO idempotency_records (idempotency_key, status, locked_at, lock_expires_at, expires_at, request_fingerprint) "
+                    + "VALUES (?, 'IN_PROGRESS', ?, ?, ?, ?)";
 
     private static final String SELECT_FOR_UPDATE =
-            "SELECT status, lock_expires_at, response_code, response_headers, response_body, completed_at "
+            "SELECT status, lock_expires_at, response_code, response_headers, response_body, completed_at, request_fingerprint "
                     + "FROM idempotency_records WHERE idempotency_key = ? FOR UPDATE";
 
     private static final String SELECT_STATUS = "SELECT status FROM idempotency_records WHERE idempotency_key = ?";
 
     private static final String STEAL_LOCK =
             "UPDATE idempotency_records SET status = 'IN_PROGRESS', locked_at = ?, lock_expires_at = ?, "
+                    + "request_fingerprint = ?, "
                     + "response_code = NULL, response_headers = NULL, response_body = NULL, completed_at = NULL "
                     + "WHERE idempotency_key = ? AND (status = 'FAILED' OR (status = 'IN_PROGRESS' AND lock_expires_at < ?))";
 
@@ -338,6 +339,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 ins.setTimestamp(2, Timestamp.from(now));
                 ins.setTimestamp(3, Timestamp.from(now.plus(context.lockTimeout())));
                 ins.setTimestamp(4, Timestamp.from(now.plus(context.ttl())));
+                ins.setString(5, context.requestFingerprint());
                 ins.executeUpdate();
                 return true;
             } catch (SQLException e) {
@@ -385,6 +387,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 Timestamp lockExpiresTs = rs.getTimestamp("lock_expires_at");
 
                 if ("COMPLETE".equals(status)) {
+                    String storedFingerprint = rs.getString("request_fingerprint");
+                    if (storedFingerprint != null && !storedFingerprint.equals(context.requestFingerprint())) {
+                        return RowInspection.resolved(
+                                AcquireResult.fingerprintMismatch(storedFingerprint, context.requestFingerprint()));
+                    }
                     return RowInspection.resolved(AcquireResult.duplicate(readResponse(rs)));
                 }
 
@@ -403,8 +410,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try (PreparedStatement ps = conn.prepareStatement(STEAL_LOCK)) {
             ps.setTimestamp(1, Timestamp.from(now));
             ps.setTimestamp(2, Timestamp.from(now.plus(context.lockTimeout())));
-            ps.setString(3, context.key());
-            ps.setTimestamp(4, Timestamp.from(now));
+            ps.setString(3, context.requestFingerprint());
+            ps.setString(4, context.key());
+            ps.setTimestamp(5, Timestamp.from(now));
             return ps.executeUpdate() > 0;
         }
     }

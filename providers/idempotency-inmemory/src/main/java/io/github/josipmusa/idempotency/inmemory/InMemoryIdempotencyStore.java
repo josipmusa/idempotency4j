@@ -40,7 +40,12 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
      * {@code lockTimeout} is {@code null} for COMPLETE entries where it is not needed.
      */
     private record Entry(
-            Status status, StoredResponse response, Instant lockExpiresAt, Instant expiresAt, Duration lockTimeout) {}
+            Status status,
+            StoredResponse response,
+            Instant lockExpiresAt,
+            Instant expiresAt,
+            Duration lockTimeout,
+            String requestFingerprint) {}
 
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final Clock clock;
@@ -85,7 +90,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     null,
                     now.plus(context.lockTimeout()),
                     now.plus(context.ttl()),
-                    context.lockTimeout());
+                    context.lockTimeout(),
+                    context.requestFingerprint());
 
             Entry existing = store.putIfAbsent(context.key(), newEntry);
 
@@ -94,6 +100,10 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             }
 
             if (existing.status() == Status.COMPLETE) {
+                if (!existing.requestFingerprint().equals(context.requestFingerprint())) {
+                    return AcquireResult.fingerprintMismatch(
+                            existing.requestFingerprint(), context.requestFingerprint());
+                }
                 return AcquireResult.duplicate(existing.response());
             }
 
@@ -137,7 +147,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                 throw new IdempotencyStoreException(
                         "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
-            return new Entry(Status.COMPLETE, response, null, clock.instant().plus(ttl), null);
+            return new Entry(
+                    Status.COMPLETE, response, null, clock.instant().plus(ttl), null, existing.requestFingerprint());
         });
     }
 
@@ -155,7 +166,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             // Expire after lockTimeout rather than full TTL — FAILED entries are immediately
             // re-acquirable, so keeping them for the full TTL would unnecessarily retain memory.
             Instant failedExpiry = clock.instant().plus(existing.lockTimeout());
-            return new Entry(Status.FAILED, null, null, failedExpiry, existing.lockTimeout());
+            return new Entry(
+                    Status.FAILED, null, null, failedExpiry, existing.lockTimeout(), existing.requestFingerprint());
         });
     }
 
@@ -166,7 +178,12 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                 return entry;
             }
             return new Entry(
-                    Status.IN_PROGRESS, null, clock.instant().plus(extension), entry.expiresAt(), entry.lockTimeout());
+                    Status.IN_PROGRESS,
+                    null,
+                    clock.instant().plus(extension),
+                    entry.expiresAt(),
+                    entry.lockTimeout(),
+                    entry.requestFingerprint());
         });
     }
 
