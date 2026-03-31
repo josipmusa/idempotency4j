@@ -23,7 +23,7 @@ class IdempotencyAutoConfigurationTest {
             .withBean(RequestMappingHandlerMapping.class, () -> mock(RequestMappingHandlerMapping.class));
 
     @Test
-    void noStoreBeanPresent_engineAndFilterNotCreated() {
+    void When_NoStoreBeanPresent_Expect_EngineAndFilterNotCreated() {
         contextRunner.run(context -> {
             assertThat(context).doesNotHaveBean(IdempotencyEngine.class);
             assertThat(context).doesNotHaveBean(IdempotencyFilter.class);
@@ -32,7 +32,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void storeBeanPresent_engineAndFilterCreated() {
+    void When_StoreBeanPresent_Expect_EngineAndFilterCreated() {
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .run(context -> {
@@ -43,7 +43,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void customEngineBeanPresent_autoConfiguredEngineSkipped() {
+    void When_CustomEngineBeanPresent_Expect_AutoConfiguredEngineSkipped() {
         IdempotencyEngine customEngine = mock(IdempotencyEngine.class);
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
@@ -55,7 +55,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void customConfigBeanPresent_autoConfiguredConfigSkipped() {
+    void When_CustomConfigBeanPresent_Expect_AutoConfiguredConfigSkipped() {
         IdempotencyConfig customConfig =
                 IdempotencyConfig.builder().keyHeader("X-Custom-Key").build();
         contextRunner.withBean(IdempotencyConfig.class, () -> customConfig).run(context -> {
@@ -65,7 +65,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void customFilterBeanPresent_autoConfiguredFilterSkipped() {
+    void When_CustomFilterBeanPresent_Expect_AutoConfiguredFilterSkipped() {
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .withBean(IdempotencyFilter.class, () -> mock(IdempotencyFilter.class))
@@ -73,7 +73,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void defaultProperties_appliedToConfig() {
+    void When_DefaultProperties_Expect_AppliedToConfig() {
         contextRunner.run(context -> {
             IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
             assertThat(config.keyHeader()).isEqualTo("Idempotency-Key");
@@ -83,7 +83,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void customProperties_appliedToConfig() {
+    void When_CustomProperties_Expect_AppliedToConfig() {
         contextRunner
                 .withPropertyValues(
                         "idempotency.key-header=X-Request-Id",
@@ -98,7 +98,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void defaultFilterOrder_appliedToRegistration() {
+    void When_DefaultFilterOrder_Expect_AppliedToRegistration() {
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .run(context -> {
@@ -108,7 +108,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void customFilterOrder_appliedToRegistration() {
+    void When_CustomFilterOrder_Expect_AppliedToRegistration() {
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .withPropertyValues("idempotency.filter-order=10")
@@ -119,7 +119,7 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void nonServletApplication_noBeanCreated() {
+    void When_NonServletApplication_Expect_NoBeanCreated() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(IdempotencyAutoConfiguration.class))
                 .run(context -> {

@@ -48,7 +48,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void newKey_returnsExecuted() throws Exception {
+    void When_NewKey_Expect_ReturnsExecuted() throws Exception {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         ExecutionResult result = engine.execute(defaultContext("new-key"), () -> {});
@@ -57,7 +57,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void completedKey_returnsDuplicate() throws Exception {
+    void When_CompletedKey_Expect_ReturnsDuplicate() throws Exception {
         StoredResponse response = anyStoredResponse();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(response));
 
@@ -69,7 +69,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void completedKey_actionNotCalledOnDuplicate() throws Exception {
+    void When_CompletedKey_Expect_ActionNotCalled() throws Exception {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(anyStoredResponse()));
         AtomicInteger counter = new AtomicInteger(0);
 
@@ -79,7 +79,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void actionThrows_releaseIsCalled() {
+    void When_ActionThrows_Expect_ReleaseIsCalled() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
         String key = "fail-key";
 
@@ -94,7 +94,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void actionThrows_completeIsNeverCalled() {
+    void When_ActionThrows_Expect_CompleteNeverCalled() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         try {
@@ -108,7 +108,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void actionThrows_originalExceptionPropagates() {
+    void When_ActionThrows_Expect_OriginalExceptionPropagates() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
         RuntimeException expected = new RuntimeException("specific failure");
 
@@ -119,7 +119,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void lockTimeout_throwsIdempotencyLockTimeoutException() {
+    void When_LockTimeout_Expect_ThrowsLockTimeoutException() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout("test-key"));
 
         assertThatThrownBy(() -> engine.execute(defaultContext("test-key"), () -> {}))
@@ -131,7 +131,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void heartbeat_extendLockCalledDuringLongRunningAction() throws Exception {
+    void When_LongRunningAction_Expect_HeartbeatExtendsLock() throws Exception {
         IdempotencyContext context = new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
@@ -141,7 +141,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void heartbeat_stopsAfterActionCompletes() throws Exception {
+    void When_ActionCompletes_Expect_HeartbeatStops() throws Exception {
         IdempotencyContext context = new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
@@ -165,7 +165,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void heartbeat_stopsAfterActionThrows() throws Exception {
+    void When_ActionThrows_Expect_HeartbeatStops() throws Exception {
         IdempotencyContext context =
                 new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
@@ -195,7 +195,7 @@ class IdempotencyEngineTest {
     // --- Context forwarding ---
 
     @Test
-    void execute_forwardsContextToStore() throws Exception {
+    void When_Execute_Expect_ContextForwardedToStore() throws Exception {
         IdempotencyContext context = defaultContext("forwarded-key");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
@@ -207,7 +207,7 @@ class IdempotencyEngineTest {
     // --- Checked exception propagation ---
 
     @Test
-    void actionThrowsCheckedException_propagatesUnwrapped() {
+    void When_ActionThrowsCheckedException_Expect_PropagatesUnwrapped() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
         IOException expected = new IOException("disk full");
 
@@ -220,7 +220,7 @@ class IdempotencyEngineTest {
     // --- Cascading failure: release throws after action failure ---
 
     @Test
-    void actionThrowsAndReleaseFails_originalExceptionPropagates() {
+    void When_ActionThrowsAndReleaseFails_Expect_OriginalExceptionPropagates() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
         RuntimeException actionException = new RuntimeException("action failed");
         IdempotencyStoreException releaseException = new IdempotencyStoreException("store unreachable");
@@ -236,7 +236,7 @@ class IdempotencyEngineTest {
     // --- Store failure on tryAcquire ---
 
     @Test
-    void storeThrowsOnTryAcquire_propagatesDirectly() {
+    void When_StoreThrowsOnTryAcquire_Expect_PropagatesDirectly() {
         IdempotencyStoreException storeFailure = new IdempotencyStoreException("connection refused");
         when(store.tryAcquire(any())).thenThrow(storeFailure);
 

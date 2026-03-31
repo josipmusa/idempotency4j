@@ -102,9 +102,11 @@ are intentionally left in place — they are still eligible for lock
 stealing by the next `tryAcquire` caller.
 
 Scheduling is never the store's responsibility. The Spring Boot starter
-wires a `@Scheduled` task to this method using the cron expression
-defined by `idempotency.purge-cron` (default: hourly). In plain Java
-usage, the caller schedules it manually with a
+registers a `SchedulingConfigurer` bean that adds a cron task calling
+this method using the expression defined by `idempotency.purge.cron`
+(default: `"0 0 * * * *"`, hourly). The configurer is inert if the
+application has not enabled `@EnableScheduling`. In plain Java usage,
+the caller schedules it manually with a
 `ScheduledExecutorService`.
 
 No store implementation may self-schedule — no internal reaper threads.
@@ -157,11 +159,11 @@ and must not throw.
 
 ### Naming
 
-All test methods follow the `Context_ExpectedResult` pattern:
+All test methods follow the `When_<Context>_Expect_<Result>` pattern:
 ```
-newKey_returnsAcquired
-completedKey_returnsDuplicateWithCorrectResponse
-staleLock_isStolen
+When_NewKey_Expect_ReturnsAcquired
+When_CompletedKey_Expect_ReturnsDuplicateWithCorrectResponse
+When_StaleLock_Expect_IsStolen
 ```
 
 ### Contract tests
@@ -260,7 +262,7 @@ This includes the explanations and the current implementation status.
 - providers/idempotency-jdbc (JdbcIdempotencyStore with Testcontainers MySQL tests)
 - idempotency-test (IdempotencyStoreContract)
 - idempotency-spring (IdempotencyFilter + @Idempotent annotation)
-- idempotency-spring-boot-starter (IdempotencyAutoConfiguration)
+- idempotency-spring-boot-starter (IdempotencyAutoConfiguration + IdempotencyPurgeAutoConfiguration)
 
 ### Not started — do not implement
 - providers/idempotency-redis

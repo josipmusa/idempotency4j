@@ -43,12 +43,12 @@ class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
     }
 
     @Test
-    void initSchema_calledTwice_doesNotThrow() {
+    void When_InitSchemaCalledTwice_Expect_DoesNotThrow() {
         assertThatCode(() -> new JdbcIdempotencyStore(dataSource, true)).doesNotThrowAnyException();
     }
 
     @Test
-    void connectionExhausted_throwsIdempotencyStoreException() throws Exception {
+    void When_ConnectionExhausted_Expect_ThrowsIdempotencyStoreException() throws Exception {
         DataSource exhaustedDs = mock(DataSource.class);
         when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
 
