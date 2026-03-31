@@ -14,3 +14,6 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
     expires_at        TIMESTAMP(6)  NULL,
     PRIMARY KEY (idempotency_key)
 );
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_status_expires
+    ON idempotency_records (status, expires_at, lock_expires_at);

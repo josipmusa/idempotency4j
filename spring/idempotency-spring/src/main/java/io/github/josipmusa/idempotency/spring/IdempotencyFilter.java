@@ -20,8 +20,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.lang.NonNull;
 import org.springframework.lang.Nullable;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -41,7 +41,7 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
  */
 public class IdempotencyFilter extends OncePerRequestFilter {
 
-    private static final Log log = LogFactory.getLog(IdempotencyFilter.class);
+    private static final Logger log = LoggerFactory.getLogger(IdempotencyFilter.class);
 
     private static final String HEADER_IDEMPOTENT_REPLAYED = "Idempotent-Replayed";
     private static final String ERROR_MISSING_KEY = "Idempotency-Key header is required";
@@ -79,13 +79,22 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
         ResolvedIdempotent resolvedIdempotent = registry.resolve(handlerMethod);
         if (resolvedIdempotent == null) {
-            chain.doFilter(request, response);
-            return;
+            if (config.keyRequired()) {
+                String key = request.getHeader(config.keyHeader());
+                if (key == null || key.isBlank()) {
+                    writeJsonError(response, 400, ERROR_MISSING_KEY);
+                    return;
+                }
+                resolvedIdempotent = new ResolvedIdempotent(true, config.defaultTtl(), config.defaultLockTimeout());
+            } else {
+                chain.doFilter(request, response);
+                return;
+            }
         }
 
         String key = request.getHeader(config.keyHeader());
         if (key == null || key.isBlank()) {
-            if (resolvedIdempotent.annotation().required()) {
+            if (resolvedIdempotent.required()) {
                 writeJsonError(response, 422, ERROR_MISSING_KEY);
                 return;
             }
@@ -144,6 +153,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                     }
                 });
                 response.setHeader(HEADER_IDEMPOTENT_REPLAYED, "true");
+                response.setContentLength(stored.body().length);
                 response.getOutputStream().write(stored.body());
             }
         }

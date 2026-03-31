@@ -43,7 +43,7 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
             Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl(), handlerMethod);
             Duration lockTimeout =
                     parseDuration(annotation.lockTimeout(), "lockTimeout", config.defaultLockTimeout(), handlerMethod);
-            builtAnnotationCache.put(method, new ResolvedIdempotent(annotation, ttl, lockTimeout));
+            builtAnnotationCache.put(method, new ResolvedIdempotent(annotation.required(), ttl, lockTimeout));
         });
         this.cache = Map.copyOf(builtAnnotationCache);
     }
@@ -68,5 +68,5 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
         }
     }
 
-    public record ResolvedIdempotent(Idempotent annotation, Duration ttl, Duration lockTimeout) {}
+    public record ResolvedIdempotent(boolean required, Duration ttl, Duration lockTimeout) {}
 }

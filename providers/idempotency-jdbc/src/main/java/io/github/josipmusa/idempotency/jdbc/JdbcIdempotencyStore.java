@@ -16,6 +16,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -106,6 +107,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private final DataSource dataSource;
     private final long pollIntervalMs;
+    private final Clock clock;
 
     public JdbcIdempotencyStore(DataSource dataSource) {
         this(dataSource, true);
@@ -116,11 +118,16 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema, long pollIntervalMs) {
+        this(dataSource, initSchema, pollIntervalMs, Clock.systemUTC());
+    }
+
+    public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema, long pollIntervalMs, Clock clock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
         if (pollIntervalMs <= 0) {
             throw new IllegalArgumentException("pollIntervalMs must be positive, got: " + pollIntervalMs);
         }
         this.pollIntervalMs = pollIntervalMs;
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
         if (initSchema) {
             initSchema();
         }
@@ -149,7 +156,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             }
             try (Connection conn = dataSource.getConnection();
                     Statement stmt = conn.createStatement()) {
-                stmt.execute(sql);
+                // Split by semicolons to handle multiple statements
+                // MySQL JDBC does not support multiple statements in a single execute() call
+                String[] statements = sql.split(";");
+                for (String statement : statements) {
+                    String trimmed = statement.trim();
+                    if (!trimmed.isEmpty()) {
+                        stmt.execute(trimmed);
+                    }
+                }
             }
         } catch (IOException | SQLException e) {
             throw new IdempotencyStoreException("Failed to initialize schema", e);
@@ -158,7 +173,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
-        Instant deadline = Instant.now().plus(context.lockTimeout());
+        Instant deadline = clock.instant().plus(context.lockTimeout());
 
         // Fast path: evict any expired COMPLETE record for this key, then insert a fresh
         // IN_PROGRESS row. The DELETE and INSERT run as separate autocommit statements —
@@ -170,7 +185,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
 
         // Duplicate key — poll until we can acquire, the operation completes, or timeout
-        while (Instant.now().isBefore(deadline)) {
+        while (clock.instant().isBefore(deadline)) {
             RowInspection inspection = inspectRow(context);
 
             if (inspection.result() != null) {
@@ -198,7 +213,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void complete(String key, StoredResponse response, Duration ttl) {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         try (Connection conn = dataSource.getConnection()) {
             try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
                 ps.setInt(1, response.statusCode());
@@ -234,7 +249,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void extendLock(String key, Duration extension) {
-        Instant newExpiry = Instant.now().plus(extension);
+        Instant newExpiry = clock.instant().plus(extension);
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(EXTEND_LOCK)) {
             ps.setTimestamp(1, Timestamp.from(newExpiry));
@@ -256,7 +271,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * @return the number of rows deleted
      */
     public int purgeExpired() {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         Timestamp ts = Timestamp.from(now);
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
@@ -281,11 +296,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try (Connection conn = dataSource.getConnection()) {
             try (PreparedStatement del = conn.prepareStatement(DELETE_EXPIRED)) {
                 del.setString(1, context.key());
-                del.setTimestamp(2, Timestamp.from(Instant.now()));
+                del.setTimestamp(2, Timestamp.from(clock.instant()));
                 del.executeUpdate();
             }
             try (PreparedStatement ins = conn.prepareStatement(INSERT)) {
-                Instant now = Instant.now();
+                Instant now = clock.instant();
                 ins.setString(1, context.key());
                 ins.setTimestamp(2, Timestamp.from(now));
                 ins.setTimestamp(3, Timestamp.from(now.plus(context.lockTimeout())));
@@ -293,7 +308,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 ins.executeUpdate();
                 return true;
             } catch (SQLException e) {
-                if (isNotDuplicateKeyViolation(e)) {
+                if (!isDuplicateKeyViolation(e)) {
                     throw new IdempotencyStoreException("Failed to insert record for key '" + context.key() + "'", e);
                 }
                 return false; // duplicate key — row already exists
@@ -351,7 +366,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     private boolean tryStealLock(Connection conn, IdempotencyContext context) throws SQLException {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         try (PreparedStatement ps = conn.prepareStatement(STEAL_LOCK)) {
             ps.setTimestamp(1, Timestamp.from(now));
             ps.setTimestamp(2, Timestamp.from(now.plus(context.lockTimeout())));
@@ -361,8 +376,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    private static boolean isStale(Timestamp lockExpiresTs) {
-        return lockExpiresTs != null && lockExpiresTs.toInstant().isBefore(Instant.now());
+    private boolean isStale(Timestamp lockExpiresTs) {
+        return lockExpiresTs != null && lockExpiresTs.toInstant().isBefore(clock.instant());
     }
 
     /**
@@ -403,9 +418,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         return new StoredResponse(statusCode, headers, responseBody, completedAt);
     }
 
-    private boolean isNotDuplicateKeyViolation(SQLException e) {
+    private boolean isDuplicateKeyViolation(SQLException e) {
         String sqlState = e.getSQLState();
-        return !"23000".equals(sqlState) && !"23505".equals(sqlState);
+        return "23000".equals(sqlState) || "23505".equals(sqlState);
     }
 
     private static void rollbackQuietly(Connection conn) {

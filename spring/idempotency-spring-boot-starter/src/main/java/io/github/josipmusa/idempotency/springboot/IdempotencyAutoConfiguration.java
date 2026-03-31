@@ -34,11 +34,11 @@ public class IdempotencyAutoConfiguration {
                 .build();
     }
 
-    @Bean
+    @Bean(destroyMethod = "shutdownNow")
     @ConditionalOnMissingBean(name = "idempotencyScheduler")
     public ScheduledExecutorService idempotencyScheduler() {
         return Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "idempotency-lock-cleanup");
+            Thread t = new Thread(r, "idempotency-heartbeat");
             t.setDaemon(true);
             return t;
         });

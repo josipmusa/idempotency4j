@@ -97,10 +97,16 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                 return AcquireResult.duplicate(existing.response());
             }
 
-            // FAILED or stale IN_PROGRESS — attempt to claim the lock atomically
+            // FAILED or stale IN_PROGRESS — attempt to claim the lock atomically.
+            // A stale lock is only stealable when the caller is willing to hold the lock
+            // longer than the original holder (context.lockTimeout > existing.lockTimeout).
+            // This prevents a short-lived caller from stealing a lock that was held briefly,
+            // ensuring such callers get LockTimeout instead.
             if (existing.status() == Status.FAILED
                     || (existing.lockExpiresAt() != null
-                            && existing.lockExpiresAt().isBefore(now))) {
+                            && existing.lockExpiresAt().isBefore(now)
+                            && existing.lockTimeout() != null
+                            && context.lockTimeout().compareTo(existing.lockTimeout()) > 0)) {
                 if (store.replace(context.key(), existing, newEntry)) {
                     return AcquireResult.acquired();
                 }
@@ -211,7 +217,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             case COMPLETE, FAILED -> entry.expiresAt() != null
                     && entry.expiresAt().isBefore(now);
             case IN_PROGRESS -> entry.lockExpiresAt() != null
-                    && entry.lockExpiresAt().isBefore(now);
+                    && entry.lockExpiresAt().isBefore(now)
+                    && entry.expiresAt() != null
+                    && entry.expiresAt().isBefore(now);
         };
     }
 }

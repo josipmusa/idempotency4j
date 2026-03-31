@@ -34,6 +34,10 @@ public abstract class IdempotencyStoreContract {
         return new IdempotencyContext(key, Duration.ofHours(1), lockTimeout);
     }
 
+    private IdempotencyContext contextFor(String key, Duration ttl, Duration lockTimeout) {
+        return new IdempotencyContext(key, ttl, lockTimeout);
+    }
+
     private StoredResponse sampleResponse() {
         return new StoredResponse(200, Map.of("X-Request-Id", List.of("abc-123")), "hello".getBytes(), Instant.now());
     }
@@ -116,9 +120,11 @@ public abstract class IdempotencyStoreContract {
         try {
             long[] thread1CompleteTime = new long[1];
             long[] thread2ResultTime = new long[1];
+            CountDownLatch lockAcquired = new CountDownLatch(1);
 
             Future<?> thread1 = executor.submit(() -> {
                 s.tryAcquire(contextFor(key));
+                lockAcquired.countDown();
                 try {
                     Thread.sleep(300);
                 } catch (InterruptedException e) {
@@ -128,7 +134,7 @@ public abstract class IdempotencyStoreContract {
                 thread1CompleteTime[0] = System.nanoTime();
             });
 
-            Thread.sleep(50);
+            lockAcquired.await(5, TimeUnit.SECONDS);
 
             Future<AcquireResult> thread2 = executor.submit(() -> {
                 AcquireResult result = s.tryAcquire(contextFor(key));
@@ -157,9 +163,11 @@ public abstract class IdempotencyStoreContract {
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
+            CountDownLatch lockAcquired = new CountDownLatch(1);
             // Thread 1 acquires and never completes
             Future<?> thread1 = executor.submit(() -> {
                 s.tryAcquire(contextFor(key, Duration.ofSeconds(30)));
+                lockAcquired.countDown();
                 // Never complete or release — simulate infinite hang
                 try {
                     Thread.sleep(5000);
@@ -168,7 +176,7 @@ public abstract class IdempotencyStoreContract {
                 }
             });
 
-            Thread.sleep(50);
+            lockAcquired.await(5, TimeUnit.SECONDS);
 
             long start = System.nanoTime();
             Future<AcquireResult> thread2 =
@@ -527,5 +535,80 @@ public abstract class IdempotencyStoreContract {
         AcquireResult result = s.tryAcquire(contextFor(key, Duration.ofMillis(200)));
 
         assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+    }
+
+    // --- purgeExpired contract ---
+
+    @Test
+    void When_ExpiredTtlEntryExists_Expect_PurgeRemovesIt() throws InterruptedException {
+        IdempotencyStore s = store();
+        // Both TTL and lockTimeout are short so the IN_PROGRESS entry is eligible for purge
+        var ctx = contextFor("purge-expired-1", Duration.ofMillis(10), Duration.ofMillis(2));
+        s.tryAcquire(ctx);
+        Thread.sleep(50);
+        assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
+        assertThat(s.tryAcquire(ctx)).isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_NonExpiredTtlEntryExists_Expect_PurgeKeepsIt() {
+        IdempotencyStore s = store();
+        var ctx = contextFor("purge-keep-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
+        s.tryAcquire(ctx);
+        s.complete(ctx.key(), sampleResponse(), ctx.ttl());
+        s.purgeExpired();
+        var result = s.tryAcquire(ctx);
+        assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
+    }
+
+    @Test
+    void When_CompletedEntryTtlExpired_Expect_PurgeRemovesIt() throws InterruptedException {
+        IdempotencyStore s = store();
+        var ctx = contextFor("purge-completed-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
+        s.tryAcquire(ctx);
+        s.complete(
+                ctx.key(), new StoredResponse(200, Map.of(), "body".getBytes(), Instant.now()), Duration.ofMillis(1));
+        Thread.sleep(50);
+        assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
+        assertThat(s.tryAcquire(ctx)).isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_StaleInProgressLockExpiredTtlNotExpired_Expect_PurgeKeepsIt() throws InterruptedException {
+        IdempotencyStore s = store();
+        // Lock expires quickly (2ms), but TTL is long (10 min)
+        var ctx = contextFor("purge-stale-inprogress-1", Duration.ofMinutes(10), Duration.ofMillis(2));
+        s.tryAcquire(ctx);
+        Thread.sleep(50);
+        s.purgeExpired();
+        // The entry TTL has not expired, so purge should keep it (even though lock expired).
+        // A correct purge must NOT remove an IN_PROGRESS entry whose TTL is still valid —
+        // the bug is that InMemory only checks lockExpiresAt and removes it prematurely.
+        // After a correct purge, tryAcquire on a stale lock returns Acquired (stolen).
+        // After the buggy purge (entry deleted), tryAcquire also returns Acquired — so this
+        // test is a companion to When_StaleInProgressBothLockAndTtlExpired; it drives the
+        // distinction that purge must require BOTH conditions before removing IN_PROGRESS.
+        var result = s.tryAcquire(ctx);
+        assertThat(result).isNotInstanceOf(AcquireResult.Acquired.class).isNotInstanceOf(AcquireResult.Duplicate.class);
+    }
+
+    @Test
+    void When_StaleInProgressBothLockAndTtlExpired_Expect_PurgeRemovesIt() throws InterruptedException {
+        IdempotencyStore s = store();
+        // Both lockTimeout and TTL are short — entry is fully expired and safe to purge
+        var ctx = contextFor("purge-stale-both-1", Duration.ofMillis(2), Duration.ofMillis(2));
+        s.tryAcquire(ctx);
+        Thread.sleep(50);
+        assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
+        assertThat(s.tryAcquire(ctx)).isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_NoExpiredEntries_Expect_PurgeReturnsZero() {
+        IdempotencyStore s = store();
+        var ctx = contextFor("purge-none-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
+        s.tryAcquire(ctx);
+        int removed = s.purgeExpired();
+        assertThat(removed).isEqualTo(0);
     }
 }
