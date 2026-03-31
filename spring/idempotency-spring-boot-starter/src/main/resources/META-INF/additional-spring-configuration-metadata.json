@@ -7,12 +7,6 @@
       "defaultValue": "Idempotency-Key"
     },
     {
-      "name": "idempotency.key-required",
-      "type": "java.lang.Boolean",
-      "description": "Whether the idempotency key header must be present on every request. When true, requests without the header are rejected.",
-      "defaultValue": true
-    },
-    {
       "name": "idempotency.default-ttl",
       "type": "java.time.Duration",
       "description": "Default time-to-live for stored idempotency records. After this duration, records become eligible for purging.",

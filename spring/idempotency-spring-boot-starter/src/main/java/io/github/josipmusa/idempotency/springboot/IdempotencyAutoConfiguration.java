@@ -28,7 +28,6 @@ public class IdempotencyAutoConfiguration {
     IdempotencyConfig idempotencyConfig(IdempotencyProperties idempotencyProperties) {
         return IdempotencyConfig.builder()
                 .keyHeader(idempotencyProperties.getKeyHeader())
-                .keyRequired(idempotencyProperties.isKeyRequired())
                 .defaultTtl(idempotencyProperties.getDefaultTtl())
                 .defaultLockTimeout(idempotencyProperties.getDefaultLockTimeout())
                 .build();

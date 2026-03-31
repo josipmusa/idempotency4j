@@ -37,10 +37,11 @@ import javax.sql.DataSource;
  *
  * <p>No Spring dependencies — only requires a {@link DataSource}.
  *
- * <p><strong>Database compatibility:</strong> The bundled schema
- * ({@code idempotency-schema.sql}) uses MySQL syntax. For PostgreSQL,
- * replace {@code BLOB} with {@code BYTEA} and
- * {@code CURRENT_TIMESTAMP(6)} with {@code CURRENT_TIMESTAMP}.
+ * <p><strong>Database compatibility:</strong> Automatically detects the database
+ * dialect from {@link java.sql.DatabaseMetaData#getDatabaseProductName()} and
+ * loads the appropriate schema file ({@code idempotency-schema-mysql.sql} or
+ * {@code idempotency-schema-postgresql.sql}). Unrecognized databases fall back
+ * to the MySQL schema.
  */
 public class JdbcIdempotencyStore implements IdempotencyStore {
 
@@ -134,16 +135,30 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     /**
-     * Executes the schema DDL from the bundled {@code idempotency-schema.sql} file. The schema
-     * uses {@code CREATE TABLE IF NOT EXISTS}, so calling this method more than once is safe.
+     * Executes the dialect-specific schema DDL. Detects MySQL vs PostgreSQL from
+     * {@link java.sql.DatabaseMetaData#getDatabaseProductName()}.
      *
-     * <p><strong>Note:</strong> the entire SQL file is executed as a single statement. If the
-     * schema ever grows to multiple statements, switch to executing each statement individually.
+     * <p>For MySQL, the index is created separately with duplicate-key error handling
+     * since MySQL does not support {@code CREATE INDEX IF NOT EXISTS}.
      */
     private void initSchema() {
-        try (InputStream is = getClass().getResourceAsStream("/idempotency-schema.sql")) {
+        String dialect;
+        try (Connection conn = dataSource.getConnection()) {
+            dialect = conn.getMetaData().getDatabaseProductName().toLowerCase();
+        } catch (SQLException e) {
+            throw new IdempotencyStoreException("Failed to detect database dialect", e);
+        }
+
+        String schemaFile;
+        if (dialect.contains("postgresql")) {
+            schemaFile = "/idempotency-schema-postgresql.sql";
+        } else {
+            schemaFile = "/idempotency-schema-mysql.sql";
+        }
+
+        try (InputStream is = getClass().getResourceAsStream(schemaFile)) {
             if (is == null) {
-                throw new IdempotencyStoreException("Schema file /idempotency-schema.sql not found on classpath");
+                throw new IdempotencyStoreException("Schema file " + schemaFile + " not found on classpath");
             }
             String sql;
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
@@ -156,8 +171,6 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             }
             try (Connection conn = dataSource.getConnection();
                     Statement stmt = conn.createStatement()) {
-                // Split by semicolons to handle multiple statements
-                // MySQL JDBC does not support multiple statements in a single execute() call
                 String[] statements = sql.split(";");
                 for (String statement : statements) {
                     String trimmed = statement.trim();
@@ -168,6 +181,23 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             }
         } catch (IOException | SQLException e) {
             throw new IdempotencyStoreException("Failed to initialize schema", e);
+        }
+
+        if (!dialect.contains("postgresql")) {
+            createMysqlIndex();
+        }
+    }
+
+    private void createMysqlIndex() {
+        try (Connection conn = dataSource.getConnection();
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE INDEX idx_idempotency_status_expires "
+                    + "ON idempotency_records (status, expires_at, lock_expires_at)");
+        } catch (SQLException e) {
+            // MySQL error 1061 = duplicate key name (index already exists)
+            if (e.getErrorCode() != 1061) {
+                throw new IdempotencyStoreException("Failed to create index", e);
+            }
         }
     }
 

@@ -79,17 +79,8 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
         ResolvedIdempotent resolvedIdempotent = registry.resolve(handlerMethod);
         if (resolvedIdempotent == null) {
-            if (config.keyRequired()) {
-                String key = request.getHeader(config.keyHeader());
-                if (key == null || key.isBlank()) {
-                    writeJsonError(response, 400, ERROR_MISSING_KEY);
-                    return;
-                }
-                resolvedIdempotent = new ResolvedIdempotent(true, config.defaultTtl(), config.defaultLockTimeout());
-            } else {
-                chain.doFilter(request, response);
-                return;
-            }
+            chain.doFilter(request, response);
+            return;
         }
 
         String key = request.getHeader(config.keyHeader());

@@ -51,59 +51,31 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_NonAnnotatedHandlerAndKeyNotRequired_Expect_ProceedsNormally() throws Exception {
-        IdempotencyConfig config =
-                IdempotencyConfig.builder().keyRequired(false).build();
-        IdempotentHandlerRegistry localRegistry = new IdempotentHandlerRegistry(handlerMapping, config);
-        IdempotencyFilter localFilter = new IdempotencyFilter(engine, store, config, handlerMapping, localRegistry);
-
+    void When_NonAnnotatedHandler_Expect_ProceedsNormally() throws Exception {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
         when(handlerMapping.getHandler(request)).thenReturn(chain);
         when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
 
-        localFilter.doFilter(request, response, filterChain);
+        filter.doFilter(request, response, filterChain);
 
         verify(filterChain).doFilter(request, response);
         verifyNoInteractions(engine);
     }
 
     @Test
-    void When_NonAnnotatedHandlerAndKeyRequired_Expect_IdempotencyApplied() throws Exception {
-        IdempotencyConfig config = IdempotencyConfig.builder().keyRequired(true).build();
-        IdempotentHandlerRegistry localRegistry = new IdempotentHandlerRegistry(handlerMapping, config);
-        IdempotencyFilter localFilter = new IdempotencyFilter(engine, store, config, handlerMapping, localRegistry);
-
+    void When_NonAnnotatedHandlerWithIdempotencyKey_Expect_ProceedsNormally() throws Exception {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
         when(handlerMapping.getHandler(request)).thenReturn(chain);
         when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse()));
 
-        localFilter.doFilter(request, response, filterChain);
+        filter.doFilter(request, response, filterChain);
 
-        assertThat(response.getStatus()).isEqualTo(200);
-        assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
-    }
-
-    @Test
-    void When_NonAnnotatedHandlerAndKeyRequiredWithNoKey_Expect_BadRequest() throws Exception {
-        IdempotencyConfig config = IdempotencyConfig.builder().keyRequired(true).build();
-        IdempotentHandlerRegistry localRegistry = new IdempotentHandlerRegistry(handlerMapping, config);
-        IdempotencyFilter localFilter = new IdempotencyFilter(engine, store, config, handlerMapping, localRegistry);
-
-        HandlerMethod handlerMethod = mock(HandlerMethod.class);
-        when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
-        HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
-        when(handlerMapping.getHandler(request)).thenReturn(chain);
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
-
-        localFilter.doFilter(request, response, filterChain);
-
-        assertThat(response.getStatus()).isEqualTo(400);
+        verify(filterChain).doFilter(request, response);
         verifyNoInteractions(engine);
     }
 

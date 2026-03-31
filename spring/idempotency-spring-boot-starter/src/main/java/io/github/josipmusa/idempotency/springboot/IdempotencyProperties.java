@@ -8,7 +8,6 @@ import org.springframework.core.Ordered;
 public class IdempotencyProperties {
 
     private String keyHeader = "Idempotency-Key";
-    private boolean keyRequired = true;
     private Duration defaultTtl = Duration.ofHours(24);
     private Duration defaultLockTimeout = Duration.ofSeconds(10);
     private int filterOrder = Ordered.HIGHEST_PRECEDENCE + 1;
@@ -20,14 +19,6 @@ public class IdempotencyProperties {
 
     public void setKeyHeader(String keyHeader) {
         this.keyHeader = keyHeader;
-    }
-
-    public boolean isKeyRequired() {
-        return keyRequired;
-    }
-
-    public void setKeyRequired(boolean keyRequired) {
-        this.keyRequired = keyRequired;
     }
 
     public Duration getDefaultTtl() {

@@ -11,20 +11,23 @@ import io.github.josipmusa.core.IdempotencyContext;
 import io.github.josipmusa.core.IdempotencyStore;
 import io.github.josipmusa.core.exception.IdempotencyStoreException;
 import io.github.josipmusa.idempotency.test.IdempotencyStoreContract;
+import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 @Testcontainers
-class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
+class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
 
     @Container
     static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0").withDatabaseName("idempotency_test");
@@ -39,6 +42,14 @@ class JdbcIdempotencyStoreTest extends IdempotencyStoreContract {
         ds.setPassword(MYSQL.getPassword());
         dataSource = ds;
         new JdbcIdempotencyStore(dataSource, true);
+    }
+
+    @BeforeEach
+    void cleanTable() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("DELETE FROM idempotency_records");
+        }
     }
 
     @Override
