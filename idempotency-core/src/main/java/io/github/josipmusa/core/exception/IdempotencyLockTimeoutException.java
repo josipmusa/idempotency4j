@@ -1,5 +1,6 @@
 package io.github.josipmusa.core.exception;
 
+import java.io.Serial;
 import java.time.Duration;
 
 /**
@@ -13,6 +14,9 @@ import java.time.Duration;
  * <p>Carries the key and timeout for logging and error responses.
  */
 public class IdempotencyLockTimeoutException extends IdempotencyException {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
 
     private final String key;
     private final Duration lockTimeout;

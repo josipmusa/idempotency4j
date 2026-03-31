@@ -1,5 +1,7 @@
 package io.github.josipmusa.core.exception;
 
+import java.io.Serial;
+
 /**
  * Base exception for all idempotency-related errors.
  *
@@ -11,6 +13,10 @@ package io.github.josipmusa.core.exception;
  * @see IdempotencyLockTimeoutException for lock wait timeouts
  */
 public class IdempotencyException extends RuntimeException {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
     public IdempotencyException(String message) {
         super(message);
     }

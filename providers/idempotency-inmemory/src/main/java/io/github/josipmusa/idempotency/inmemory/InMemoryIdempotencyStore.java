@@ -10,9 +10,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * An in-memory implementation of {@link IdempotencyStore}.
@@ -21,16 +19,12 @@ import java.util.concurrent.TimeUnit;
  * deployments only. State is not persisted across restarts and is
  * not shared across multiple application instances.
  *
- * <p>A background reaper thread periodically removes expired entries
- * to prevent unbounded memory growth. Call {@link #close()} to shut
- * down the reaper when the store is no longer needed.
  *
  * <p><strong>Do not use in a horizontally scaled production environment.
  * Use idempotency-jdbc or idempotency-redis instead.</strong>
  */
-public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable {
+public class InMemoryIdempotencyStore implements IdempotencyStore {
 
-    private static final Duration DEFAULT_REAPER_INTERVAL = Duration.ofMinutes(1);
     private static final long DEFAULT_POLL_INTERVAL_MS = 50;
 
     private enum Status {
@@ -50,38 +44,22 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
 
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final Clock clock;
-    private final ScheduledExecutorService reaper;
     private final long pollIntervalMs;
 
     public InMemoryIdempotencyStore() {
-        this(Clock.systemUTC(), DEFAULT_REAPER_INTERVAL, DEFAULT_POLL_INTERVAL_MS);
+        this(Clock.systemUTC(), DEFAULT_POLL_INTERVAL_MS);
     }
 
     public InMemoryIdempotencyStore(Clock clock) {
-        this(clock, DEFAULT_REAPER_INTERVAL, DEFAULT_POLL_INTERVAL_MS);
+        this(clock, DEFAULT_POLL_INTERVAL_MS);
     }
 
-    public InMemoryIdempotencyStore(Clock clock, Duration reaperInterval) {
-        this(clock, reaperInterval, DEFAULT_POLL_INTERVAL_MS);
-    }
-
-    public InMemoryIdempotencyStore(Clock clock, Duration reaperInterval, long pollIntervalMs) {
-        Objects.requireNonNull(reaperInterval, "reaper interval must not be null");
-        if (reaperInterval.isZero() || reaperInterval.isNegative()) {
-            throw new IllegalArgumentException("reaper interval must be positive");
-        }
+    public InMemoryIdempotencyStore(Clock clock, long pollIntervalMs) {
         this.clock = Objects.requireNonNull(clock);
         if (pollIntervalMs <= 0) {
             throw new IllegalArgumentException("pollIntervalMs must be positive, got: " + pollIntervalMs);
         }
         this.pollIntervalMs = pollIntervalMs;
-        this.reaper = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "idempotency-store-reaper");
-            t.setDaemon(true);
-            return t;
-        });
-        long intervalMs = reaperInterval.toMillis();
-        reaper.scheduleAtFixedRate(this::evictExpired, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -186,14 +164,46 @@ public class InMemoryIdempotencyStore implements IdempotencyStore, AutoCloseable
         });
     }
 
+    /**
+     * Purges all expired entries from the in-memory store.
+     *
+     * <p>An entry is eligible for purging based on its status:
+     * <ul>
+     *   <li>{@code COMPLETE} and {@code FAILED} — removed when
+     *       {@code expiresAt} is in the past</li>
+     *   <li>{@code IN_PROGRESS} — removed when {@code lockExpiresAt}
+     *       is in the past, indicating the previous holder crashed or
+     *       timed out. The next {@link #tryAcquire} caller will insert
+     *       a fresh entry rather than stealing — the outcome is
+     *       identical.</li>
+     * </ul>
+     *
+     * <p>This method does not self-schedule. In Spring Boot applications,
+     * the starter drives the purge via {@code @Scheduled}. In standalone
+     * usage, call this method periodically using a
+     * {@link java.util.concurrent.ScheduledExecutorService}:
+     *
+     * <pre>{@code
+     * ScheduledExecutorService scheduler =
+     *     Executors.newSingleThreadScheduledExecutor();
+     * scheduler.scheduleAtFixedRate(
+     *     store::purgeExpired, 5000, 5000, TimeUnit.MILLISECONDS);
+     * }</pre>
+     *
+     * @return the number of entries removed
+     */
     @Override
-    public void close() {
-        reaper.shutdownNow();
-    }
-
-    private void evictExpired() {
+    public int purgeExpired() {
         Instant now = clock.instant();
-        store.entrySet().removeIf(e -> isExpired(e.getValue(), now));
+        AtomicInteger count = new AtomicInteger(0);
+        store.entrySet().removeIf(e -> {
+            if (isExpired(e.getValue(), now)) {
+                count.incrementAndGet();
+                return true;
+            }
+            return false;
+        });
+        return count.get();
     }
 
     private static boolean isExpired(Entry entry, Instant now) {

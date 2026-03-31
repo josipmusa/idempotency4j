@@ -1,5 +1,7 @@
 package io.github.josipmusa.core.exception;
 
+import java.io.Serial;
+
 /**
  * Thrown when a store operation fails due to invalid state or
  * infrastructure errors.
@@ -12,6 +14,9 @@ package io.github.josipmusa.core.exception;
  * </ul>
  */
 public class IdempotencyStoreException extends IdempotencyException {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
 
     public IdempotencyStoreException(String message) {
         super(message);

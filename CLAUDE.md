@@ -80,11 +80,35 @@ AcquireResult tryAcquire(IdempotencyContext context);
 void complete(String key, StoredResponse response, Duration ttl);
 void release(String key);
 void extendLock(String key, Duration extension);
+int purgeExpired();
 ```
 
 `tryAcquire` is responsible for all blocking logic internally.
 The engine never polls or waits — it calls `tryAcquire` once and
 gets back a resolved result.
+
+### `purgeExpired()`
+
+Every `IdempotencyStore` implementation must implement `purgeExpired()`.
+It removes all records that are no longer needed:
+
+- `COMPLETE` records whose `expires_at` is in the past
+- `FAILED` records whose `expires_at` is in the past
+- `IN_PROGRESS` records whose both `lock_expires_at` and `expires_at`
+  are in the past
+
+Stale `IN_PROGRESS` records whose lock has expired but TTL has not
+are intentionally left in place — they are still eligible for lock
+stealing by the next `tryAcquire` caller.
+
+Scheduling is never the store's responsibility. The Spring Boot starter
+wires a `@Scheduled` task to this method using the cron expression
+defined by `idempotency.purge-cron` (default: hourly). In plain Java
+usage, the caller schedules it manually with a
+`ScheduledExecutorService`.
+
+No store implementation may self-schedule — no internal reaper threads.
+Cleanup is always driven externally.
 
 ### `IdempotencyContext`
 

@@ -108,4 +108,31 @@ public interface IdempotencyStore {
      * @param extension the new lock duration measured from now
      */
     void extendLock(String key, Duration extension);
+
+    /**
+     * Purges all expired records from the store.
+     *
+     * <p>The following records are eligible for purging:
+     * <ul>
+     *   <li>{@code COMPLETE} records whose {@code expires_at} is in the past</li>
+     *   <li>{@code FAILED} records whose {@code expires_at} is in the past</li>
+     *   <li>{@code IN_PROGRESS} records whose {@code lock_expires_at}
+     *       and {@code expires_at} are both in the past — indicating a
+     *       crashed caller whose TTL window has also closed</li>
+     * </ul>
+     *
+     * <p>This method does not schedule itself. Callers are responsible for
+     * invoking it periodically. When using the Spring Boot starter, a
+     * {@code @Scheduled} task is wired automatically using the cron
+     * expression defined by {@code idempotency.purge-cron}
+     * (default: hourly). In plain Java usage, schedule this method
+     * with a {@link java.util.concurrent.ScheduledExecutorService}.
+     *
+     * <p>This method is safe to call concurrently — multiple application
+     * instances invoking it simultaneously will not cause correctness
+     * issues, only redundant work.
+     *
+     * @return the number of records deleted
+     */
+    int purgeExpired();
 }
