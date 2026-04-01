@@ -10,6 +10,7 @@ public class IdempotencyProperties {
     private Duration defaultTtl = Duration.ofHours(24);
     private Duration defaultLockTimeout = Duration.ofSeconds(10);
     private int filterOrder = 0;
+    private long maxBodyBytes = 1_048_576L; // 1 MiB
     private Purge purge = new Purge();
 
     public String getKeyHeader() {
@@ -42,6 +43,14 @@ public class IdempotencyProperties {
 
     public void setFilterOrder(int filterOrder) {
         this.filterOrder = filterOrder;
+    }
+
+    public long getMaxBodyBytes() {
+        return maxBodyBytes;
+    }
+
+    public void setMaxBodyBytes(long maxBodyBytes) {
+        this.maxBodyBytes = maxBodyBytes;
     }
 
     public Purge getPurge() {

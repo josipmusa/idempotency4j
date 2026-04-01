@@ -119,6 +119,16 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
+    void When_CustomMaxBodyBytes_Expect_AppliedToFilter() {
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .withPropertyValues("idempotency.max-body-bytes=2097152")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(IdempotencyFilter.class);
+                });
+    }
+
+    @Test
     void When_NonServletApplication_Expect_NoBeanCreated() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(IdempotencyAutoConfiguration.class))

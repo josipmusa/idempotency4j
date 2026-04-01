@@ -50,12 +50,30 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private static final String ERROR_KEY_TOO_LONG = "Idempotency-Key must not exceed 255 characters";
     private static final String ERROR_LOCK_TIMEOUT = "Request with this key is already being processed";
     private static final String ERROR_FINGERPRINT_MISMATCH = "Idempotency-Key reused with a different request body";
+    private static final String ERROR_BODY_TOO_LARGE = "Request body exceeds maximum allowed size";
+    private static final long NO_LIMIT = -1;
 
     private final IdempotencyEngine engine;
     private final IdempotencyStore store;
     private final IdempotencyConfig config;
     private final RequestMappingHandlerMapping handlerMapping;
     private final IdempotentHandlerRegistry registry;
+    private final long maxBodyBytes;
+
+    public IdempotencyFilter(
+            IdempotencyEngine engine,
+            IdempotencyStore store,
+            IdempotencyConfig config,
+            RequestMappingHandlerMapping handlerMapping,
+            IdempotentHandlerRegistry registry,
+            long maxBodyBytes) {
+        this.engine = Objects.requireNonNull(engine, "engine must not be null");
+        this.store = Objects.requireNonNull(store, "store must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
+        this.registry = Objects.requireNonNull(registry, "registry must not be null");
+        this.maxBodyBytes = maxBodyBytes;
+    }
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
@@ -63,11 +81,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             IdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry) {
-        this.engine = Objects.requireNonNull(engine, "engine must not be null");
-        this.store = Objects.requireNonNull(store, "store must not be null");
-        this.config = Objects.requireNonNull(config, "config must not be null");
-        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
-        this.registry = Objects.requireNonNull(registry, "registry must not be null");
+        this(engine, store, config, handlerMapping, registry, NO_LIMIT);
     }
 
     @Override
@@ -100,6 +114,11 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         // Force reading the body so ContentCachingRequestWrapper caches it
         wrappedRequest.getInputStream().readAllBytes();
         String fingerprint = RequestFingerprint.of(wrappedRequest.getContentAsByteArray());
+
+        if (maxBodyBytes != NO_LIMIT && wrappedRequest.getContentAsByteArray().length > maxBodyBytes) {
+            writeJsonError(response, 413, ERROR_BODY_TOO_LARGE);
+            return;
+        }
 
         IdempotencyContext context;
         try {
