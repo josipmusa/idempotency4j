@@ -22,7 +22,7 @@
       "name": "idempotency.filter-order",
       "type": "java.lang.Integer",
       "description": "Order of the idempotency servlet filter in the filter chain. Lower values execute earlier.",
-      "defaultValue": -2147483647
+      "defaultValue": 0
     },
     {
       "name": "idempotency.purge.enabled",
