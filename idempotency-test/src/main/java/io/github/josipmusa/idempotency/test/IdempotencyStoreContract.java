@@ -673,4 +673,25 @@ public abstract class IdempotencyStoreContract {
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
     }
+
+    @Test
+    void When_KeyReleasedAfterLockExpired_Expect_FailedRecordNotImmediatelyPurgeable() throws InterruptedException {
+        IdempotencyStore s = store();
+        String key = "failed-expiry-contract";
+
+        // Acquire with a very short lock
+        s.tryAcquire(contextFor(key, Duration.ofMillis(50)));
+
+        // Wait for the lock to expire, then release
+        Thread.sleep(100);
+        s.release(key);
+
+        // Purge immediately — the FAILED record should NOT be eligible yet.
+        int purged = s.purgeExpired();
+
+        assertThat(purged)
+                .as("FAILED record should survive an immediate purgeExpired() call; "
+                        + "its expires_at must be now + lockTimeout, not the already-past lock_expires_at")
+                .isEqualTo(0);
+    }
 }

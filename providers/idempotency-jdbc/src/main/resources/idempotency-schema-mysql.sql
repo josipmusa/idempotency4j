@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
     response_headers  TEXT          NULL,
     response_body     BLOB          NULL,
     request_fingerprint VARCHAR(64) NULL,
+    lock_timeout_ms   BIGINT        NOT NULL DEFAULT 0,
     completed_at      TIMESTAMP(6)  NULL,
     created_at        TIMESTAMP(6)  DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
     expires_at        TIMESTAMP(6)  NULL,
