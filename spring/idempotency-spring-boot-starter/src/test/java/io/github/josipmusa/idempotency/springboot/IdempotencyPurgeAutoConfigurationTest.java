@@ -83,4 +83,15 @@ class IdempotencyPurgeAutoConfigurationTest {
             assertThatCode(() -> taskCaptor.getValue().run()).doesNotThrowAnyException();
         });
     }
+
+    @Test
+    void When_EnableSchedulingAbsent_Expect_WarnerBeanPresent() {
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .run(context -> {
+                    assertThat(context).hasSingleBean(SchedulingConfigurer.class);
+                    assertThat(context).hasBean("idempotencyPurgeSchedulingWarner");
+                    assertThat(context).hasNotFailed();
+                });
+    }
 }
