@@ -6,7 +6,7 @@ import static org.mockito.Mockito.mock;
 import io.github.josipmusa.core.IdempotencyConfig;
 import io.github.josipmusa.core.IdempotencyEngine;
 import io.github.josipmusa.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.spring.IdempotencyFilter;
+import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;

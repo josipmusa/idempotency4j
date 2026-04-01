@@ -1,4 +1,4 @@
-package io.github.josipmusa.idempotency.spring;
+package io.github.josipmusa.idempotency.spring.web;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;

@@ -1,4 +1,4 @@
-package io.github.josipmusa.idempotency.spring;
+package io.github.josipmusa.idempotency.spring.web;
 
 import io.github.josipmusa.core.IdempotencyConfig;
 import java.lang.reflect.Method;

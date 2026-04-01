@@ -11,7 +11,7 @@
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
-    <artifactId>idempotency-spring</artifactId>
+    <artifactId>idempotency-spring-web</artifactId>
     <packaging>jar</packaging>
 
     <dependencies>
