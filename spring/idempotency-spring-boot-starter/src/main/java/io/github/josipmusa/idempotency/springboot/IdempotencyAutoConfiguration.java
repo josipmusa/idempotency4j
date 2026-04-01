@@ -71,8 +71,7 @@ public class IdempotencyAutoConfiguration {
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             IdempotencyProperties properties) {
-        return new IdempotencyFilter(engine, store, config, handlerMapping, registry,
-                properties.getMaxBodyBytes());
+        return new IdempotencyFilter(engine, store, config, handlerMapping, registry, properties.getMaxBodyBytes());
     }
 
     @Bean

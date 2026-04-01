@@ -111,7 +111,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             // A stale lock (lockExpiresAt in the past) is claimable by any caller, regardless of
             // the caller's lockTimeout. This matches JDBC behavior.
             if (existing.status() == Status.FAILED
-                    || (existing.lockExpiresAt() != null && existing.lockExpiresAt().isBefore(now))) {
+                    || (existing.lockExpiresAt() != null
+                            && existing.lockExpiresAt().isBefore(now))) {
                 if (store.replace(context.key(), existing, newEntry)) {
                     return AcquireResult.acquired();
                 }

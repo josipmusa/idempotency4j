@@ -13,7 +13,6 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
-
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 class IdempotencyAutoConfigurationTest {
