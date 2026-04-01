@@ -324,6 +324,22 @@ class IdempotencyFilterTest {
     }
 
     @Test
+    void When_RequestBodyExceedsLimit_Expect_Returns413() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "key-123");
+        request.setContent("this body is definitely longer than ten bytes".getBytes());
+
+        IdempotencyFilter limitedFilter =
+                new IdempotencyFilter(engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, 10);
+
+        limitedFilter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(413);
+        assertThat(response.getContentAsString()).contains("Request body exceeds maximum allowed size");
+        verifyNoInteractions(engine);
+    }
+
+    @Test
     void When_FingerprintMismatch_Expect_Returns422() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "key-1");

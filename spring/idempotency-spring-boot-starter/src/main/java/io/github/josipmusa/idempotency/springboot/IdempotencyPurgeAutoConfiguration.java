@@ -3,11 +3,14 @@ package io.github.josipmusa.idempotency.springboot;
 import io.github.josipmusa.core.IdempotencyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
 import org.springframework.scheduling.annotation.SchedulingConfigurer;
 import org.springframework.scheduling.support.CronExpression;
 
@@ -37,5 +40,19 @@ public class IdempotencyPurgeAutoConfiguration {
                     }
                 },
                 cron);
+    }
+
+    @Bean
+    public SmartInitializingSingleton idempotencyPurgeSchedulingWarner(ApplicationContext applicationContext) {
+        return () -> {
+            String[] schedulingProcessors =
+                    applicationContext.getBeanNamesForType(ScheduledAnnotationBeanPostProcessor.class);
+            if (schedulingProcessors.length == 0) {
+                log.warn("idempotency.purge.enabled is true but @EnableScheduling was not detected. "
+                        + "Expired idempotency records will NOT be purged automatically. "
+                        + "Add @EnableScheduling to your application class, "
+                        + "or set idempotency.purge.enabled=false to suppress this warning.");
+            }
+        };
     }
 }

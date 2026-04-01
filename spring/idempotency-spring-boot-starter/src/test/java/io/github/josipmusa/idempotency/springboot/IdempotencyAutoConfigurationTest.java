@@ -13,7 +13,6 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.core.Ordered;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 class IdempotencyAutoConfigurationTest {
@@ -103,7 +102,7 @@ class IdempotencyAutoConfigurationTest {
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .run(context -> {
                     FilterRegistrationBean<?> registration = context.getBean(FilterRegistrationBean.class);
-                    assertThat(registration.getOrder()).isEqualTo(Ordered.HIGHEST_PRECEDENCE + 1);
+                    assertThat(registration.getOrder()).isEqualTo(0);
                 });
     }
 
@@ -115,6 +114,16 @@ class IdempotencyAutoConfigurationTest {
                 .run(context -> {
                     FilterRegistrationBean<?> registration = context.getBean(FilterRegistrationBean.class);
                     assertThat(registration.getOrder()).isEqualTo(10);
+                });
+    }
+
+    @Test
+    void When_CustomMaxBodyBytes_Expect_AppliedToFilter() {
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .withPropertyValues("idempotency.max-body-bytes=2097152")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(IdempotencyFilter.class);
                 });
     }
 

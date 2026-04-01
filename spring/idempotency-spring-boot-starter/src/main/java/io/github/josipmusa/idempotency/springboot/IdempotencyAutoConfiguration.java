@@ -7,6 +7,7 @@ import io.github.josipmusa.idempotency.spring.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.IdempotentHandlerRegistry;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -36,8 +37,10 @@ public class IdempotencyAutoConfiguration {
     @Bean(destroyMethod = "shutdownNow")
     @ConditionalOnMissingBean(name = "idempotencyScheduler")
     public ScheduledExecutorService idempotencyScheduler() {
-        return Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "idempotency-heartbeat");
+        int poolSize = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+        AtomicInteger counter = new AtomicInteger(0);
+        return Executors.newScheduledThreadPool(poolSize, r -> {
+            Thread t = new Thread(r, "idempotency-heartbeat-" + counter.incrementAndGet());
             t.setDaemon(true);
             return t;
         });
@@ -66,8 +69,9 @@ public class IdempotencyAutoConfiguration {
             IdempotencyStore store,
             IdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
-            IdempotentHandlerRegistry registry) {
-        return new IdempotencyFilter(engine, store, config, handlerMapping, registry);
+            IdempotentHandlerRegistry registry,
+            IdempotencyProperties properties) {
+        return new IdempotencyFilter(engine, store, config, handlerMapping, registry, properties.getMaxBodyBytes());
     }
 
     @Bean

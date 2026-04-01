@@ -51,9 +51,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private static final String DELETE_EXPIRED =
             "DELETE FROM idempotency_records WHERE idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
 
-    private static final String INSERT =
-            "INSERT INTO idempotency_records (idempotency_key, status, locked_at, lock_expires_at, expires_at, request_fingerprint) "
-                    + "VALUES (?, 'IN_PROGRESS', ?, ?, ?, ?)";
+    private static final String INSERT = "INSERT INTO idempotency_records "
+            + "(idempotency_key, status, locked_at, lock_expires_at, expires_at, request_fingerprint, lock_timeout_ms) "
+            + "VALUES (?, 'IN_PROGRESS', ?, ?, ?, ?, ?)";
 
     private static final String SELECT_FOR_UPDATE =
             "SELECT status, lock_expires_at, response_code, response_headers, response_body, completed_at, request_fingerprint "
@@ -63,7 +63,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static final String STEAL_LOCK =
             "UPDATE idempotency_records SET status = 'IN_PROGRESS', locked_at = ?, lock_expires_at = ?, "
-                    + "request_fingerprint = ?, "
+                    + "request_fingerprint = ?, lock_timeout_ms = ?, "
                     + "response_code = NULL, response_headers = NULL, response_body = NULL, completed_at = NULL "
                     + "WHERE idempotency_key = ? AND (status = 'FAILED' OR (status = 'IN_PROGRESS' AND lock_expires_at < ?))";
 
@@ -73,9 +73,12 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     + "WHERE idempotency_key = ? AND status = 'IN_PROGRESS'";
 
     private static final String RELEASE =
-            "UPDATE idempotency_records SET status = 'FAILED', expires_at = lock_expires_at, locked_at = NULL, lock_expires_at = NULL, "
+            "UPDATE idempotency_records SET status = 'FAILED', expires_at = ?, locked_at = NULL, lock_expires_at = NULL, "
                     + "response_code = NULL, response_headers = NULL, response_body = NULL "
                     + "WHERE idempotency_key = ? AND status = 'IN_PROGRESS'";
+
+    private static final String SELECT_LOCK_TIMEOUT_FOR_UPDATE = "SELECT lock_timeout_ms FROM idempotency_records "
+            + "WHERE idempotency_key = ? AND status = 'IN_PROGRESS' FOR UPDATE";
 
     private static final String EXTEND_LOCK =
             "UPDATE idempotency_records SET lock_expires_at = ? WHERE idempotency_key = ? AND status = 'IN_PROGRESS'";
@@ -269,12 +272,35 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     @Override
     public void release(String key) {
         try (Connection conn = dataSource.getConnection()) {
-            try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
-                ps.setString(1, key);
-                int updated = ps.executeUpdate();
-                if (updated == 0) {
-                    throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, "release"));
+            conn.setAutoCommit(false);
+            try {
+                long lockTimeoutMs;
+                try (PreparedStatement sel = conn.prepareStatement(SELECT_LOCK_TIMEOUT_FOR_UPDATE)) {
+                    sel.setString(1, key);
+                    try (ResultSet rs = sel.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, "release"));
+                        }
+                        lockTimeoutMs = rs.getLong("lock_timeout_ms");
+                    }
                 }
+                Instant failedExpiry = clock.instant().plus(Duration.ofMillis(lockTimeoutMs));
+                try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
+                    ps.setTimestamp(1, Timestamp.from(failedExpiry));
+                    ps.setString(2, key);
+                    if (ps.executeUpdate() == 0) {
+                        throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, "release"));
+                    }
+                }
+                conn.commit();
+            } catch (IdempotencyStoreException e) {
+                rollbackQuietly(conn);
+                throw e;
+            } catch (SQLException e) {
+                rollbackQuietly(conn);
+                throw new IdempotencyStoreException("Failed to release key '" + key + "'", e);
+            } finally {
+                resetAutoCommit(conn);
             }
         } catch (SQLException e) {
             throw new IdempotencyStoreException("Failed to release key '" + key + "'", e);
@@ -340,6 +366,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 ins.setTimestamp(3, Timestamp.from(now.plus(context.lockTimeout())));
                 ins.setTimestamp(4, Timestamp.from(now.plus(context.ttl())));
                 ins.setString(5, context.requestFingerprint());
+                ins.setLong(6, context.lockTimeout().toMillis());
                 ins.executeUpdate();
                 return true;
             } catch (SQLException e) {
@@ -411,8 +438,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             ps.setTimestamp(1, Timestamp.from(now));
             ps.setTimestamp(2, Timestamp.from(now.plus(context.lockTimeout())));
             ps.setString(3, context.requestFingerprint());
-            ps.setString(4, context.key());
-            ps.setTimestamp(5, Timestamp.from(now));
+            ps.setLong(4, context.lockTimeout().toMillis());
+            ps.setString(5, context.key());
+            ps.setTimestamp(6, Timestamp.from(now));
             return ps.executeUpdate() > 0;
         }
     }

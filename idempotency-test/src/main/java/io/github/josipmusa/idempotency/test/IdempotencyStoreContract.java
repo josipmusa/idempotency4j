@@ -115,6 +115,25 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
+    void When_StaleLockAndSameLockTimeout_Expect_IsStolen() throws InterruptedException {
+        IdempotencyStore s = store();
+        String key = "stale-same-timeout";
+        Duration sharedTimeout = Duration.ofMillis(100);
+
+        // Acquire with a 100ms lock
+        s.tryAcquire(contextFor(key, sharedTimeout));
+        // Simulate crashed caller — never complete or release
+        Thread.sleep(150); // past lockExpiresAt
+
+        // Second caller uses the SAME timeout — must still steal the stale lock
+        AcquireResult result = s.tryAcquire(contextFor(key, sharedTimeout));
+
+        assertThat(result)
+                .as("A stale lock should be stealable regardless of the caller's lockTimeout")
+                .isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
     void When_InFlightKey_Expect_BlocksAndReturnsDuplicateAfterCompletion() throws Exception {
         IdempotencyStore s = store();
         String key = "inflight-key";
@@ -584,16 +603,12 @@ public abstract class IdempotencyStoreContract {
         var ctx = contextFor("purge-stale-inprogress-1", Duration.ofMinutes(10), Duration.ofMillis(2));
         s.tryAcquire(ctx);
         Thread.sleep(50);
-        s.purgeExpired();
+        int purged = s.purgeExpired();
         // The entry TTL has not expired, so purge should keep it (even though lock expired).
-        // A correct purge must NOT remove an IN_PROGRESS entry whose TTL is still valid —
-        // the bug is that InMemory only checks lockExpiresAt and removes it prematurely.
-        // After a correct purge, tryAcquire on a stale lock returns Acquired (stolen).
-        // After the buggy purge (entry deleted), tryAcquire also returns Acquired — so this
-        // test is a companion to When_StaleInProgressBothLockAndTtlExpired; it drives the
-        // distinction that purge must require BOTH conditions before removing IN_PROGRESS.
-        var result = s.tryAcquire(ctx);
-        assertThat(result).isNotInstanceOf(AcquireResult.Acquired.class).isNotInstanceOf(AcquireResult.Duplicate.class);
+        // A correct purge must NOT remove an IN_PROGRESS entry whose TTL is still valid.
+        assertThat(purged)
+                .as("Purge must not remove IN_PROGRESS entry whose TTL is still valid")
+                .isEqualTo(0);
     }
 
     @Test
@@ -657,5 +672,26 @@ public abstract class IdempotencyStoreContract {
         var result = s.tryAcquire(second);
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_KeyReleasedAfterLockExpired_Expect_FailedRecordNotImmediatelyPurgeable() throws InterruptedException {
+        IdempotencyStore s = store();
+        String key = "failed-expiry-contract";
+
+        // Acquire with a very short lock
+        s.tryAcquire(contextFor(key, Duration.ofMillis(50)));
+
+        // Wait for the lock to expire, then release
+        Thread.sleep(100);
+        s.release(key);
+
+        // Purge immediately — the FAILED record should NOT be eligible yet.
+        int purged = s.purgeExpired();
+
+        assertThat(purged)
+                .as("FAILED record should survive an immediate purgeExpired() call; "
+                        + "its expires_at must be now + lockTimeout, not the already-past lock_expires_at")
+                .isEqualTo(0);
     }
 }

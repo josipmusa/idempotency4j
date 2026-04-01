@@ -22,7 +22,7 @@
       "name": "idempotency.filter-order",
       "type": "java.lang.Integer",
       "description": "Order of the idempotency servlet filter in the filter chain. Lower values execute earlier.",
-      "defaultValue": -2147483647
+      "defaultValue": 0
     },
     {
       "name": "idempotency.purge.enabled",
@@ -35,6 +35,12 @@
       "type": "java.lang.String",
       "description": "Cron expression controlling how often expired idempotency records are purged.",
       "defaultValue": "0 0 * * * *"
+    },
+    {
+      "name": "idempotency.max-body-bytes",
+      "type": "java.lang.Long",
+      "description": "Maximum allowed request body size in bytes for idempotency processing. Requests exceeding this limit receive HTTP 413. Set to -1 to disable the limit.",
+      "defaultValue": 1048576
     }
   ]
 }
