@@ -28,10 +28,21 @@ public final class IdempotencyConfig {
         this.keyHeader = builder.keyHeader;
     }
 
+    /**
+     * Returns a new builder with all defaults applied.
+     *
+     * @return a builder for constructing {@link IdempotencyConfig}
+     */
     public static Builder builder() {
         return new Builder();
     }
 
+    /**
+     * Returns an {@link IdempotencyConfig} with all defaults: 24h TTL,
+     * 10s lock timeout, and {@code "Idempotency-Key"} header.
+     *
+     * @return a default config instance
+     */
     public static IdempotencyConfig defaults() {
         return builder().build();
     }
@@ -53,23 +64,73 @@ public final class IdempotencyConfig {
         private Duration defaultLockTimeout = Duration.ofSeconds(10);
         private String keyHeader = "Idempotency-Key";
 
+        /**
+         * Sets the default TTL for completed idempotency records.
+         *
+         * <p>After this duration the record expires and the key can be reused
+         * for a new request. Defaults to 24 hours.
+         *
+         * @param ttl must be positive (non-zero, non-negative)
+         * @return this builder
+         * @throws IllegalArgumentException if {@code ttl} is zero or negative
+         */
         public Builder defaultTtl(Duration ttl) {
             Objects.requireNonNull(ttl, "defaultTtl must not be null");
             this.defaultTtl = ttl;
             return this;
         }
 
+        /**
+         * Sets the default lock timeout for in-flight requests.
+         *
+         * <p>A second caller arriving while the key is IN_PROGRESS will block
+         * for up to this duration waiting for a result. If the holder does not
+         * complete within this window, the second caller receives
+         * {@link AcquireResult.LockTimeout}.
+         *
+         * <p>This value is also the initial lock expiry for the holder — if the
+         * holder crashes without completing or releasing, the lock becomes
+         * stealable after this duration. The heartbeat extends the lock at
+         * half this interval, so this value effectively sets the crash-detection
+         * window as well.
+         *
+         * <p>Defaults to 10 seconds. Minimum is 2 ms (the engine divides by 2
+         * for the heartbeat interval, so values below 2 ms are rejected).
+         *
+         * @param timeout must be at least 2 ms
+         * @return this builder
+         * @throws IllegalArgumentException if {@code timeout} is less than 2 ms
+         */
         public Builder defaultLockTimeout(Duration timeout) {
             Objects.requireNonNull(timeout, "defaultLockTimeout must not be null");
             this.defaultLockTimeout = timeout;
             return this;
         }
 
+        /**
+         * Sets the HTTP header name used to carry the idempotency key.
+         *
+         * <p>Defaults to {@code "Idempotency-Key"} per the IETF draft standard.
+         * Override if your API uses a different header convention
+         * (e.g. {@code "X-Idempotency-Key"}).
+         *
+         * @param keyHeader must not be null or blank
+         * @return this builder
+         * @throws IllegalArgumentException if {@code keyHeader} is blank
+         */
         public Builder keyHeader(String keyHeader) {
             this.keyHeader = keyHeader;
             return this;
         }
 
+        /**
+         * Constructs the {@link IdempotencyConfig} with the configured values.
+         *
+         * @return a new immutable config instance
+         * @throws IllegalArgumentException if any value fails validation
+         *         ({@code defaultTtl} must be positive; {@code defaultLockTimeout}
+         *         must be &ge; 2 ms; {@code keyHeader} must not be blank)
+         */
         public IdempotencyConfig build() {
             if (defaultTtl.isZero() || defaultTtl.isNegative()) {
                 throw new IllegalArgumentException("defaultTtl must be positive, got: " + defaultTtl);
