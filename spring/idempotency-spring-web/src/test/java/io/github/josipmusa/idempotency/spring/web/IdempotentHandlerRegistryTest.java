@@ -1,6 +1,6 @@
-package io.github.josipmusa.idempotency.spring;
+package io.github.josipmusa.idempotency.spring.web;
 
-import static io.github.josipmusa.idempotency.spring.IdempotentHandlerRegistry.*;
+import static io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;

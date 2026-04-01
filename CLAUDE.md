@@ -24,7 +24,7 @@ idempotency4j/
 │   │                        Depends on core only. No Spring dependency.
 │   └── idempotency-redis/   Redis implementation of IdempotencyStore.
 │                            Depends on core only. No Spring dependency.
-├── idempotency-spring/      Spring MVC adapter. Depends on core +
+├── idempotency-spring-web/      Spring MVC adapter. Depends on core +
 │                            Spring Web. Contains @Idempotent annotation
 │                            and filter.
 └── idempotency-spring-boot-starter/  Autoconfiguration. Wires everything
@@ -40,7 +40,7 @@ These rules are strict. Do not violate them.
 - `idempotency-jdbc` depends on core only — no Spring
 - `idempotency-redis` depends on core only — no Spring
 - `idempotency-test` depends on idempotency-inmemory + JUnit 5 + AssertJ
-- `idempotency-spring` depends on core + Spring Web
+- `idempotency-spring-web` depends on core + Spring Web
 - `idempotency-spring-boot-starter` depends on spring module + providers
 
 When adding dependencies to pom.xml - first think about where the version managing belongs.
@@ -268,7 +268,7 @@ idempotency key. When a subsequent request arrives with the same key
 but a different body hash, the store returns `FingerprintMismatch`
 instead of `Duplicate`, and the adapter returns HTTP 422.
 
-- **Computed in:** `RequestFingerprint.of(byte[] body)` in `idempotency-spring`
+- **Computed in:** `RequestFingerprint.of(byte[] body)` in `idempotency-spring-web`
 - **Stored in:** `request_fingerprint VARCHAR(64)` column (JDBC) or
   `requestFingerprint` field on `Entry` record (in-memory)
 - **Compared at:** store level in `tryAcquire()` when status is COMPLETE
@@ -296,7 +296,7 @@ For compliance-sensitive environments:
 - providers/idempotency-inmemory (InMemoryIdempotencyStore)
 - providers/idempotency-jdbc (JdbcIdempotencyStore with Testcontainers MySQL tests)
 - idempotency-test (IdempotencyStoreContract)
-- idempotency-spring (IdempotencyFilter + @Idempotent annotation)
+- idempotency-spring-web (IdempotencyFilter + @Idempotent annotation)
 - idempotency-spring-boot-starter (IdempotencyAutoConfiguration + IdempotencyPurgeAutoConfiguration)
 
 ### Not started — do not implement

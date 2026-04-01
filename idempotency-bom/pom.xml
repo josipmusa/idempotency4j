@@ -42,7 +42,7 @@
             </dependency>
             <dependency>
                 <groupId>io.github.josipmusa</groupId>
-                <artifactId>idempotency-spring</artifactId>
+                <artifactId>idempotency-spring-web</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

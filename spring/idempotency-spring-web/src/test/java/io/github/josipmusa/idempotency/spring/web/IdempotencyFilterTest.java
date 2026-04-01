@@ -1,4 +1,4 @@
-package io.github.josipmusa.idempotency.spring;
+package io.github.josipmusa.idempotency.spring.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
