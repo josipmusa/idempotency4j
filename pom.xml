@@ -8,7 +8,33 @@
     <artifactId>idempotency4j</artifactId>
     <packaging>pom</packaging>
     <version>0.0.1-SNAPSHOT</version>
+    <name>idempotency4j</name>
     <description>Idempotency Java Library</description>
+    <url>https://github.com/josipmusa/idempotency4j</url>
+    <inceptionYear>2024</inceptionYear>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>josipmusa</id>
+            <name>Josip Musa</name>
+            <url>https://github.com/josipmusa</url>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:git://github.com/josipmusa/idempotency4j.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/josipmusa/idempotency4j.git</developerConnection>
+        <url>https://github.com/josipmusa/idempotency4j</url>
+        <tag>HEAD</tag>
+    </scm>
 
     <modules>
         <module>idempotency-bom</module>
@@ -34,6 +60,10 @@
         <testcontainers-postgresql.version>1.20.4</testcontainers-postgresql.version>
         <testcontainers-junit-jupiter.version>1.20.4</testcontainers-junit-jupiter.version>
         <jackson.version>2.18.2</jackson.version>
+        <maven-source-plugin.version>3.3.1</maven-source-plugin.version>
+        <maven-javadoc-plugin.version>3.11.2</maven-javadoc-plugin.version>
+        <maven-gpg-plugin.version>3.2.7</maven-gpg-plugin.version>
+        <central-publishing-maven-plugin.version>0.7.0</central-publishing-maven-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -147,5 +177,83 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+            Release profile: activated with -Prelease.
+            Generates sources and Javadoc JARs, signs all artifacts, and publishes
+            to Maven Central via the Sonatype Central Publishing plugin.
+
+            Prerequisites:
+              - GPG key available to the build agent
+              - CENTRAL_USERNAME / CENTRAL_TOKEN environment variables (or in settings.xml)
+
+            To publish a release:
+              mvn versions:set -DnewVersion=X.Y.Z
+              mvn deploy -Prelease
+        -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>${maven-source-plugin.version}</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>${maven-javadoc-plugin.version}</version>
+                        <configuration>
+                            <release>${java.version}</release>
+                            <doclint>all,-missing</doclint>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>${maven-gpg-plugin.version}</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>${central-publishing-maven-plugin.version}</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>published</waitUntil>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
 </project>

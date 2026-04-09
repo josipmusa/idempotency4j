@@ -34,7 +34,19 @@ public @interface Idempotent {
 
     /**
      * Whether a missing idempotency key header should be rejected with 422 Unprocessable Entity.
-     * When false, requests without a key pass through without idempotency enforcement.
+     *
+     * <p>Full behavior matrix:
+     * <table>
+     *   <caption>required vs key presence</caption>
+     *   <tr><th>required</th><th>Key header present</th><th>Behavior</th></tr>
+     *   <tr><td>true (default)</td><td>Yes</td><td>Full idempotency enforcement</td></tr>
+     *   <tr><td>true (default)</td><td>No</td><td>422 Unprocessable Entity</td></tr>
+     *   <tr><td>false</td><td>Yes</td><td>Full idempotency enforcement</td></tr>
+     *   <tr><td>false</td><td>No</td><td>Request passes through without idempotency enforcement</td></tr>
+     * </table>
+     *
+     * <p>Use {@code required = false} on endpoints where idempotency is optional —
+     * clients that want it send a key; clients that do not are not rejected.
      */
     boolean required() default true;
 }
