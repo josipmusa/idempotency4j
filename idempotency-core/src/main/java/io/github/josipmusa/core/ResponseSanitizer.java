@@ -7,23 +7,6 @@ package io.github.josipmusa.core;
  * before {@link IdempotencyStore#complete}. The returned value is what gets
  * stored and replayed on duplicate requests.
  *
- * <p>The default (registered by the Spring Boot starter) is an identity —
- * no sanitization. Override this bean to strip sensitive headers or mask
- * the response body:
- *
- * <pre>{@code
- * @Bean
- * ResponseSanitizer responseSanitizer() {
- *     return response -> new StoredResponse(
- *         response.statusCode(),
- *         response.headers().entrySet().stream()
- *             .filter(e -> !e.getKey().equalsIgnoreCase("Set-Cookie"))
- *             .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue)),
- *         response.body(),
- *         response.completedAt()
- *     );
- * }
- * }</pre>
  */
 @FunctionalInterface
 public interface ResponseSanitizer {
