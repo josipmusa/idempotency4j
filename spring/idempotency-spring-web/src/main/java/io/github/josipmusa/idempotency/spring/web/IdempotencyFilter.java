@@ -7,6 +7,7 @@ import io.github.josipmusa.core.IdempotencyConfig;
 import io.github.josipmusa.core.IdempotencyContext;
 import io.github.josipmusa.core.IdempotencyEngine;
 import io.github.josipmusa.core.IdempotencyStore;
+import io.github.josipmusa.core.ResponseSanitizer;
 import io.github.josipmusa.core.StoredResponse;
 import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
@@ -59,6 +60,24 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private final RequestMappingHandlerMapping handlerMapping;
     private final IdempotentHandlerRegistry registry;
     private final long maxBodyBytes;
+    private final ResponseSanitizer sanitizer;
+
+    public IdempotencyFilter(
+            IdempotencyEngine engine,
+            IdempotencyStore store,
+            IdempotencyConfig config,
+            RequestMappingHandlerMapping handlerMapping,
+            IdempotentHandlerRegistry registry,
+            long maxBodyBytes,
+            ResponseSanitizer sanitizer) {
+        this.engine = Objects.requireNonNull(engine, "engine must not be null");
+        this.store = Objects.requireNonNull(store, "store must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
+        this.registry = Objects.requireNonNull(registry, "registry must not be null");
+        this.maxBodyBytes = maxBodyBytes;
+        this.sanitizer = Objects.requireNonNull(sanitizer, "sanitizer must not be null");
+    }
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
@@ -67,12 +86,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             long maxBodyBytes) {
-        this.engine = Objects.requireNonNull(engine, "engine must not be null");
-        this.store = Objects.requireNonNull(store, "store must not be null");
-        this.config = Objects.requireNonNull(config, "config must not be null");
-        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
-        this.registry = Objects.requireNonNull(registry, "registry must not be null");
-        this.maxBodyBytes = maxBodyBytes;
+        this(engine, store, config, handlerMapping, registry, maxBodyBytes, response -> response);
     }
 
     public IdempotencyFilter(
@@ -81,7 +95,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             IdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry) {
-        this(engine, store, config, handlerMapping, registry, NO_LIMIT);
+        this(engine, store, config, handlerMapping, registry, NO_LIMIT, response -> response);
     }
 
     @Override
@@ -156,8 +170,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                         collectHeaders(wrappedResponse),
                         wrappedResponse.getContentAsByteArray(),
                         Instant.now());
+                StoredResponse sanitized = sanitizer.sanitize(storedResponse);
                 try {
-                    store.complete(context.key(), storedResponse, context.ttl());
+                    store.complete(context.key(), sanitized, context.ttl());
                 } catch (Exception e) {
                     log.error(
                             "Failed to store idempotency response for key '"

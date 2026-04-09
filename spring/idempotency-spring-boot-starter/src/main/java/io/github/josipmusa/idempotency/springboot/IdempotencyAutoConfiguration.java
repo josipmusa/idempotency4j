@@ -3,6 +3,7 @@ package io.github.josipmusa.idempotency.springboot;
 import io.github.josipmusa.core.IdempotencyConfig;
 import io.github.josipmusa.core.IdempotencyEngine;
 import io.github.josipmusa.core.IdempotencyStore;
+import io.github.josipmusa.core.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
 import java.util.concurrent.Executors;
@@ -32,6 +33,12 @@ public class IdempotencyAutoConfiguration {
                 .defaultTtl(idempotencyProperties.getDefaultTtl())
                 .defaultLockTimeout(idempotencyProperties.getDefaultLockTimeout())
                 .build();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    ResponseSanitizer responseSanitizer() {
+        return response -> response;
     }
 
     @Bean(destroyMethod = "shutdownNow")
@@ -70,8 +77,10 @@ public class IdempotencyAutoConfiguration {
             IdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
-            IdempotencyProperties properties) {
-        return new IdempotencyFilter(engine, store, config, handlerMapping, registry, properties.getMaxBodyBytes());
+            IdempotencyProperties properties,
+            ResponseSanitizer sanitizer) {
+        return new IdempotencyFilter(
+                engine, store, config, handlerMapping, registry, properties.getMaxBodyBytes(), sanitizer);
     }
 
     @Bean
