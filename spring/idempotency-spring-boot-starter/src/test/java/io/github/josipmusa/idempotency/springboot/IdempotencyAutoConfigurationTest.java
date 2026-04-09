@@ -148,12 +148,9 @@ class IdempotencyAutoConfigurationTest {
     @Test
     void When_CustomSanitizerBean_Expect_AutoConfiguredSanitizerSkipped() {
         ResponseSanitizer custom = response -> response;
-        contextRunner
-                .withBean(ResponseSanitizer.class, () -> custom)
-                .run(context -> {
-                    assertThat(context).hasSingleBean(ResponseSanitizer.class);
-                    assertThat(context.getBean(ResponseSanitizer.class))
-                            .isSameAs(custom);
-                });
+        contextRunner.withBean(ResponseSanitizer.class, () -> custom).run(context -> {
+            assertThat(context).hasSingleBean(ResponseSanitizer.class);
+            assertThat(context.getBean(ResponseSanitizer.class)).isSameAs(custom);
+        });
     }
 }
