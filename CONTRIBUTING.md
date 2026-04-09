@@ -10,21 +10,22 @@ mvn verify
 
 This compiles everything, runs all tests, and checks formatting. A clean build is the baseline for any contribution.
 
-To build a single module without running the full suite:
+To test a specific module without running the full suite, always use `-pl` and `-am`:
 
 ```bash
-mvn test -pl providers/idempotency-inmemory -am
+mvn test -pl idempotency-core -am
+mvn test -pl providers/idempotency-jdbc -am
 ```
 
 The `-am` flag builds upstream dependencies from source so SNAPSHOT versions resolve correctly.
 
 ## Running tests
 
-Unit and integration tests are in each module's `src/test/java`. Integration tests for JDBC backends use [Testcontainers](https://testcontainers.com/) — Docker must be running.
+Unit and integration tests are in each module's `src/test/java`. Provider modules that require infrastructure use [Testcontainers](https://testcontainers.com/) — Docker must be running when testing those.
 
 ```bash
-mvn test                    # all tests
-mvn test -pl idempotency-core   # core tests only
+mvn test              # all tests
+mvn test -pl idempotency-core -am   # core tests only
 ```
 
 ## Code style

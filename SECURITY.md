@@ -15,6 +15,10 @@ Include as much of the following as you can:
 
 You will receive a response within 7 days. If you do not hear back, follow up on the advisory thread.
 
+## Reducing sensitive data exposure
+
+The store persists full HTTP response bodies. To strip or redact sensitive fields before they are written to the store, register a `ResponseSanitizer` bean. The Spring Boot starter picks it up automatically and calls it on every response before storage. See the README for an example.
+
 ## Scope
 
 This library persists full HTTP response bodies, which may include sensitive data depending on which endpoints are annotated with `@Idempotent`. Key areas to consider when assessing impact:
