@@ -40,7 +40,7 @@ class IdempotencyEngineTest {
     }
 
     private IdempotencyContext defaultContext(String key) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), "test-fingerprint");
+        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
     }
 
     private StoredResponse anyStoredResponse() {
@@ -134,7 +134,7 @@ class IdempotencyEngineTest {
     @Test
     void When_LongRunningAction_Expect_HeartbeatExtendsLock() throws Exception {
         IdempotencyContext context =
-                new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
+                new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         engine.execute(context, () -> Thread.sleep(300));
@@ -145,7 +145,7 @@ class IdempotencyEngineTest {
     @Test
     void When_ActionCompletes_Expect_HeartbeatStops() throws Exception {
         IdempotencyContext context =
-                new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
+                new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         engine.execute(context, () -> {});
@@ -170,7 +170,7 @@ class IdempotencyEngineTest {
     @Test
     void When_ActionThrows_Expect_HeartbeatStops() throws Exception {
         IdempotencyContext context =
-                new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
+                new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
 
         try {
@@ -265,7 +265,7 @@ class IdempotencyEngineTest {
     @Test
     void When_HeartbeatExtendLockThrows_Expect_HeartbeatContinues() throws Exception {
         IdempotencyContext context =
-                new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "test-fingerprint");
+                new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
         doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any());
 

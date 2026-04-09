@@ -340,6 +340,38 @@ class IdempotencyFilterTest {
     }
 
     @Test
+    void When_DuplicateResult_Expect_CacheControlNoStoreSet() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse()));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getHeader("Cache-Control")).isEqualTo("no-store");
+    }
+
+    @Test
+    void When_RequestBodyExactlyAtLimit_Expect_ProceedsNormally() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "key-123");
+        request.setContent("0123456789".getBytes()); // exactly 10 bytes
+        IdempotencyFilter limitedFilter =
+                new IdempotencyFilter(engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, 10);
+        doAnswer(invocation -> {
+                    ThrowingRunnable action = invocation.getArgument(1);
+                    action.run();
+                    return ExecutionResult.executed();
+                })
+                .when(engine)
+                .execute(any(), any());
+
+        limitedFilter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isNotEqualTo(413);
+        verify(engine).execute(any(), any());
+    }
+
+    @Test
     void When_FingerprintMismatch_Expect_Returns422() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "key-1");

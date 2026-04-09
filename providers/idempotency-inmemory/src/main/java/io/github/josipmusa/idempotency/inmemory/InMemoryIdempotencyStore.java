@@ -190,11 +190,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
      * <ul>
      *   <li>{@code COMPLETE} and {@code FAILED} — removed when
      *       {@code expiresAt} is in the past</li>
-     *   <li>{@code IN_PROGRESS} — removed when {@code lockExpiresAt}
-     *       is in the past, indicating the previous holder crashed or
-     *       timed out. The next {@link #tryAcquire} caller will insert
-     *       a fresh entry rather than stealing — the outcome is
-     *       identical.</li>
+     *   <li>{@code IN_PROGRESS} — removed only when <em>both</em>
+     *       {@code lockExpiresAt} and {@code expiresAt} are in the past.
+     *       Entries whose lock has expired but whose TTL has not are
+     *       intentionally kept — they remain eligible for lock stealing
+     *       by the next {@link #tryAcquire} caller.</li>
      * </ul>
      *
      * <p>This method does not self-schedule. In Spring Boot applications,

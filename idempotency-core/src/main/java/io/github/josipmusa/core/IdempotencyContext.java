@@ -32,7 +32,8 @@ import java.util.Objects;
 public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout, String requestFingerprint) {
 
     private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(2);
-    private static final int MAX_KEY_LENGTH = 255;
+    public static final int MAX_KEY_LENGTH = 255;
+    private static final int FINGERPRINT_LENGTH = 64;
 
     public IdempotencyContext {
         Objects.requireNonNull(key, "key must not be null");
@@ -54,6 +55,10 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout,
         Objects.requireNonNull(requestFingerprint, "requestFingerprint must not be null");
         if (requestFingerprint.isBlank()) {
             throw new IllegalArgumentException("requestFingerprint must not be blank");
+        }
+        if (requestFingerprint.length() != FINGERPRINT_LENGTH) {
+            throw new IllegalArgumentException("requestFingerprint must be " + FINGERPRINT_LENGTH
+                    + " characters (SHA-256 hex digest), got: " + requestFingerprint.length());
         }
     }
 }

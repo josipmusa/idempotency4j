@@ -24,18 +24,23 @@ import org.junit.jupiter.api.Test;
 
 public abstract class IdempotencyStoreContract {
 
+    // 64-character fingerprint constants (SHA-256 hex length) used across test fixtures
+    protected static final String FINGERPRINT_DEFAULT = "0".repeat(64);
+    protected static final String FINGERPRINT_A = "a".repeat(64);
+    protected static final String FINGERPRINT_B = "b".repeat(64);
+
     protected abstract IdempotencyStore store();
 
     protected IdempotencyContext contextFor(String key) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), "default-fingerprint");
+        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_DEFAULT);
     }
 
     protected IdempotencyContext contextFor(String key, Duration lockTimeout) {
-        return new IdempotencyContext(key, Duration.ofHours(1), lockTimeout, "default-fingerprint");
+        return new IdempotencyContext(key, Duration.ofHours(1), lockTimeout, FINGERPRINT_DEFAULT);
     }
 
     private IdempotencyContext contextFor(String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(key, ttl, lockTimeout, "default-fingerprint");
+        return new IdempotencyContext(key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
     }
 
     protected IdempotencyContext contextFor(String key, String fingerprint) {
@@ -636,7 +641,7 @@ public abstract class IdempotencyStoreContract {
     @Test
     void When_SameKeyAndSameFingerprint_Expect_Duplicate() {
         IdempotencyStore s = store();
-        var context = contextFor("fp-same", "sha256-abc123");
+        var context = contextFor("fp-same", FINGERPRINT_A);
         s.tryAcquire(context);
         s.complete("fp-same", sampleResponse(), Duration.ofHours(1));
 
@@ -648,27 +653,27 @@ public abstract class IdempotencyStoreContract {
     @Test
     void When_SameKeyButDifferentFingerprint_Expect_FingerprintMismatch() {
         IdempotencyStore s = store();
-        var original = contextFor("fp-diff", "sha256-original");
+        var original = contextFor("fp-diff", FINGERPRINT_A);
         s.tryAcquire(original);
         s.complete("fp-diff", sampleResponse(), Duration.ofHours(1));
 
-        var reused = contextFor("fp-diff", "sha256-different");
+        var reused = contextFor("fp-diff", FINGERPRINT_B);
         var result = s.tryAcquire(reused);
 
         assertThat(result).isInstanceOf(AcquireResult.FingerprintMismatch.class);
         var mismatch = (AcquireResult.FingerprintMismatch) result;
-        assertThat(mismatch.storedFingerprint()).isEqualTo("sha256-original");
-        assertThat(mismatch.receivedFingerprint()).isEqualTo("sha256-different");
+        assertThat(mismatch.storedFingerprint()).isEqualTo(FINGERPRINT_A);
+        assertThat(mismatch.receivedFingerprint()).isEqualTo(FINGERPRINT_B);
     }
 
     @Test
     void When_KeyReleasedAndReAcquiredWithDifferentFingerprint_Expect_Acquired() {
         IdempotencyStore s = store();
-        var first = contextFor("fp-reacquire", "sha256-first");
+        var first = contextFor("fp-reacquire", FINGERPRINT_A);
         s.tryAcquire(first);
         s.release("fp-reacquire");
 
-        var second = contextFor("fp-reacquire", "sha256-second");
+        var second = contextFor("fp-reacquire", FINGERPRINT_B);
         var result = s.tryAcquire(second);
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
