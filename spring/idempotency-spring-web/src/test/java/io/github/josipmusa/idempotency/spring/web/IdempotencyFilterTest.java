@@ -410,8 +410,7 @@ class IdempotencyFilterTest {
                 response.statusCode(),
                 response.headers().entrySet().stream()
                         .filter(e -> !e.getKey().equalsIgnoreCase("X-Secret"))
-                        .collect(java.util.stream.Collectors.toUnmodifiableMap(
-                                Map.Entry::getKey, Map.Entry::getValue)),
+                        .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue)),
                 response.body(),
                 response.completedAt());
 

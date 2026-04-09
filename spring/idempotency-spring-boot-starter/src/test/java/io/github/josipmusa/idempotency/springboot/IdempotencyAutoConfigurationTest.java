@@ -136,4 +136,23 @@ class IdempotencyAutoConfigurationTest {
                     assertThat(context).doesNotHaveBean(IdempotencyConfig.class);
                 });
     }
+
+    @Test
+    void When_NoCustomSanitizerBean_Expect_DefaultSanitizerRegistered() {
+        contextRunner.run(context -> {
+            assertThat(context).hasSingleBean(io.github.josipmusa.core.ResponseSanitizer.class);
+        });
+    }
+
+    @Test
+    void When_CustomSanitizerBean_Expect_AutoConfiguredSanitizerSkipped() {
+        io.github.josipmusa.core.ResponseSanitizer custom = response -> response;
+        contextRunner
+                .withBean(io.github.josipmusa.core.ResponseSanitizer.class, () -> custom)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(io.github.josipmusa.core.ResponseSanitizer.class);
+                    assertThat(context.getBean(io.github.josipmusa.core.ResponseSanitizer.class))
+                            .isSameAs(custom);
+                });
+    }
 }
