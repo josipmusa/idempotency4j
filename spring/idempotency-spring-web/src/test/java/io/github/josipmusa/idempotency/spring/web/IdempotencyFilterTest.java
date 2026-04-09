@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.core.*;
+import io.github.josipmusa.core.ResponseSanitizer;
 import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
@@ -399,6 +400,49 @@ class IdempotencyFilterTest {
 
         assertThat(response.getStatus()).isEqualTo(200);
         assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
+    }
+
+    @Test
+    void When_SanitizerConfigured_Expect_SanitizedResponseStoredNotOriginal() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+
+        ResponseSanitizer sanitizer = response -> new StoredResponse(
+                response.statusCode(),
+                response.headers().entrySet().stream()
+                        .filter(e -> !e.getKey().equalsIgnoreCase("X-Secret"))
+                        .collect(java.util.stream.Collectors.toUnmodifiableMap(
+                                Map.Entry::getKey, Map.Entry::getValue)),
+                response.body(),
+                response.completedAt());
+
+        IdempotencyFilter filterWithSanitizer = new IdempotencyFilter(
+                engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);
+
+        doAnswer(invocation -> {
+                    ThrowingRunnable action = invocation.getArgument(1);
+                    action.run();
+                    return ExecutionResult.executed();
+                })
+                .when(engine)
+                .execute(any(), any());
+
+        doAnswer(invocation -> {
+                    HttpServletResponse resp = invocation.getArgument(1);
+                    resp.setStatus(200);
+                    resp.setContentType("application/json");
+                    resp.addHeader("X-Secret", "token-abc");
+                    resp.getWriter().write("{\"id\":\"1\"}");
+                    return null;
+                })
+                .when(filterChain)
+                .doFilter(any(), any());
+
+        filterWithSanitizer.doFilter(request, response, filterChain);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
+        verify(store).complete(eq("test-key"), captor.capture(), any(Duration.class));
+        assertThat(captor.getValue().headers()).doesNotContainKey("X-Secret");
     }
 
     private void setupAnnotatedHandler(Idempotent annotation) throws Exception {
