@@ -7,7 +7,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.core.*;
-import io.github.josipmusa.core.ResponseSanitizer;
 import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
