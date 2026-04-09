@@ -110,24 +110,28 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             return;
         }
 
-        ContentCachingRequestWrapper wrappedRequest = new ContentCachingRequestWrapper(request);
-        // Force reading the body so ContentCachingRequestWrapper caches it
-        wrappedRequest.getInputStream().readAllBytes();
-        String fingerprint = RequestFingerprint.of(wrappedRequest.getContentAsByteArray());
-
-        if (maxBodyBytes != NO_LIMIT && wrappedRequest.getContentAsByteArray().length > maxBodyBytes) {
-            writeJsonError(response, 413, ERROR_BODY_TOO_LARGE);
-            return;
-        }
-
-        IdempotencyContext context;
-        try {
-            context = new IdempotencyContext(
-                    key, resolvedIdempotent.ttl(), resolvedIdempotent.lockTimeout(), fingerprint);
-        } catch (IllegalArgumentException e) {
+        if (key.length() > IdempotencyContext.MAX_KEY_LENGTH) {
             writeJsonError(response, 422, ERROR_KEY_TOO_LONG);
             return;
         }
+
+        ContentCachingRequestWrapper wrappedRequest = new ContentCachingRequestWrapper(request);
+        // Read the body into the cache. When a size limit is configured, read only up to
+        // limit + 1 bytes so we detect oversized bodies without buffering the full payload.
+        if (maxBodyBytes != NO_LIMIT) {
+            long safeLimit = maxBodyBytes >= Integer.MAX_VALUE ? Integer.MAX_VALUE : maxBodyBytes + 1;
+            wrappedRequest.getInputStream().readNBytes((int) safeLimit);
+            if (wrappedRequest.getContentAsByteArray().length > maxBodyBytes) {
+                writeJsonError(response, 413, ERROR_BODY_TOO_LARGE);
+                return;
+            }
+        } else {
+            wrappedRequest.getInputStream().readAllBytes();
+        }
+        String fingerprint = RequestFingerprint.of(wrappedRequest.getContentAsByteArray());
+
+        IdempotencyContext context =
+                new IdempotencyContext(key, resolvedIdempotent.ttl(), resolvedIdempotent.lockTimeout(), fingerprint);
 
         ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
         ExecutionResult result;
@@ -175,6 +179,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                     }
                 });
                 response.setHeader(HEADER_IDEMPOTENT_REPLAYED, "true");
+                response.setHeader("Cache-Control", "no-store");
                 response.setContentLength(stored.body().length);
                 response.getOutputStream().write(stored.body());
             }
@@ -222,6 +227,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         return value.replace("\\", "\\\\")
                 .replace("\"", "\\\"")
                 .replace("\n", "\\n")
-                .replace("\r", "\\r");
+                .replace("\r", "\\r")
+                .replace("\t", "\\t")
+                .replace("\b", "\\b")
+                .replace("\f", "\\f");
     }
 }

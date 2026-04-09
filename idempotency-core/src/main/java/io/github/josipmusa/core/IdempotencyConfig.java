@@ -2,6 +2,7 @@ package io.github.josipmusa.core;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * Application-level defaults for idempotency behavior.
@@ -60,6 +61,9 @@ public final class IdempotencyConfig {
     }
 
     public static final class Builder {
+        // RFC 7230 §3.2.6: header field names are tokens composed of tchar characters
+        private static final Pattern HEADER_TOKEN = Pattern.compile("[!#$%&'*+\\-.0-9A-Za-z^_`|~]+");
+
         private Duration defaultTtl = Duration.ofHours(24);
         private Duration defaultLockTimeout = Duration.ofSeconds(10);
         private String keyHeader = "Idempotency-Key";
@@ -142,6 +146,10 @@ public final class IdempotencyConfig {
             }
             if (keyHeader == null || keyHeader.isBlank()) {
                 throw new IllegalArgumentException("keyHeader must not be blank");
+            }
+            if (!HEADER_TOKEN.matcher(keyHeader).matches()) {
+                throw new IllegalArgumentException("keyHeader '" + keyHeader
+                        + "' contains characters not permitted in an HTTP header name (RFC 7230 token)");
             }
             return new IdempotencyConfig(this);
         }

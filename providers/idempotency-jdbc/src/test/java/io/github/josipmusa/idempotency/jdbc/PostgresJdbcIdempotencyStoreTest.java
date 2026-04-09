@@ -69,7 +69,7 @@ class PostgresJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
 
         JdbcIdempotencyStore failingStore = new JdbcIdempotencyStore(exhaustedDs, false);
         IdempotencyContext context =
-                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "test-fingerprint");
+                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
 
         assertThat(failingStore).isNotNull();
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> failingStore.tryAcquire(context))

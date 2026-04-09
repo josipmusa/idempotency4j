@@ -69,7 +69,7 @@ class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
 
         JdbcIdempotencyStore failingStore = new JdbcIdempotencyStore(exhaustedDs, false);
         IdempotencyContext context =
-                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "test-fingerprint");
+                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
 
         assertThatThrownBy(() -> failingStore.tryAcquire(context)).isInstanceOf(IdempotencyStoreException.class);
     }

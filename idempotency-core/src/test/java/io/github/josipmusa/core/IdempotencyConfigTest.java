@@ -59,4 +59,28 @@ class IdempotencyConfigTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("defaultLockTimeout must be at least 2ms");
     }
+
+    @Test
+    void When_KeyHeaderWithSpaceProvided_Expect_ThrowsIllegalArgumentException() {
+        assertThatThrownBy(
+                        () -> IdempotencyConfig.builder().keyHeader("My Header").build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not permitted in an HTTP header name");
+    }
+
+    @Test
+    void When_KeyHeaderWithCrLfProvided_Expect_ThrowsIllegalArgumentException() {
+        assertThatThrownBy(() -> IdempotencyConfig.builder()
+                        .keyHeader("X-Key\r\nX-Injected")
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not permitted in an HTTP header name");
+    }
+
+    @Test
+    void When_KeyHeaderIsValidRfc7230Token_Expect_BuildsSuccessfully() {
+        IdempotencyConfig config =
+                IdempotencyConfig.builder().keyHeader("X-Idempotency-Key").build();
+        assertThat(config.keyHeader()).isEqualTo("X-Idempotency-Key");
+    }
 }
