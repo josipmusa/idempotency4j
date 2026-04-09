@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import io.github.josipmusa.core.IdempotencyConfig;
 import io.github.josipmusa.core.IdempotencyEngine;
 import io.github.josipmusa.core.IdempotencyStore;
+import io.github.josipmusa.core.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -140,18 +141,18 @@ class IdempotencyAutoConfigurationTest {
     @Test
     void When_NoCustomSanitizerBean_Expect_DefaultSanitizerRegistered() {
         contextRunner.run(context -> {
-            assertThat(context).hasSingleBean(io.github.josipmusa.core.ResponseSanitizer.class);
+            assertThat(context).hasSingleBean(ResponseSanitizer.class);
         });
     }
 
     @Test
     void When_CustomSanitizerBean_Expect_AutoConfiguredSanitizerSkipped() {
-        io.github.josipmusa.core.ResponseSanitizer custom = response -> response;
+        ResponseSanitizer custom = response -> response;
         contextRunner
-                .withBean(io.github.josipmusa.core.ResponseSanitizer.class, () -> custom)
+                .withBean(ResponseSanitizer.class, () -> custom)
                 .run(context -> {
-                    assertThat(context).hasSingleBean(io.github.josipmusa.core.ResponseSanitizer.class);
-                    assertThat(context.getBean(io.github.josipmusa.core.ResponseSanitizer.class))
+                    assertThat(context).hasSingleBean(ResponseSanitizer.class);
+                    assertThat(context.getBean(ResponseSanitizer.class))
                             .isSameAs(custom);
                 });
     }
