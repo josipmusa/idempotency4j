@@ -133,7 +133,7 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${maven-surefire-plugin.version}</version>
                     <configuration>
-                        <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+                        <argLine>-XX:+EnableDynamicAgentLoading -javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar</argLine>
                         <useModulePath>false</useModulePath>
                         <failIfNoTests>true</failIfNoTests>
                         <includes>
