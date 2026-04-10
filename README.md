@@ -102,13 +102,31 @@ idempotency:
   key-header: Idempotency-Key     # Header name carrying the key. Default: Idempotency-Key
   default-ttl: PT24H              # Default TTL for stored responses. Default: 24h
   default-lock-timeout: PT10S     # Default lock timeout. Default: 10s
-  key-required: true              # Global default for @Idempotent(required). Default: true
-  max-body-bytes: -1              # Max request body size to fingerprint (-1 = unlimited). Default: -1
+  max-body-bytes: 1048576         # Max request body size to fingerprint in bytes. Default: 1 MiB
   purge:
     cron: "0 0 * * * *"          # Cron expression for purging expired records. Default: hourly
 ```
 
 Per-endpoint values in `@Idempotent` override these defaults.
+
+## Framework support
+
+idempotency4j currently supports **Spring MVC (Servlet-based)** applications only.
+
+| Runtime | Status |
+|---------|--------|
+| Spring MVC (Servlet) | Supported |
+| Spring WebFlux (Reactive) | Not supported |
+
+The autoconfiguration activates only when a Servlet-based Spring Web application is detected (`@ConditionalOnWebApplication(type = SERVLET)`). In a WebFlux application it does nothing — no error is raised, the filter simply does not register.
+
+## Known limitations
+
+**No WebFlux/reactive support.** The filter is built on `OncePerRequestFilter` (Servlet API). A reactive `WebFilter`-based adapter is a candidate for a future release.
+
+**Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
+
+**No per-client in-flight key limits.** A client can open an unbounded number of concurrent in-flight keys. Pair this library with an upstream rate limiter if that is a concern.
 
 ## Security considerations
 
@@ -128,7 +146,7 @@ public ResponseSanitizer responseSanitizer() {
         // Remove sensitive headers, redact body, etc.
         Map<String, List<String>> headers = new HashMap<>(response.headers());
         headers.remove("Set-Cookie");
-        return new StoredResponse(response.statusCode(), headers, response.body(), response.storedAt());
+        return new StoredResponse(response.statusCode(), headers, response.body(), response.completedAt());
     };
 }
 ```

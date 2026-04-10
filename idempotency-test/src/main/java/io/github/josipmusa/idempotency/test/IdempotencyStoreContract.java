@@ -680,6 +680,31 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
+    void When_StolenFailedKeyCompletedWithNewFingerprint_Expect_OldFingerprintIsMismatch() {
+        IdempotencyStore s = store();
+        String key = "fp-stolen-complete";
+
+        // First attempt with FINGERPRINT_A — fails
+        s.tryAcquire(contextFor(key, FINGERPRINT_A));
+        s.release(key);
+
+        // Second attempt steals with FINGERPRINT_B and completes
+        s.tryAcquire(contextFor(key, FINGERPRINT_B));
+        s.complete(key, sampleResponse(), Duration.ofHours(1));
+
+        // Third request with original FINGERPRINT_A must be rejected as a mismatch —
+        // the stored fingerprint is now B, not A
+        var result = s.tryAcquire(contextFor(key, FINGERPRINT_A));
+
+        assertThat(result)
+                .as("Original fingerprint must be a mismatch after the key was re-completed with a new fingerprint")
+                .isInstanceOf(AcquireResult.FingerprintMismatch.class);
+        var mismatch = (AcquireResult.FingerprintMismatch) result;
+        assertThat(mismatch.storedFingerprint()).isEqualTo(FINGERPRINT_B);
+        assertThat(mismatch.receivedFingerprint()).isEqualTo(FINGERPRINT_A);
+    }
+
+    @Test
     void When_KeyReleasedAfterLockExpired_Expect_FailedRecordNotImmediatelyPurgeable() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "failed-expiry-contract";
