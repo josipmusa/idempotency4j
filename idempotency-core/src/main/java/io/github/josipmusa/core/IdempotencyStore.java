@@ -124,7 +124,7 @@ public interface IdempotencyStore {
      * <p>This method does not schedule itself. Callers are responsible for
      * invoking it periodically. When using the Spring Boot starter, a
      * {@code @Scheduled} task is wired automatically using the cron
-     * expression defined by {@code idempotency.purge-cron}
+     * expression defined by {@code idempotency.purge.cron}
      * (default: hourly). In plain Java usage, schedule this method
      * with a {@link java.util.concurrent.ScheduledExecutorService}.
      *
