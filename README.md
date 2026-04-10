@@ -103,7 +103,9 @@ idempotency:
   default-ttl: PT24H              # Default TTL for stored responses. Default: 24h
   default-lock-timeout: PT10S     # Default lock timeout. Default: 10s
   max-body-bytes: 1048576         # Max request body size to fingerprint in bytes. Default: 1 MiB
+  filter-order: 0                 # Order of the idempotency filter in the filter chain. Default: 0
   purge:
+    enabled: true                 # Whether to register the purge scheduler. Default: true
     cron: "0 0 * * * *"          # Cron expression for purging expired records. Default: hourly
 ```
 
