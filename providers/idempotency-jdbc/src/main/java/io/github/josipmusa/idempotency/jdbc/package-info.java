@@ -5,10 +5,12 @@
  * idempotency records in a relational database using plain JDBC. It supports
  * MySQL and PostgreSQL and has no dependency on Spring or any ORM.
  *
- * <p>The required schema is available in the {@code idempotency-schema-mysql.sql}
- * and {@code idempotency-schema-postgresql.sql} resources bundled with this artifact.
- * The store does not create the schema automatically — callers are responsible for
- * applying the DDL before first use.
+ * <p>Schema initialization is enabled by default: the single-argument constructor
+ * {@code new JdbcIdempotencyStore(dataSource)} runs the DDL automatically on first use,
+ * detecting the database dialect from {@link java.sql.DatabaseMetaData#getDatabaseProductName()}
+ * and loading the appropriate bundled script ({@code idempotency-schema-mysql.sql} or
+ * {@code idempotency-schema-postgresql.sql}). To manage the schema externally (e.g. via
+ * Flyway or Liquibase), pass {@code initSchema = false} to the two-argument constructor.
  *
  * <p>All lock coordination (blocking, lock stealing) is handled inside the store
  * using database-level constructs. The engine never polls or waits externally.

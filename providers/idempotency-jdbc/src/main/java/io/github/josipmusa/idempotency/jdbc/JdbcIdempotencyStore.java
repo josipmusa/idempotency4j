@@ -34,8 +34,6 @@ import javax.sql.DataSource;
  * stealing and blocking. Compatible with any database that supports
  * row-level locking (MySQL, PostgreSQL, etc.).
  *
- * <p>Initializes schema by default</p>
- *
  * <p>No Spring dependencies — only requires a {@link DataSource}.
  *
  * <p><strong>Database compatibility:</strong> Automatically detects the database
