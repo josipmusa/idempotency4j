@@ -11,11 +11,6 @@
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
-    <properties>
-        <mysql-connector-j.version>9.1.0</mysql-connector-j.version>
-        <postgresql.version>42.7.4</postgresql.version>
-    </properties>
-
     <artifactId>idempotency-jdbc</artifactId>
     <packaging>jar</packaging>
 
@@ -73,13 +68,11 @@
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
-            <version>${mysql-connector-j.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>${postgresql.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
