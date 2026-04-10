@@ -126,8 +126,6 @@ The autoconfiguration activates only when a Servlet-based Spring Web application
 
 **Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
 
-**No per-client in-flight key limits.** A client can open an unbounded number of concurrent in-flight keys. Pair this library with an upstream rate limiter if that is a concern.
-
 ## Security considerations
 
 The store persists full HTTP response bodies. Depending on your endpoints this may include PII, tokens, or financial data.
