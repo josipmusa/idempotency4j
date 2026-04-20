@@ -74,7 +74,7 @@
         <palantir-java-format.version>2.39.0</palantir-java-format.version>
         <junit-jupiter.version>5.11.4</junit-jupiter.version>
         <assertj.version>3.27.7</assertj.version>
-        <mockito.version>5.14.2</mockito.version>
+        <mockito.version>5.23.0</mockito.version>
         <spring-boot.version>3.5.6</spring-boot.version>
         <testcontainers-mysql.version>1.20.4</testcontainers-mysql.version>
         <testcontainers-postgresql.version>1.20.4</testcontainers-postgresql.version>
