@@ -19,6 +19,9 @@ changelog:
       labels:
         - dependencies
         - chore
+    - title: "📦 Other Changes"
+      labels:
+        - "*"
   exclude:
     labels:
       - skip-changelog

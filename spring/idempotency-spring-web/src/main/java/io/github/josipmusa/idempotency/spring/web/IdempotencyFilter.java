@@ -205,9 +205,8 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                     store.complete(context.key(), sanitized, context.ttl());
                 } catch (Exception e) {
                     log.error(
-                            "Failed to store idempotency response for key '"
-                                    + context.key()
-                                    + "'; key will remain IN_PROGRESS until lock expires",
+                            "Failed to store idempotency response for key '{}'; key will remain IN_PROGRESS until lock expires",
+                            context.key(),
                             e);
                 } finally {
                     wrappedResponse.copyBodyToResponse();
