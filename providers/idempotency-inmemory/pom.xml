@@ -31,13 +31,11 @@
 
     <build>
         <plugins>
-            <!-- Tests extend IdempotencyStoreContract from idempotency-test; this flag is -->
-            <!-- set because the test class is inherited, not discovered by default -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <failIfNoTests>false</failIfNoTests>
+                    <failIfNoTests>true</failIfNoTests>
                 </configuration>
             </plugin>
         </plugins>

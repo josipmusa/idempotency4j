@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   release:
@@ -39,5 +39,9 @@ jobs:
         run: |
           ./mvnw deploy -Prelease \
             --batch-mode \
-            --no-transfer-progress \
-            -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }}
+            --no-transfer-progress
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

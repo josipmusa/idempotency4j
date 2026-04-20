@@ -28,4 +28,4 @@ jobs:
           cache: maven
 
       - name: Build and test
-        run: mvn verify --batch-mode --no-transfer-progress
+        run: ./mvnw verify --batch-mode --no-transfer-progress
