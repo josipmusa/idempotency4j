@@ -13,15 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.josipmusa.idempotency.inmemory;
+package io.github.josipmusa.idempotency.core;
 
-import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.test.IdempotencyStoreContract;
-
-class InMemoryIdempotencyStoreTest extends IdempotencyStoreContract {
-
-    @Override
-    protected IdempotencyStore store() {
-        return new InMemoryIdempotencyStore();
-    }
+/**
+ * A {@link Runnable} that can throw checked exceptions.
+ *
+ * <p>Used as the action parameter in {@link IdempotencyEngine#execute}
+ * because business logic commonly throws checked exceptions (e.g.
+ * {@code IOException}) that should propagate to the caller unchanged,
+ * not wrapped in {@code RuntimeException}.
+ */
+@FunctionalInterface
+public interface ThrowingRunnable {
+    void run() throws Exception;
 }

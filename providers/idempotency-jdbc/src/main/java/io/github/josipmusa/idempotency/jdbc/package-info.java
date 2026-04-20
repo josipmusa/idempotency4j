@@ -1,5 +1,5 @@
 /**
- * JDBC {@link io.github.josipmusa.core.IdempotencyStore} implementation.
+ * JDBC {@link io.github.josipmusa.idempotency.core.IdempotencyStore} implementation.
  *
  * <p>{@link io.github.josipmusa.idempotency.jdbc.JdbcIdempotencyStore} stores
  * idempotency records in a relational database using plain JDBC. It supports

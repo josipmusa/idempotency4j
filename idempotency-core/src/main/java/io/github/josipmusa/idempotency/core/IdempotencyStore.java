@@ -1,4 +1,19 @@
-package io.github.josipmusa.core;
+/*
+ * Copyright 2026 Josip Musa
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.josipmusa.idempotency.core;
 
 import java.time.Duration;
 
@@ -59,7 +74,7 @@ public interface IdempotencyStore {
      *
      * @param context contains the key, TTL, and lockTimeout for this request
      * @return the acquisition outcome — never null
-     * @throws io.github.josipmusa.core.exception.IdempotencyStoreException
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
      *         if the underlying storage is unreachable
      */
     AcquireResult tryAcquire(IdempotencyContext context);
@@ -75,7 +90,7 @@ public interface IdempotencyStore {
      * @param key      the idempotency key, must match a prior {@code tryAcquire}
      * @param response the HTTP response to store for duplicate replay
      * @param ttl      how long to keep the completed entry before expiry
-     * @throws io.github.josipmusa.core.exception.IdempotencyStoreException
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
      *         if the key does not exist or is not IN_PROGRESS
      */
     void complete(String key, StoredResponse response, Duration ttl);
@@ -87,7 +102,7 @@ public interface IdempotencyStore {
      * immediately reclaimable by the next {@code tryAcquire} caller.
      *
      * @param key the idempotency key to release
-     * @throws io.github.josipmusa.core.exception.IdempotencyStoreException
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
      *         if the key does not exist or is not IN_PROGRESS
      */
     void release(String key);

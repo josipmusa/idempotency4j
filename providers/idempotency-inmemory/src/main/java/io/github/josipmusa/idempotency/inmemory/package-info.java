@@ -1,5 +1,5 @@
 /**
- * In-memory {@link io.github.josipmusa.core.IdempotencyStore} implementation.
+ * In-memory {@link io.github.josipmusa.idempotency.core.IdempotencyStore} implementation.
  *
  * <p>{@link io.github.josipmusa.idempotency.inmemory.InMemoryIdempotencyStore} is
  * suitable for single-instance deployments and local development. It is not suitable

@@ -37,3 +37,6 @@ build/
 
 # JDS AI working artifacts
 docs/jds/
+
+# Claude config
+.claude/
