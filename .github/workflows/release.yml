@@ -37,7 +37,7 @@ jobs:
           CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          ./mvnw deploy -Prelease \
+          ./mvnw deploy -Prelease -DdeployAtEnd=true \
             --batch-mode \
             --no-transfer-progress
 
