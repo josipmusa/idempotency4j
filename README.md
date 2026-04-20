@@ -1,5 +1,9 @@
 # idempotency4j
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.josipmusa/idempotency-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.josipmusa/idempotency-spring-boot-starter)
+[![CI](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml/badge.svg)](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 A Java idempotency library with pluggable storage backends and Spring Web / Spring Boot support.
 
 Send the same request twice — get the same response, side effects run exactly once.
@@ -12,18 +16,20 @@ Your API needs idempotency if clients can retry on network failure (payment proc
 
 Add the Spring Boot starter and a storage backend:
 
+Replace `VERSION` with the latest version shown in the Maven Central badge above.
+
 ```xml
 <dependency>
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency-spring-boot-starter</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>VERSION</version>
 </dependency>
 
 <!-- Pick one storage backend -->
 <dependency>
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency-jdbc</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>VERSION</version>
 </dependency>
 ```
 
@@ -35,7 +41,7 @@ Or use the BOM to align all module versions:
         <dependency>
             <groupId>io.github.josipmusa</groupId>
             <artifactId>idempotency-bom</artifactId>
-            <version>0.0.1-SNAPSHOT</version>
+            <version>VERSION</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>

@@ -36,6 +36,23 @@
         <tag>HEAD</tag>
     </scm>
 
+    <issueManagement>
+        <system>GitHub Issues</system>
+        <url>https://github.com/josipmusa/idempotency4j/issues</url>
+    </issueManagement>
+
+    <ciManagement>
+        <system>GitHub Actions</system>
+        <url>https://github.com/josipmusa/idempotency4j/actions</url>
+    </ciManagement>
+
+    <distributionManagement>
+        <repository>
+            <id>central</id>
+            <url>https://central.sonatype.com/api/v1/publisher/upload</url>
+        </repository>
+    </distributionManagement>
+
     <modules>
         <module>idempotency-bom</module>
         <module>idempotency-core</module>
@@ -48,10 +65,13 @@
 
     <properties>
         <java.version>21</java.version>
+        <maven.version>3.9</maven.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
+        <maven-enforcer-plugin.version>3.5.0</maven-enforcer-plugin.version>
         <spotless-maven-plugin.version>3.3.0</spotless-maven-plugin.version>
+        <palantir-java-format.version>2.39.0</palantir-java-format.version>
         <junit-jupiter.version>5.11.4</junit-jupiter.version>
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.14.2</mockito.version>
@@ -134,9 +154,10 @@
                     <version>${maven-compiler-plugin.version}</version>
                     <configuration>
                         <release>${java.version}</release>
+                        <proc>none</proc>
                         <compilerArgs>
                             <arg>-parameters</arg>
-                            <arg>-Xlint:all</arg>
+                            <arg>-Xlint:all,-options</arg>
                         </compilerArgs>
                     </configuration>
                 </plugin>
@@ -145,13 +166,36 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${maven-surefire-plugin.version}</version>
                     <configuration>
-                        <argLine>-XX:+EnableDynamicAgentLoading -javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar</argLine>
+                        <argLine>-javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar -XX:+EnableDynamicAgentLoading -Xshare:off</argLine>
                         <useModulePath>false</useModulePath>
-                        <failIfNoTests>true</failIfNoTests>
+                        <failIfNoTests>false</failIfNoTests>
                         <includes>
                             <include>**/*Test.java</include>
                         </includes>
                     </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>${maven-enforcer-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <id>enforce-versions</id>
+                            <goals>
+                                <goal>enforce</goal>
+                            </goals>
+                            <configuration>
+                                <rules>
+                                    <requireMavenVersion>
+                                        <version>${maven.version}</version>
+                                    </requireMavenVersion>
+                                    <requireJavaVersion>
+                                        <version>${java.version}</version>
+                                    </requireJavaVersion>
+                                </rules>
+                            </configuration>
+                        </execution>
+                    </executions>
                 </plugin>
                 <plugin>
                     <groupId>com.diffplug.spotless</groupId>
@@ -159,8 +203,26 @@
                     <version>${spotless-maven-plugin.version}</version>
                     <configuration>
                         <java>
+                            <licenseHeader>
+                                <content>/*
+ * Copyright $YEAR Josip Musa
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</content>
+                                <delimiter>package </delimiter>
+                            </licenseHeader>
                             <palantirJavaFormat>
-                                <version>2.39.0</version>
+                                <version>${palantir-java-format.version}</version>
                             </palantirJavaFormat>
                             <removeUnusedImports />
                             <importOrder />
@@ -178,11 +240,70 @@
                         </execution>
                     </executions>
                 </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-source-plugin</artifactId>
+                    <version>${maven-source-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <id>attach-sources</id>
+                            <goals>
+                                <goal>jar-no-fork</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-javadoc-plugin</artifactId>
+                    <version>${maven-javadoc-plugin.version}</version>
+                    <configuration>
+                        <release>${java.version}</release>
+                        <doclint>all,-missing</doclint>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <id>attach-javadocs</id>
+                            <goals>
+                                <goal>jar</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-gpg-plugin</artifactId>
+                    <version>${maven-gpg-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <id>sign-artifacts</id>
+                            <phase>verify</phase>
+                            <goals>
+                                <goal>sign</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.sonatype.central</groupId>
+                    <artifactId>central-publishing-maven-plugin</artifactId>
+                    <version>${central-publishing-maven-plugin.version}</version>
+                    <extensions>true</extensions>
+                    <configuration>
+                        <publishingServerId>central</publishingServerId>
+                        <autoPublish>true</autoPublish>
+                        <waitUntil>published</waitUntil>
+                    </configuration>
+                </plugin>
             </plugins>
         </pluginManagement>
 
-        <!-- Activate plugins -->
+        <!-- Activate plugins for all modules -->
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+            </plugin>
             <plugin>
                 <groupId>com.diffplug.spotless</groupId>
                 <artifactId>spotless-maven-plugin</artifactId>
@@ -211,57 +332,18 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-source-plugin</artifactId>
-                        <version>${maven-source-plugin.version}</version>
-                        <executions>
-                            <execution>
-                                <id>attach-sources</id>
-                                <goals>
-                                    <goal>jar-no-fork</goal>
-                                </goals>
-                            </execution>
-                        </executions>
                     </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-javadoc-plugin</artifactId>
-                        <version>${maven-javadoc-plugin.version}</version>
-                        <configuration>
-                            <release>${java.version}</release>
-                            <doclint>all,-missing</doclint>
-                        </configuration>
-                        <executions>
-                            <execution>
-                                <id>attach-javadocs</id>
-                                <goals>
-                                    <goal>jar</goal>
-                                </goals>
-                            </execution>
-                        </executions>
                     </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
-                        <version>${maven-gpg-plugin.version}</version>
-                        <executions>
-                            <execution>
-                                <id>sign-artifacts</id>
-                                <phase>verify</phase>
-                                <goals>
-                                    <goal>sign</goal>
-                                </goals>
-                            </execution>
-                        </executions>
                     </plugin>
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
                         <artifactId>central-publishing-maven-plugin</artifactId>
-                        <version>${central-publishing-maven-plugin.version}</version>
-                        <extensions>true</extensions>
-                        <configuration>
-                            <publishingServerId>central</publishingServerId>
-                            <autoPublish>true</autoPublish>
-                            <waitUntil>published</waitUntil>
-                        </configuration>
                     </plugin>
                 </plugins>
             </build>

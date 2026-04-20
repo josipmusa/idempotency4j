@@ -1,7 +1,23 @@
-package io.github.josipmusa.core;
+/*
+ * Copyright 2026 Josip Musa
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.josipmusa.idempotency.core;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * Fully resolved parameters for a single idempotent operation.
@@ -33,7 +49,8 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout,
 
     private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(2);
     public static final int MAX_KEY_LENGTH = 255;
-    private static final int FINGERPRINT_LENGTH = 64;
+    private static final int MIN_FINGERPRINT_LENGTH = 16;
+    private static final Pattern HEX_PATTERN = Pattern.compile("[0-9a-fA-F]+");
 
     public IdempotencyContext {
         Objects.requireNonNull(key, "key must not be null");
@@ -56,9 +73,12 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout,
         if (requestFingerprint.isBlank()) {
             throw new IllegalArgumentException("requestFingerprint must not be blank");
         }
-        if (requestFingerprint.length() != FINGERPRINT_LENGTH) {
-            throw new IllegalArgumentException("requestFingerprint must be " + FINGERPRINT_LENGTH
-                    + " characters (SHA-256 hex digest), got: " + requestFingerprint.length());
+        if (requestFingerprint.length() < MIN_FINGERPRINT_LENGTH) {
+            throw new IllegalArgumentException("requestFingerprint must be at least " + MIN_FINGERPRINT_LENGTH
+                    + " characters, got: " + requestFingerprint.length());
+        }
+        if (!HEX_PATTERN.matcher(requestFingerprint).matches()) {
+            throw new IllegalArgumentException("requestFingerprint must be a hex string, got: " + requestFingerprint);
         }
     }
 }

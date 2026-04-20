@@ -8,7 +8,7 @@
  *       for marking controller methods that require idempotency enforcement.</li>
  *   <li>{@link io.github.josipmusa.idempotency.spring.web.IdempotencyFilter} — servlet
  *       filter that intercepts annotated requests, builds the
- *       {@link io.github.josipmusa.core.IdempotencyContext}, invokes the engine,
+ *       {@link io.github.josipmusa.idempotency.core.IdempotencyContext}, invokes the engine,
  *       captures the response, and calls {@code store.complete()}.</li>
  *   <li>{@link io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry} —
  *       inspects the {@link org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping}

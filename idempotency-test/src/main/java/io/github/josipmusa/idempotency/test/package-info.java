@@ -1,5 +1,5 @@
 /**
- * Contract test suite for {@link io.github.josipmusa.core.IdempotencyStore} implementations.
+ * Contract test suite for {@link io.github.josipmusa.idempotency.core.IdempotencyStore} implementations.
  *
  * <p>{@link io.github.josipmusa.idempotency.test.IdempotencyStoreContract} is an abstract
  * JUnit 5 test class that every {@code IdempotencyStore} implementation must extend.

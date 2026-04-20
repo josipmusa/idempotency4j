@@ -31,12 +31,11 @@
 
     <build>
         <plugins>
-            <!-- No tests in this module — tested via contract tests in idempotency-test -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <failIfNoTests>false</failIfNoTests>
+                    <failIfNoTests>true</failIfNoTests>
                 </configuration>
             </plugin>
         </plugins>

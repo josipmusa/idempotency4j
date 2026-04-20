@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: maven
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Set release version from tag
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "Releasing version $VERSION"
+          ./mvnw versions:set -DnewVersion=$VERSION --batch-mode --no-transfer-progress
+          ./mvnw versions:commit --batch-mode --no-transfer-progress
+
+      - name: Verify
+        run: ./mvnw verify --batch-mode --no-transfer-progress
+
+      - name: Deploy to Maven Central
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          ./mvnw deploy -Prelease -DdeployAtEnd=true \
+            -DskipTests=true \
+            --batch-mode \
+            --no-transfer-progress
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          generate_release_notes: true

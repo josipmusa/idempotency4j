@@ -1,21 +1,37 @@
+/*
+ * Copyright 2026 Josip Musa
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.github.josipmusa.idempotency.spring.web;
 
 import static io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry.*;
 
-import io.github.josipmusa.core.ExecutionResult;
-import io.github.josipmusa.core.IdempotencyConfig;
-import io.github.josipmusa.core.IdempotencyContext;
-import io.github.josipmusa.core.IdempotencyEngine;
-import io.github.josipmusa.core.IdempotencyStore;
-import io.github.josipmusa.core.ResponseSanitizer;
-import io.github.josipmusa.core.StoredResponse;
-import io.github.josipmusa.core.exception.IdempotencyFingerprintMismatchException;
-import io.github.josipmusa.core.exception.IdempotencyLockTimeoutException;
+import io.github.josipmusa.idempotency.core.ExecutionResult;
+import io.github.josipmusa.idempotency.core.IdempotencyConfig;
+import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.core.IdempotencyStore;
+import io.github.josipmusa.idempotency.core.ResponseSanitizer;
+import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -61,6 +77,26 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private final IdempotentHandlerRegistry registry;
     private final long maxBodyBytes;
     private final ResponseSanitizer sanitizer;
+    private final Clock clock;
+
+    public IdempotencyFilter(
+            IdempotencyEngine engine,
+            IdempotencyStore store,
+            IdempotencyConfig config,
+            RequestMappingHandlerMapping handlerMapping,
+            IdempotentHandlerRegistry registry,
+            long maxBodyBytes,
+            ResponseSanitizer sanitizer,
+            Clock clock) {
+        this.engine = Objects.requireNonNull(engine, "engine must not be null");
+        this.store = Objects.requireNonNull(store, "store must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
+        this.registry = Objects.requireNonNull(registry, "registry must not be null");
+        this.maxBodyBytes = maxBodyBytes;
+        this.sanitizer = Objects.requireNonNull(sanitizer, "sanitizer must not be null");
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
+    }
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
@@ -70,13 +106,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             IdempotentHandlerRegistry registry,
             long maxBodyBytes,
             ResponseSanitizer sanitizer) {
-        this.engine = Objects.requireNonNull(engine, "engine must not be null");
-        this.store = Objects.requireNonNull(store, "store must not be null");
-        this.config = Objects.requireNonNull(config, "config must not be null");
-        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
-        this.registry = Objects.requireNonNull(registry, "registry must not be null");
-        this.maxBodyBytes = maxBodyBytes;
-        this.sanitizer = Objects.requireNonNull(sanitizer, "sanitizer must not be null");
+        this(engine, store, config, handlerMapping, registry, maxBodyBytes, sanitizer, Clock.systemUTC());
     }
 
     public IdempotencyFilter(
@@ -86,7 +116,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             long maxBodyBytes) {
-        this(engine, store, config, handlerMapping, registry, maxBodyBytes, response -> response);
+        this(engine, store, config, handlerMapping, registry, maxBodyBytes, response -> response, Clock.systemUTC());
     }
 
     public IdempotencyFilter(
@@ -95,7 +125,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             IdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry) {
-        this(engine, store, config, handlerMapping, registry, NO_LIMIT, response -> response);
+        this(engine, store, config, handlerMapping, registry, NO_LIMIT, response -> response, Clock.systemUTC());
     }
 
     @Override
@@ -169,15 +199,14 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                         wrappedResponse.getStatus(),
                         collectHeaders(wrappedResponse),
                         wrappedResponse.getContentAsByteArray(),
-                        Instant.now());
+                        Instant.now(clock));
                 StoredResponse sanitized = sanitizer.sanitize(storedResponse);
                 try {
                     store.complete(context.key(), sanitized, context.ttl());
                 } catch (Exception e) {
                     log.error(
-                            "Failed to store idempotency response for key '"
-                                    + context.key()
-                                    + "'; key will remain IN_PROGRESS until lock expires",
+                            "Failed to store idempotency response for key '{}'; key will remain IN_PROGRESS until lock expires",
+                            context.key(),
                             e);
                 } finally {
                     wrappedResponse.copyBodyToResponse();
