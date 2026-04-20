@@ -7,6 +7,11 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    ignore:
+      # Jackson is managed by the Spring Boot BOM; bumping it independently
+      # causes version mismatches between jackson-databind and jackson-annotations.
+      # Update Spring Boot itself to get Jackson upgrades.
+      - dependency-name: "com.fasterxml.jackson*"
 
   - package-ecosystem: github-actions
     directory: /
