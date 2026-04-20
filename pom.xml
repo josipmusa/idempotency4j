@@ -151,9 +151,10 @@
                     <version>${maven-compiler-plugin.version}</version>
                     <configuration>
                         <release>${java.version}</release>
+                        <proc>none</proc>
                         <compilerArgs>
                             <arg>-parameters</arg>
-                            <arg>-Xlint:all</arg>
+                            <arg>-Xlint:all,-options</arg>
                         </compilerArgs>
                     </configuration>
                 </plugin>
@@ -162,7 +163,7 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${maven-surefire-plugin.version}</version>
                     <configuration>
-                        <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+                        <argLine>-javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar -XX:+EnableDynamicAgentLoading -Xshare:off</argLine>
                         <useModulePath>false</useModulePath>
                         <failIfNoTests>true</failIfNoTests>
                         <includes>
