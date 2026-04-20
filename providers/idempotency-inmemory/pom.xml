@@ -12,6 +12,7 @@
     </parent>
 
     <artifactId>idempotency-inmemory</artifactId>
+    <name>idempotency-inmemory</name>
     <description>In-memory IdempotencyStore. Production usable for single-instance deployments and local development. Not suitable for horizontally scaled environments.</description>
     <packaging>jar</packaging>
 

@@ -12,6 +12,7 @@
     </parent>
 
     <artifactId>idempotency-spring-web</artifactId>
+    <name>idempotency-spring-web</name>
     <packaging>jar</packaging>
 
     <dependencies>

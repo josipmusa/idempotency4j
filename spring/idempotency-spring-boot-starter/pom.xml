@@ -12,6 +12,7 @@
     </parent>
 
     <artifactId>idempotency-spring-boot-starter</artifactId>
+    <name>idempotency-spring-boot-starter</name>
     <packaging>jar</packaging>
 
     <dependencies>

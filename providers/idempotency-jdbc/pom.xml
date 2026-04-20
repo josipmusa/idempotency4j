@@ -12,6 +12,7 @@
     </parent>
 
     <artifactId>idempotency-jdbc</artifactId>
+    <name>idempotency-jdbc</name>
     <packaging>jar</packaging>
 
     <dependencies>
