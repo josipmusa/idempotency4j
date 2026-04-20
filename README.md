@@ -1,7 +1,6 @@
 # idempotency4j
 
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.josipmusa/idempotency-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.josipmusa/idempotency-spring-boot-starter)
-[![CI](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml/badge.svg)](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A Java idempotency library with pluggable storage backends and Spring Web / Spring Boot support.
