@@ -67,7 +67,7 @@
         <java.version>21</java.version>
         <maven.version>3.9</maven.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
+        <maven-compiler-plugin.version>3.15.0</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>3.5.5</maven-surefire-plugin.version>
         <maven-enforcer-plugin.version>3.6.2</maven-enforcer-plugin.version>
         <spotless-maven-plugin.version>3.3.0</spotless-maven-plugin.version>
@@ -77,10 +77,10 @@
         <mockito.version>5.23.0</mockito.version>
         <spring-boot.version>3.5.6</spring-boot.version>
         <testcontainers-mysql.version>1.20.4</testcontainers-mysql.version>
-        <testcontainers-postgresql.version>1.20.4</testcontainers-postgresql.version>
         <testcontainers-junit-jupiter.version>1.21.4</testcontainers-junit-jupiter.version>
+        <testcontainers-postgresql.version>1.21.4</testcontainers-postgresql.version>
         <mysql-connector-j.version>9.1.0</mysql-connector-j.version>
-        <postgresql-driver.version>42.7.10</postgresql-driver.version>
+        <postgresql-driver.version>42.7.11</postgresql-driver.version>
         <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
         <maven-javadoc-plugin.version>3.11.2</maven-javadoc-plugin.version>
         <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
