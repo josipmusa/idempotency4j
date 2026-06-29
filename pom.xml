@@ -72,7 +72,7 @@
         <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
         <spotless-maven-plugin.version>3.7.0</spotless-maven-plugin.version>
         <palantir-java-format.version>2.39.0</palantir-java-format.version>
-        <junit-jupiter.version>6.1.0</junit-jupiter.version>
+        <junit-jupiter.version>6.1.1</junit-jupiter.version>
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.23.0</mockito.version>
         <spring-boot.version>3.5.6</spring-boot.version>
