@@ -35,8 +35,11 @@ build/
 ### Mac OS ###
 .DS_Store
 
-# JDS AI working artifacts
+# AI working artifacts
 docs/jds/
+docs/specs/
+
+.sdkmanrc
 
 # Claude config
 .claude/
