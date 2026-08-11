@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-idempotency4j is a Java idempotency library published to Maven Central: clients send an `Idempotency-Key` header, the annotated endpoint runs exactly once per key, and duplicate requests get the stored response replayed. Same key with a different request body is rejected (fingerprint mismatch). Storage is pluggable (JDBC, in-memory); the Spring integration is Servlet-only (no WebFlux).
+idempotency4j is a Java idempotency library published to Maven Central: clients send an `Idempotency-Key` header, the annotated endpoint runs exactly once per key, and duplicate requests get the stored response replayed. Same key with a different request body is rejected (fingerprint mismatch). Storage is pluggable (JDBC, Redis, in-memory); the Spring integration is Servlet-only (no WebFlux).
 
 ## Verification
 
@@ -15,7 +15,7 @@ Before claiming any work is done, run:
 ./mvnw verify           # compile, all tests, Spotless check
 ```
 
-`verify` includes the Spotless check and is the same command CI runs - if it passes locally, CI passes. JDBC provider tests use Testcontainers (MySQL + PostgreSQL), so Docker must be running.
+`verify` includes the Spotless check and is the same command CI runs - if it passes locally, CI passes. JDBC and Redis provider tests use Testcontainers (MySQL, PostgreSQL, Redis), so Docker must be running.
 
 Requires Java 21 (see `.sdkmanrc`) and always use the Maven wrapper `./mvnw`.
 
@@ -24,6 +24,7 @@ Requires Java 21 (see `.sdkmanrc`) and always use the Maven wrapper `./mvnw`.
 ```bash
 ./mvnw test -pl idempotency-core -am                  # one module's tests
 ./mvnw test -pl providers/idempotency-jdbc -am        # JDBC provider (needs Docker)
+./mvnw test -pl providers/idempotency-redis -am       # Redis provider (needs Docker)
 ./mvnw test -pl idempotency-core -am -Dtest=IdempotencyEngineTest            # one class
 ./mvnw test -pl idempotency-core -am -Dtest='IdempotencyEngineTest#When_*'   # one test
 ```

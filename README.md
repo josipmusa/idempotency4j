@@ -96,7 +96,42 @@ Use `required = false` on endpoints where idempotency is optional — clients th
 | Module | Use when |
 |--------|----------|
 | `idempotency-jdbc` | You have a relational database. Supports MySQL and PostgreSQL. Schema is initialized automatically. |
+| `idempotency-redis` | You have Redis. Standalone and Sentinel topologies; Redis Cluster is not supported. |
 | `idempotency-inmemory` | Single-instance deployments, local development, and tests. Not suitable for horizontally-scaled environments. |
+
+Declare the store as a bean — the starter wires the engine and filter around whichever `IdempotencyStore` it finds:
+
+```java
+@Bean
+public IdempotencyStore idempotencyStore(DataSource dataSource) {
+    return new JdbcIdempotencyStore(dataSource);
+}
+```
+
+### Redis
+
+`idempotency-redis` is built on [Lettuce](https://lettuce.io/) and needs a connection opened with the store's codec, so that binary response bodies are stored as raw bytes:
+
+```java
+@Bean(destroyMethod = "shutdown")
+public RedisClient redisClient() {
+    return RedisClient.create("redis://localhost:6379");
+}
+
+@Bean(destroyMethod = "close")
+public StatefulRedisConnection<String, byte[]> idempotencyRedisConnection(RedisClient client) {
+    return client.connect(RedisIdempotencyStore.CODEC);
+}
+
+@Bean
+public IdempotencyStore idempotencyStore(StatefulRedisConnection<String, byte[]> connection) {
+    return new RedisIdempotencyStore(connection);
+}
+```
+
+Lettuce connections are thread-safe, so one connection serves the whole application — no pool is needed. A six-argument constructor exposes the key prefix (default `idempotency:`), poll interval, retention grace, purge batch size, and `Clock`.
+
+Records carry their own expiry timestamps, and each write also sets a native Redis TTL that trails logical expiry by the retention grace (default 1h). Expired records are therefore reclaimed even if the purge job is disabled, while `purgeExpired()` still removes them promptly — which matters when responses contain sensitive data.
 
 ## Configuration
 
