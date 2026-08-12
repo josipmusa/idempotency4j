@@ -35,9 +35,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.lang.NonNull;
@@ -69,6 +72,17 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private static final String ERROR_FINGERPRINT_MISMATCH = "Idempotency-Key reused with a different request body";
     private static final String ERROR_BODY_TOO_LARGE = "Request body exceeds maximum allowed size";
     private static final long NO_LIMIT = -1;
+    private static final Set<String> NON_REPLAYABLE_HEADERS = Set.of(
+            "connection",
+            "content-length",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "proxy-connection",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade");
 
     private final IdempotencyEngine engine;
     private final IdempotencyStore store;
@@ -194,7 +208,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         }
 
         switch (result) {
-            case ExecutionResult.Executed ignored -> {
+            case ExecutionResult.Executed executed -> {
                 StoredResponse storedResponse = new StoredResponse(
                         wrappedResponse.getStatus(),
                         collectHeaders(wrappedResponse),
@@ -202,7 +216,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                         Instant.now(clock));
                 StoredResponse sanitized = sanitizer.sanitize(storedResponse);
                 try {
-                    store.complete(context.key(), sanitized, context.ttl());
+                    store.complete(context.key(), executed.leaseId(), sanitized, context.ttl());
                 } catch (Exception e) {
                     log.error(
                             "Failed to store idempotency response for key '{}'; key will remain IN_PROGRESS until lock expires",
@@ -214,8 +228,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             }
             case ExecutionResult.Duplicate d -> {
                 StoredResponse stored = d.response();
+                Set<String> nonReplayable = nonReplayableHeaders(stored.headers());
                 response.setStatus(stored.statusCode());
                 stored.headers().forEach((name, values) -> {
+                    if (!isReplayableHeader(name, nonReplayable)) {
+                        return;
+                    }
                     if (name.equalsIgnoreCase("content-type")) {
                         response.setContentType(values.getFirst());
                     } else {
@@ -250,7 +268,11 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
     private Map<String, List<String>> collectHeaders(ContentCachingResponseWrapper response) {
         Map<String, List<String>> headers = new HashMap<>();
-        response.getHeaderNames().forEach(name -> headers.put(name, new ArrayList<>(response.getHeaders(name))));
+        Set<String> nonReplayable = new HashSet<>(NON_REPLAYABLE_HEADERS);
+        response.getHeaders("Connection").forEach(value -> addConnectionOptions(nonReplayable, value));
+        response.getHeaderNames().stream()
+                .filter(name -> isReplayableHeader(name, nonReplayable))
+                .forEach(name -> headers.put(name, new ArrayList<>(response.getHeaders(name))));
 
         // Content-Type may be set directly on the response, not surfaced via getHeaderNames()
         String contentType = response.getContentType();
@@ -258,6 +280,28 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             headers.put("Content-Type", List.of(contentType));
         }
         return headers;
+    }
+
+    private static Set<String> nonReplayableHeaders(Map<String, List<String>> headers) {
+        Set<String> result = new HashSet<>(NON_REPLAYABLE_HEADERS);
+        headers.forEach((name, values) -> {
+            if (name.equalsIgnoreCase("Connection")) {
+                values.forEach(value -> addConnectionOptions(result, value));
+            }
+        });
+        return result;
+    }
+
+    private static void addConnectionOptions(Set<String> target, String value) {
+        for (String option : value.split(",")) {
+            if (!option.isBlank()) {
+                target.add(option.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+    }
+
+    private static boolean isReplayableHeader(String name, Set<String> nonReplayable) {
+        return !nonReplayable.contains(name.toLowerCase(Locale.ROOT));
     }
 
     private void writeJsonError(HttpServletResponse response, int status, String message) throws IOException {

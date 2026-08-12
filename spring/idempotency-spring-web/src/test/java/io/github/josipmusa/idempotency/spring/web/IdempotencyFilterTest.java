@@ -42,6 +42,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 
 class IdempotencyFilterTest {
 
+    private static final String LEASE_ID = "test-lease-id";
+
     private IdempotencyEngine engine;
     private IdempotencyStore store;
     private RequestMappingHandlerMapping handlerMapping;
@@ -148,7 +150,7 @@ class IdempotencyFilterTest {
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
-                    return ExecutionResult.executed();
+                    return ExecutionResult.executed(LEASE_ID);
                 })
                 .when(engine)
                 .execute(any(), any());
@@ -165,7 +167,7 @@ class IdempotencyFilterTest {
 
         filter.doFilter(request, response, filterChain);
 
-        verify(store).complete(eq("test-key"), any(StoredResponse.class), any(Duration.class));
+        verify(store).complete(eq("test-key"), eq(LEASE_ID), any(StoredResponse.class), any(Duration.class));
         assertThat(response.getContentAsString()).isEqualTo("{\"id\":\"1\"}");
         assertThat(response.getStatus()).isEqualTo(201);
     }
@@ -178,14 +180,14 @@ class IdempotencyFilterTest {
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
-                    return ExecutionResult.executed();
+                    return ExecutionResult.executed(LEASE_ID);
                 })
                 .when(engine)
                 .execute(any(), any());
 
         filter.doFilter(request, response, filterChain);
 
-        verify(store).complete(eq("test-key"), any(StoredResponse.class), eq(Duration.ofHours(2)));
+        verify(store).complete(eq("test-key"), eq(LEASE_ID), any(StoredResponse.class), eq(Duration.ofHours(2)));
     }
 
     @Test
@@ -227,6 +229,34 @@ class IdempotencyFilterTest {
     }
 
     @Test
+    void When_DuplicateContainsTransportHeaders_Expect_NotReplayedAndLengthRecalculated() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        byte[] body = "hello".getBytes();
+        StoredResponse stored = new StoredResponse(
+                200,
+                Map.of(
+                        "Connection", List.of("keep-alive, X-Hop"),
+                        "Content-Length", List.of("999"),
+                        "Transfer-Encoding", List.of("chunked"),
+                        "Keep-Alive", List.of("timeout=5"),
+                        "X-Hop", List.of("not-end-to-end"),
+                        "X-End-To-End", List.of("kept")),
+                body,
+                Instant.now());
+        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(stored));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getHeader("Connection")).isNull();
+        assertThat(response.getHeader("Transfer-Encoding")).isNull();
+        assertThat(response.getHeader("Keep-Alive")).isNull();
+        assertThat(response.getHeader("X-Hop")).isNull();
+        assertThat(response.getContentLength()).isEqualTo(body.length);
+        assertThat(response.getHeader("X-End-To-End")).isEqualTo("kept");
+    }
+
+    @Test
     void When_LockTimeoutException_Expect_Returns503() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
@@ -251,7 +281,7 @@ class IdempotencyFilterTest {
         assertThatThrownBy(() -> filter.doFilter(request, response, filterChain))
                 .isSameAs(actionException);
 
-        verify(store, never()).release(any());
+        verify(store, never()).release(any(), any());
     }
 
     @Test
@@ -262,7 +292,7 @@ class IdempotencyFilterTest {
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
-                    return ExecutionResult.executed();
+                    return ExecutionResult.executed(LEASE_ID);
                 })
                 .when(engine)
                 .execute(any(), any());
@@ -277,7 +307,7 @@ class IdempotencyFilterTest {
                 .when(filterChain)
                 .doFilter(any(), any());
 
-        doThrow(new RuntimeException("store unavailable")).when(store).complete(any(), any(), any());
+        doThrow(new RuntimeException("store unavailable")).when(store).complete(any(), any(), any(), any());
 
         filter.doFilter(request, response, filterChain);
 
@@ -293,7 +323,7 @@ class IdempotencyFilterTest {
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
-                    return ExecutionResult.executed();
+                    return ExecutionResult.executed(LEASE_ID);
                 })
                 .when(engine)
                 .execute(any(), any());
@@ -307,7 +337,7 @@ class IdempotencyFilterTest {
                 .when(filterChain)
                 .doFilter(any(), any());
 
-        doThrow(new RuntimeException("store down")).when(store).complete(any(), any(), any());
+        doThrow(new RuntimeException("store down")).when(store).complete(any(), any(), any(), any());
 
         filter.doFilter(request, response, filterChain);
         assertThat(response.getStatus()).isEqualTo(200);
@@ -375,7 +405,7 @@ class IdempotencyFilterTest {
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
-                    return ExecutionResult.executed();
+                    return ExecutionResult.executed(LEASE_ID);
                 })
                 .when(engine)
                 .execute(any(), any());
@@ -435,7 +465,7 @@ class IdempotencyFilterTest {
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
-                    return ExecutionResult.executed();
+                    return ExecutionResult.executed(LEASE_ID);
                 })
                 .when(engine)
                 .execute(any(), any());
@@ -454,8 +484,39 @@ class IdempotencyFilterTest {
         filterWithSanitizer.doFilter(request, response, filterChain);
 
         var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
-        verify(store).complete(eq("test-key"), captor.capture(), any(Duration.class));
+        verify(store).complete(eq("test-key"), eq(LEASE_ID), captor.capture(), any(Duration.class));
         assertThat(captor.getValue().headers()).doesNotContainKey("X-Secret");
+    }
+
+    @Test
+    void When_ResponseContainsTransportHeaders_Expect_NotStored() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        doAnswer(invocation -> {
+                    ThrowingRunnable action = invocation.getArgument(1);
+                    action.run();
+                    return ExecutionResult.executed(LEASE_ID);
+                })
+                .when(engine)
+                .execute(any(), any());
+        doAnswer(invocation -> {
+                    HttpServletResponse resp = invocation.getArgument(1);
+                    resp.setHeader("Connection", "keep-alive");
+                    resp.setHeader("Transfer-Encoding", "chunked");
+                    resp.setHeader("X-End-To-End", "kept");
+                    resp.getWriter().write("ok");
+                    return null;
+                })
+                .when(filterChain)
+                .doFilter(any(), any());
+
+        filter.doFilter(request, response, filterChain);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
+        verify(store).complete(eq("test-key"), eq(LEASE_ID), captor.capture(), any(Duration.class));
+        assertThat(captor.getValue().headers())
+                .containsEntry("X-End-To-End", List.of("kept"))
+                .doesNotContainKeys("Connection", "Transfer-Encoding", "Content-Length");
     }
 
     private void setupAnnotatedHandler(Idempotent annotation) throws Exception {

@@ -22,8 +22,11 @@ import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
+import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.RedisException;
 import io.lettuce.core.RedisNoScriptException;
+import io.lettuce.core.ScanArgs;
+import io.lettuce.core.ScanCursor;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
@@ -38,6 +41,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Redis implementation of {@link IdempotencyStore}, backed by Lettuce.
@@ -65,9 +71,6 @@ import java.util.Objects;
  * <ul>
  *   <li>{@code <prefix>rec:<key>} — a hash holding the record's status, expiry
  *       timestamps, request fingerprint, and (once COMPLETE) the stored response.</li>
- *   <li>{@code <prefix>idx} — a sorted set whose score is the earliest instant the
- *       record can become purgeable, so {@link #purgeExpired()} reads only the
- *       expired slice instead of scanning the keyspace.</li>
  * </ul>
  *
  * <h2>Expiry</h2>
@@ -78,8 +81,19 @@ import java.util.Objects;
  * rather than racing it.
  *
  * <h2>Limitations</h2>
- * <p>Standalone and Sentinel topologies only. Redis Cluster is not supported: the
- * record keys and the shared index would hash to different slots.
+ * <p>Standalone and Sentinel topologies only. Redis Cluster is not supported because
+ * this store accepts a {@link StatefulRedisConnection}; cluster connections use a
+ * different Lettuce API and require node-aware SCAN handling.
+ *
+ * <p>Redis replication is asynchronous. Sentinel can reconnect the supplied connection
+ * after failover, but it cannot by itself prevent an acknowledged write from being lost.
+ * Use the replication-acknowledgement constructor to issue {@code WAIT} after writes when
+ * that reduction in failover risk is required. {@code WAIT} is not a linearizability or
+ * exactly-once guarantee.
+ *
+ * <p>Use a dedicated key prefix and Redis ACL, TLS for remote connections, persistence
+ * appropriate to the deployment, and a {@code noeviction} maxmemory policy. Evicting a
+ * live IN_PROGRESS or COMPLETE record can allow the protected operation to run again.
  *
  * <p>Timestamps come from this store's {@link Clock}, not from Redis. As with the
  * JDBC store, clocks across application instances should be kept in sync (NTP);
@@ -95,8 +109,10 @@ public class RedisIdempotencyStore implements IdempotencyStore {
 
     private static final String DEFAULT_KEY_PREFIX = "idempotency:";
     private static final long DEFAULT_POLL_INTERVAL_MS = 50;
+    private static final long MAX_POLL_INTERVAL_MS = 1_000;
     private static final Duration DEFAULT_RETENTION_GRACE = Duration.ofHours(1);
     private static final int DEFAULT_PURGE_BATCH_SIZE = 500;
+    private static final int DEFAULT_MAX_PURGE_PAGES_PER_CALL = 100;
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
@@ -109,8 +125,8 @@ public class RedisIdempotencyStore implements IdempotencyStore {
      * overwrite — the caller cannot tell a fresh key from a reclaimed one, which
      * is exactly the SPI contract.
      *
-     * <p>KEYS: record, index. ARGV: now, lockExpiresAt, expiresAt, purgeableAt,
-     * pexpireMs, lockTimeoutMs, fingerprint.
+     * <p>KEYS: record. ARGV: now, lockExpiresAt, expiresAt, purgeableAt,
+     * pexpireMs, lockTimeoutMs, fingerprint, leaseId.
      */
     private static final LuaScript ACQUIRE = LuaScript.of(
             """
@@ -140,34 +156,34 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 'lockExpiresAt', ARGV[2],
                 'expiresAt', ARGV[3],
                 'lockTimeoutMs', ARGV[6],
-                'fingerprint', ARGV[7])
-            redis.call('ZADD', KEYS[2], ARGV[4], rec)
+                'fingerprint', ARGV[7],
+                'leaseId', ARGV[8])
             redis.call('PEXPIRE', rec, ARGV[5])
             return {'ACQUIRED'}
             """);
 
-    /** KEYS: record, index. ARGV: expiresAt, pexpireMs, code, headers, body, completedAt. */
+    /** KEYS: record. ARGV: leaseId, expiresAt, pexpireMs, code, headers, body, completedAt. */
     private static final LuaScript COMPLETE = LuaScript.of(
             """
             local rec = KEYS[1]
             local status = redis.call('HGET', rec, 'status')
             if not status then return {'MISSING'} end
             if status ~= 'IN_PROGRESS' then return {'CONFLICT', status} end
+            if redis.call('HGET', rec, 'leaseId') ~= ARGV[1] then return {'STALE'} end
             redis.call('HSET', rec,
                 'status', 'COMPLETE',
-                'expiresAt', ARGV[1],
-                'code', ARGV[3],
-                'headers', ARGV[4],
-                'body', ARGV[5],
-                'completedAt', ARGV[6])
-            redis.call('HDEL', rec, 'lockExpiresAt')
-            redis.call('ZADD', KEYS[2], ARGV[1], rec)
-            redis.call('PEXPIRE', rec, ARGV[2])
+                'expiresAt', ARGV[2],
+                'code', ARGV[4],
+                'headers', ARGV[5],
+                'body', ARGV[6],
+                'completedAt', ARGV[7])
+            redis.call('HDEL', rec, 'lockExpiresAt', 'leaseId')
+            redis.call('PEXPIRE', rec, ARGV[3])
             return {'OK'}
             """);
 
     /**
-     * KEYS: record, index. ARGV: now, graceMs.
+     * KEYS: record. ARGV: leaseId, now, graceMs.
      *
      * <p>A FAILED record expires after the original lock timeout rather than the
      * full TTL — it is immediately re-acquirable, so holding it for the whole TTL
@@ -179,26 +195,26 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             local status = redis.call('HGET', rec, 'status')
             if not status then return {'MISSING'} end
             if status ~= 'IN_PROGRESS' then return {'CONFLICT', status} end
+            if redis.call('HGET', rec, 'leaseId') ~= ARGV[1] then return {'STALE'} end
             local lockTimeout = tonumber(redis.call('HGET', rec, 'lockTimeoutMs') or '0')
-            local expiresAt = string.format('%d', tonumber(ARGV[1]) + lockTimeout)
+            local expiresAt = string.format('%d', tonumber(ARGV[2]) + lockTimeout)
             redis.call('HSET', rec, 'status', 'FAILED', 'expiresAt', expiresAt)
-            redis.call('HDEL', rec, 'lockExpiresAt', 'code', 'headers', 'body', 'completedAt')
-            redis.call('ZADD', KEYS[2], expiresAt, rec)
-            redis.call('PEXPIRE', rec, string.format('%d', lockTimeout + tonumber(ARGV[2])))
+            redis.call('HDEL', rec, 'lockExpiresAt', 'leaseId', 'code', 'headers', 'body', 'completedAt')
+            redis.call('PEXPIRE', rec, string.format('%d', lockTimeout + tonumber(ARGV[3])))
             return {'OK'}
             """);
 
-    /** KEYS: record, index. ARGV: now, newLockExpiresAt, graceMs. */
+    /** KEYS: record. ARGV: leaseId, now, newLockExpiresAt, graceMs. */
     private static final LuaScript EXTEND_LOCK = LuaScript.of(
             """
             local rec = KEYS[1]
             if redis.call('HGET', rec, 'status') ~= 'IN_PROGRESS' then return {'NOOP'} end
-            local purgeableAt = tonumber(ARGV[2])
+            if redis.call('HGET', rec, 'leaseId') ~= ARGV[1] then return {'NOOP'} end
+            local purgeableAt = tonumber(ARGV[3])
             local expiresAt = tonumber(redis.call('HGET', rec, 'expiresAt') or '0')
             if expiresAt > purgeableAt then purgeableAt = expiresAt end
-            redis.call('HSET', rec, 'lockExpiresAt', ARGV[2])
-            redis.call('ZADD', KEYS[2], string.format('%d', purgeableAt), rec)
-            local pexpire = purgeableAt - tonumber(ARGV[1]) + tonumber(ARGV[3])
+            redis.call('HSET', rec, 'lockExpiresAt', ARGV[3])
+            local pexpire = purgeableAt - tonumber(ARGV[2]) + tonumber(ARGV[4])
             if pexpire < 1 then pexpire = 1 end
             if redis.call('PTTL', rec) < pexpire then
                 redis.call('PEXPIRE', rec, string.format('%d', pexpire))
@@ -207,27 +223,18 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             """);
 
     /**
-     * One purge batch.
+     * Atomically checks and purges one SCAN page of record keys.
      *
-     * <p>Index members whose record is already gone (reclaimed by the native TTL)
-     * are dropped without being counted. Members that turn out not to be eligible
-     * are re-scored, which cannot loop forever: a record is eligible exactly when
-     * its {@code purgeableAt} has passed, so any re-score writes a future score.
-     *
-     * <p>KEYS: index. ARGV: now, batchSize. Returns {deleted, examined}.
+     * <p>KEYS: record keys returned by SCAN. ARGV: now. Returns {deleted}.
      */
     private static final LuaScript PURGE = LuaScript.of(
             """
-            local idx = KEYS[1]
             local now = tonumber(ARGV[1])
-            local members = redis.call('ZRANGEBYSCORE', idx, '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
             local deleted = 0
-            for i = 1, #members do
-                local rec = members[i]
+            for i = 1, #KEYS do
+                local rec = KEYS[i]
                 local status = redis.call('HGET', rec, 'status')
-                if not status then
-                    redis.call('ZREM', idx, rec)
-                else
+                if status then
                     local purgeableAt = tonumber(redis.call('HGET', rec, 'expiresAt') or '0')
                     if status == 'IN_PROGRESS' then
                         local lockExpiresAt = tonumber(redis.call('HGET', rec, 'lockExpiresAt') or '0')
@@ -235,23 +242,25 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                     end
                     if purgeableAt <= now then
                         redis.call('DEL', rec)
-                        redis.call('ZREM', idx, rec)
                         deleted = deleted + 1
-                    else
-                        redis.call('ZADD', idx, string.format('%d', purgeableAt), rec)
                     end
                 end
             end
-            return {deleted, #members}
+            return {deleted}
             """);
 
     private final RedisCommands<String, byte[]> commands;
     private final String recordKeyPrefix;
-    private final String indexKey;
+    private final String recordScanPattern;
+    private final String legacyIndexKey;
     private final long pollIntervalMs;
     private final long graceMs;
     private final int purgeBatchSize;
     private final Clock clock;
+    private final int requiredReplicaAcks;
+    private final long replicaAckTimeoutMs;
+    private final int maxPurgePagesPerCall;
+    private String purgeCursor = "0";
 
     public RedisIdempotencyStore(StatefulRedisConnection<String, byte[]> connection) {
         this(connection, DEFAULT_KEY_PREFIX);
@@ -277,8 +286,8 @@ public class RedisIdempotencyStore implements IdempotencyStore {
      * @param retentionGrace how far the native Redis TTL trails logical expiry; the
      *                       backstop that reclaims memory when {@link #purgeExpired()}
      *                       is not scheduled
-     * @param purgeBatchSize how many index entries {@link #purgeExpired()} examines per
-     *                       round trip
+     * @param purgeBatchSize approximate number of record keys requested from Redis per
+     *                       SCAN page
      * @param clock          source of time for every expiry decision
      */
     public RedisIdempotencyStore(
@@ -288,9 +297,69 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             Duration retentionGrace,
             int purgeBatchSize,
             Clock clock) {
+        this(
+                connection,
+                keyPrefix,
+                pollIntervalMs,
+                retentionGrace,
+                purgeBatchSize,
+                clock,
+                0,
+                Duration.ZERO,
+                DEFAULT_MAX_PURGE_PAGES_PER_CALL);
+    }
+
+    /**
+     * Creates a store with optional best-effort replication acknowledgement.
+     *
+     * <p>When {@code requiredReplicaAcks} is positive, every successful write is
+     * followed by Redis {@code WAIT}. Failure to receive enough acknowledgements is
+     * reported to the caller, reducing (but not eliminating) Sentinel failover data
+     * loss. Redis replication remains eventually consistent even with {@code WAIT}.
+     *
+     * @param requiredReplicaAcks number of replicas that must acknowledge each write;
+     *                            zero disables {@code WAIT}
+     * @param replicaAckTimeout   maximum time to wait for replica acknowledgements;
+     *                            must be positive when acknowledgements are required
+     */
+    public RedisIdempotencyStore(
+            StatefulRedisConnection<String, byte[]> connection,
+            String keyPrefix,
+            long pollIntervalMs,
+            Duration retentionGrace,
+            int purgeBatchSize,
+            Clock clock,
+            int requiredReplicaAcks,
+            Duration replicaAckTimeout) {
+        this(
+                connection,
+                keyPrefix,
+                pollIntervalMs,
+                retentionGrace,
+                purgeBatchSize,
+                clock,
+                requiredReplicaAcks,
+                replicaAckTimeout,
+                DEFAULT_MAX_PURGE_PAGES_PER_CALL);
+    }
+
+    /**
+     * Full constructor including a bound on how many SCAN pages one purge invocation processes.
+     */
+    public RedisIdempotencyStore(
+            StatefulRedisConnection<String, byte[]> connection,
+            String keyPrefix,
+            long pollIntervalMs,
+            Duration retentionGrace,
+            int purgeBatchSize,
+            Clock clock,
+            int requiredReplicaAcks,
+            Duration replicaAckTimeout,
+            int maxPurgePagesPerCall) {
         Objects.requireNonNull(connection, "connection must not be null");
         Objects.requireNonNull(keyPrefix, "keyPrefix must not be null");
         Objects.requireNonNull(retentionGrace, "retentionGrace must not be null");
+        Objects.requireNonNull(replicaAckTimeout, "replicaAckTimeout must not be null");
         if (keyPrefix.isBlank()) {
             throw new IllegalArgumentException("keyPrefix must not be blank");
         }
@@ -303,31 +372,54 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         if (purgeBatchSize <= 0) {
             throw new IllegalArgumentException("purgeBatchSize must be positive, got: " + purgeBatchSize);
         }
+        if (requiredReplicaAcks < 0) {
+            throw new IllegalArgumentException("requiredReplicaAcks must not be negative, got: " + requiredReplicaAcks);
+        }
+        if (maxPurgePagesPerCall <= 0) {
+            throw new IllegalArgumentException("maxPurgePagesPerCall must be positive, got: " + maxPurgePagesPerCall);
+        }
+        if (replicaAckTimeout.isNegative() || (requiredReplicaAcks > 0 && replicaAckTimeout.isZero())) {
+            throw new IllegalArgumentException(
+                    "replicaAckTimeout must be positive when replica acknowledgements are required, got: "
+                            + replicaAckTimeout);
+        }
         this.commands = connection.sync();
         this.recordKeyPrefix = keyPrefix + "rec:";
-        this.indexKey = keyPrefix + "idx";
+        this.recordScanPattern = globEscape(this.recordKeyPrefix) + "*";
+        this.legacyIndexKey = keyPrefix + "idx";
         this.pollIntervalMs = pollIntervalMs;
         this.graceMs = retentionGrace.toMillis();
         this.purgeBatchSize = purgeBatchSize;
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        this.requiredReplicaAcks = requiredReplicaAcks;
+        this.replicaAckTimeoutMs = replicaAckTimeout.toMillis();
+        this.maxPurgePagesPerCall = maxPurgePagesPerCall;
     }
 
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
-        Instant deadline = clock.instant().plus(context.lockTimeout());
+        long startedAtNanos = System.nanoTime();
+        long timeoutNanos = context.lockTimeout().toNanos();
+        String leaseId = UUID.randomUUID().toString();
+        int busyAttempts = 0;
+        boolean firstAttempt = true;
 
         while (true) {
-            AcquireResult result = attemptAcquire(context);
+            if (!firstAttempt && elapsedNanos(startedAtNanos) >= timeoutNanos) {
+                return AcquireResult.lockTimeout(context.key());
+            }
+            firstAttempt = false;
+            AcquireResult result = attemptAcquire(context, leaseId);
             if (result != null) {
                 return result;
             }
 
-            // Key is held by a live lock — sleep and try again until our deadline
-            if (!clock.instant().isBefore(deadline)) {
+            long remainingNanos = timeoutNanos - elapsedNanos(startedAtNanos);
+            if (remainingNanos <= 0) {
                 return AcquireResult.lockTimeout(context.key());
             }
             try {
-                Thread.sleep(pollIntervalMs);
+                TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, jitteredBackoffNanos(busyAttempts++)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return AcquireResult.lockTimeout(context.key());
@@ -335,14 +427,29 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         }
     }
 
+    private long jitteredBackoffNanos(int busyAttempts) {
+        int shift = Math.min(busyAttempts, 10);
+        long upperMs = pollIntervalMs > (MAX_POLL_INTERVAL_MS >> shift)
+                ? MAX_POLL_INTERVAL_MS
+                : Math.min(MAX_POLL_INTERVAL_MS, pollIntervalMs << shift);
+        long lowerMs = Math.max(1, upperMs / 2);
+        long delayMs = ThreadLocalRandom.current().nextLong(lowerMs, upperMs + 1);
+        return TimeUnit.MILLISECONDS.toNanos(delayMs);
+    }
+
+    private static long elapsedNanos(long startedAtNanos) {
+        return System.nanoTime() - startedAtNanos;
+    }
+
     @Override
-    public void complete(String key, StoredResponse response, Duration ttl) {
+    public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
         long now = clock.millis();
         long expiresAt = now + ttl.toMillis();
         List<Object> reply = eval(
                 COMPLETE,
                 "complete key '" + key + "'",
                 keysFor(key),
+                arg(leaseId),
                 arg(expiresAt),
                 arg(pexpireMs(now, expiresAt)),
                 arg(response.statusCode()),
@@ -350,53 +457,86 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 response.body(),
                 arg(response.completedAt().toEpochMilli()));
         requireOk(reply, key, "complete");
+        awaitReplication("complete key '" + key + "'");
     }
 
     @Override
-    public void release(String key) {
-        List<Object> reply =
-                eval(RELEASE, "release key '" + key + "'", keysFor(key), arg(clock.millis()), arg(graceMs));
+    public void release(String key, String leaseId) {
+        List<Object> reply = eval(
+                RELEASE, "release key '" + key + "'", keysFor(key), arg(leaseId), arg(clock.millis()), arg(graceMs));
         requireOk(reply, key, "release");
+        awaitReplication("release key '" + key + "'");
     }
 
     @Override
-    public void extendLock(String key, Duration extension) {
+    public void extendLock(String key, String leaseId, Duration extension) {
         long now = clock.millis();
         // Returns NOOP for unknown or non-IN_PROGRESS keys — the heartbeat may fire
         // after the key has already been completed or released.
-        eval(
+        List<Object> reply = eval(
                 EXTEND_LOCK,
                 "extend lock for key '" + key + "'",
                 keysFor(key),
+                arg(leaseId),
                 arg(now),
                 arg(now + extension.toMillis()),
                 arg(graceMs));
+        if ("OK".equals(token(reply.get(0)))) {
+            awaitReplication("extend lock for key '" + key + "'");
+        }
     }
 
     /**
-     * Deletes expired records by walking the expiry index, in batches of
-     * {@code purgeBatchSize}.
+     * Deletes expired records by scanning this store's record namespace in pages of
+     * {@code purgeBatchSize} and atomically checking each page.
      *
      * <p>COMPLETE and FAILED records are removed once their {@code expiresAt} has
      * passed; IN_PROGRESS records only once <em>both</em> {@code lockExpiresAt} and
      * {@code expiresAt} have passed, since a record whose lock alone has expired is
      * still stealable by the next {@link #tryAcquire} caller.
      *
-     * <p>Records whose native TTL already reclaimed them are not counted — the
-     * return value reflects records this call actually deleted.
+     * <p>Records whose native TTL already reclaimed them are not returned by SCAN and
+     * are therefore not counted. SCAN is safe for production iteration and does not
+     * block Redis for the duration of the whole keyspace walk; each page is purged by
+     * one short Lua script.
      *
      * @return the number of records deleted
      */
     @Override
-    public int purgeExpired() {
-        int total = 0;
-        while (true) {
-            List<Object> reply = eval(
-                    PURGE, "purge expired records", new String[] {indexKey}, arg(clock.millis()), arg(purgeBatchSize));
-            total += (int) number(reply.get(0));
-            if (number(reply.get(1)) < purgeBatchSize) {
-                return total;
+    public synchronized int purgeExpired() {
+        long total = 0;
+        ScanArgs scanArgs = ScanArgs.Builder.matches(recordScanPattern).limit(purgeBatchSize);
+        try {
+            // Versions before lease fencing used a permanent sorted-set index. It is no
+            // longer read, so remove it lazily on the first scheduled purge after upgrade.
+            if (commands.del(legacyIndexKey) > 0) {
+                awaitReplication("remove the legacy expiry index");
             }
+            KeyScanCursor<String> cursor = commands.scan(ScanCursor.of(purgeCursor), scanArgs);
+            int pages = 0;
+            while (true) {
+                pages++;
+                purgeCursor = cursor.getCursor();
+                if (!cursor.getKeys().isEmpty()) {
+                    String[] keys = cursor.getKeys().toArray(String[]::new);
+                    List<Object> reply = eval(PURGE, "purge expired records", keys, arg(clock.millis()));
+                    long deleted = number(reply.get(0));
+                    total += deleted;
+                    if (deleted > 0) {
+                        awaitReplication("replicate purged records");
+                    }
+                }
+                if (cursor.isFinished()) {
+                    purgeCursor = "0";
+                    return Math.toIntExact(total);
+                }
+                if (pages >= maxPurgePagesPerCall) {
+                    return Math.toIntExact(total);
+                }
+                cursor = commands.scan(cursor, scanArgs);
+            }
+        } catch (RedisException e) {
+            throw new IdempotencyStoreException("Failed to scan records for expiry", e);
         }
     }
 
@@ -406,7 +546,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
      * @return the resolved outcome, or {@code null} if the key is held by a live
      *     lock and the caller should poll again
      */
-    private AcquireResult attemptAcquire(IdempotencyContext context) {
+    private AcquireResult attemptAcquire(IdempotencyContext context, String leaseId) {
         long now = clock.millis();
         long lockExpiresAt = now + context.lockTimeout().toMillis();
         long expiresAt = now + context.ttl().toMillis();
@@ -422,11 +562,15 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 arg(purgeableAt),
                 arg(pexpireMs(now, purgeableAt)),
                 arg(context.lockTimeout().toMillis()),
-                arg(context.requestFingerprint()));
+                arg(context.requestFingerprint()),
+                arg(leaseId));
 
         String outcome = token(reply.get(0));
         return switch (outcome) {
-            case "ACQUIRED" -> AcquireResult.acquired();
+            case "ACQUIRED" -> {
+                awaitReplication("acquire key '" + context.key() + "'");
+                yield AcquireResult.acquired(leaseId);
+            }
             case "BUSY" -> null;
             case "MISMATCH" -> AcquireResult.fingerprintMismatch(token(reply.get(1)), context.requestFingerprint());
             case "DUPLICATE" -> AcquireResult.duplicate(readResponse(reply));
@@ -436,11 +580,17 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     }
 
     private StoredResponse readResponse(List<Object> reply) {
-        int statusCode = Integer.parseInt(token(reply.get(1)));
-        Map<String, List<String>> headers = jsonToHeaders(bytes(reply.get(2)));
-        byte[] body = bytes(reply.get(3));
-        Instant completedAt = Instant.ofEpochMilli(Long.parseLong(token(reply.get(4))));
-        return new StoredResponse(statusCode, headers, body, completedAt);
+        try {
+            int statusCode = Integer.parseInt(token(reply.get(1)));
+            Map<String, List<String>> headers = jsonToHeaders(bytes(reply.get(2)));
+            byte[] body = bytes(reply.get(3));
+            Instant completedAt = Instant.ofEpochMilli(Long.parseLong(token(reply.get(4))));
+            return new StoredResponse(statusCode, headers, body, completedAt);
+        } catch (IdempotencyStoreException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new IdempotencyStoreException("Stored Redis response is malformed and cannot be replayed", e);
+        }
     }
 
     /**
@@ -457,6 +607,8 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                     "Cannot " + operation + " key '" + key + "': no entry exists. Was tryAcquire called?");
             case "CONFLICT" -> throw new IdempotencyStoreException("Cannot " + operation + " key '" + key
                     + "': entry is " + token(reply.get(1)) + ", expected IN_PROGRESS");
+            case "STALE" -> throw new IdempotencyStoreException(
+                    "Cannot " + operation + " key '" + key + "': lease is stale or no longer owns the key");
             default -> throw new IdempotencyStoreException(
                     "Unexpected " + operation + " outcome '" + outcome + "' for key '" + key + "'");
         }
@@ -479,8 +631,30 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         }
     }
 
+    private void awaitReplication(String description) {
+        if (requiredReplicaAcks == 0) {
+            return;
+        }
+        try {
+            long acknowledged = commands.waitForReplication(requiredReplicaAcks, replicaAckTimeoutMs);
+            if (acknowledged < requiredReplicaAcks) {
+                throw new IdempotencyStoreException("Failed to " + description + ": only " + acknowledged + " of "
+                        + requiredReplicaAcks + " required replicas acknowledged the write");
+            }
+        } catch (RedisException e) {
+            throw new IdempotencyStoreException("Failed to wait for replication after " + description, e);
+        }
+    }
+
     private String[] keysFor(String key) {
-        return new String[] {recordKeyPrefix + key, indexKey};
+        return new String[] {recordKeyPrefix + key};
+    }
+
+    private static String globEscape(String value) {
+        return value.replace("\\", "\\\\")
+                .replace("*", "\\*")
+                .replace("?", "\\?")
+                .replace("[", "\\[");
     }
 
     /** How long the record should physically survive: until it is purgeable, plus the grace. */

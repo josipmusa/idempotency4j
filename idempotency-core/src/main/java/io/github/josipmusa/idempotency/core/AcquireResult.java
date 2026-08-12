@@ -15,8 +15,10 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.util.Objects;
+
 /**
- * The result of {@link IdempotencyStore#tryAcquire} — one of three outcomes
+ * The result of {@link IdempotencyStore#tryAcquire} — one of four outcomes
  * that determine what happens next in the idempotency lifecycle.
  *
  * <p>Use pattern matching to handle each case:
@@ -38,9 +40,17 @@ public sealed interface AcquireResult
     /**
      * Lock obtained — this caller owns the key and should execute the action.
      * The key is now IN_PROGRESS. The caller must eventually call either
-     * {@link IdempotencyStore#complete} or {@link IdempotencyStore#release}.
+     * {@link IdempotencyStore#complete} or {@link IdempotencyStore#release}, passing
+     * this lease ID so a stale owner cannot mutate a newer acquisition.
      */
-    record Acquired() implements AcquireResult {}
+    record Acquired(String leaseId) implements AcquireResult {
+        public Acquired {
+            Objects.requireNonNull(leaseId, "leaseId must not be null");
+            if (leaseId.isBlank()) {
+                throw new IllegalArgumentException("leaseId must not be blank");
+            }
+        }
+    }
 
     /**
      * Key was already completed — contains the stored response for replay.
@@ -62,8 +72,8 @@ public sealed interface AcquireResult
      */
     record FingerprintMismatch(String storedFingerprint, String receivedFingerprint) implements AcquireResult {}
 
-    static AcquireResult acquired() {
-        return new Acquired();
+    static AcquireResult acquired(String leaseId) {
+        return new Acquired(leaseId);
     }
 
     static AcquireResult duplicate(StoredResponse response) {

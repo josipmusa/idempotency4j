@@ -13,7 +13,7 @@
 
     <artifactId>idempotency-redis</artifactId>
     <name>idempotency-redis</name>
-    <description>Redis IdempotencyStore backed by Lettuce. Suitable for horizontally scaled deployments. Supports standalone and Sentinel topologies.</description>
+    <description>Redis IdempotencyStore backed by Lettuce. Suitable for horizontally scaled deployments with standalone Redis or a Sentinel-managed master.</description>
     <packaging>jar</packaging>
 
     <dependencies>

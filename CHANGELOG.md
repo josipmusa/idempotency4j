@@ -9,8 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Redis provider (`idempotency-redis`) built on Lettuce, with Lua-scripted state transitions,
-  a sorted-set expiry index backing `purgeExpired()`, and a native Redis TTL as the
-  memory-reclamation backstop. Supports standalone and Sentinel topologies.
+  bounded resumable SCAN-based purging, and a native Redis TTL as the memory-reclamation
+  backstop. Supports standalone and Sentinel topologies, plus optional Redis `WAIT`
+  acknowledgements to reduce failover data-loss risk.
+
+### Changed
+- Acquisition now returns an ownership lease. Completion, release, and heartbeat operations
+  require that lease, fencing a stale worker after its lock has been stolen. JDBC schemas are
+  migrated automatically with a nullable `lease_id` column.
+- Redis polling uses a monotonic timeout with jittered exponential backoff, and purge work is
+  bounded per invocation. The previous global sorted-set expiry index is no longer used and is
+  removed lazily by `purgeExpired()`.
+
+### Security
+- Documented Redis ACL, TLS, persistence, response-retention, and mandatory `noeviction`
+  deployment requirements, plus the limits of Sentinel and application-level exactly-once
+  guarantees.
 
 ## [0.1.0] - 2026-04-20
 

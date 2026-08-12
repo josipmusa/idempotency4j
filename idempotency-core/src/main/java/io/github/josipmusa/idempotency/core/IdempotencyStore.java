@@ -26,9 +26,9 @@ import java.time.Duration;
  *
  * <h2>State machine for a key</h2>
  * <pre>
- * [not exists] ──tryAcquire──→ IN_PROGRESS ──complete()──→ COMPLETE
+ * [not exists] ──tryAcquire──→ IN_PROGRESS ──complete(leaseId)──→ COMPLETE
  *                                   │
- *                               release()
+ *                           release(leaseId)
  *                                   │
  *                                   ↓
  *                                FAILED ──tryAcquire──→ IN_PROGRESS
@@ -48,7 +48,7 @@ import java.time.Duration;
  *   <li>{@code extendLock} must be a silent no-op for unknown or
  *       non-IN_PROGRESS keys (the heartbeat may fire after completion).</li>
  *   <li>{@code complete} and {@code release} must reject calls for keys
- *       that are not IN_PROGRESS.</li>
+ *       that are not IN_PROGRESS or are owned by a different lease.</li>
  * </ul>
  */
 public interface IdempotencyStore {
@@ -58,7 +58,7 @@ public interface IdempotencyStore {
      *
      * <p>This is the only entry point into the state machine. The method
      * blocks internally if the key is IN_PROGRESS (held by another caller)
-     * and returns one of three outcomes:
+     * and returns one of four outcomes:
      * <ul>
      *   <li>{@link AcquireResult.Acquired} — lock obtained, caller should
      *       execute the action and then call {@link #complete}.</li>
@@ -66,6 +66,8 @@ public interface IdempotencyStore {
      *       response is attached for replay.</li>
      *   <li>{@link AcquireResult.LockTimeout} — key is in-flight and the
      *       caller's {@code lockTimeout} expired while waiting.</li>
+     *   <li>{@link AcquireResult.FingerprintMismatch} — the key is COMPLETE but
+     *       belongs to a different request payload.</li>
      * </ul>
      *
      * <p>Stale locks (IN_PROGRESS with expired {@code lockExpiresAt}) are
@@ -88,12 +90,14 @@ public interface IdempotencyStore {
      * {@link AcquireResult.Duplicate} until {@code ttl} expires.
      *
      * @param key      the idempotency key, must match a prior {@code tryAcquire}
+     * @param leaseId  the lease returned by that successful {@code tryAcquire}
      * @param response the HTTP response to store for duplicate replay
      * @param ttl      how long to keep the completed entry before expiry
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
-     *         if the key does not exist or is not IN_PROGRESS
+     *         if the key does not exist, is not IN_PROGRESS, or is owned by a
+     *         different lease
      */
-    void complete(String key, StoredResponse response, Duration ttl);
+    void complete(String key, String leaseId, StoredResponse response, Duration ttl);
 
     /**
      * Transitions an IN_PROGRESS key to FAILED, allowing it to be retried.
@@ -101,11 +105,13 @@ public interface IdempotencyStore {
      * <p>Called by the engine when the action throws. The key becomes
      * immediately reclaimable by the next {@code tryAcquire} caller.
      *
-     * @param key the idempotency key to release
+     * @param key     the idempotency key to release
+     * @param leaseId the lease returned by the successful {@code tryAcquire}
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
-     *         if the key does not exist or is not IN_PROGRESS
+     *         if the key does not exist, is not IN_PROGRESS, or is owned by a
+     *         different lease
      */
-    void release(String key);
+    void release(String key, String leaseId);
 
     /**
      * Extends the lock expiration for an IN_PROGRESS key.
@@ -115,14 +121,15 @@ public interface IdempotencyStore {
      * long-running action is still executing.
      *
      * <p>Must be a <strong>silent no-op</strong> if the key does not
-     * exist or is not IN_PROGRESS. The heartbeat may fire after the
-     * key has already been completed or released — this is expected
-     * and must not throw.
+     * exist, is not IN_PROGRESS, or belongs to a different lease. The heartbeat
+     * may fire after the key has already been completed, released, or stolen —
+     * this is expected and must not throw.
      *
      * @param key       the idempotency key whose lock to extend
+     * @param leaseId   the lease returned by the successful {@code tryAcquire}
      * @param extension the new lock duration measured from now
      */
-    void extendLock(String key, Duration extension);
+    void extendLock(String key, String leaseId, Duration extension);
 
     /**
      * Purges all expired records from the store.

@@ -5,7 +5,12 @@
 
 A Java idempotency library with pluggable storage backends and Spring Web / Spring Boot support.
 
-Send the same request twice — get the same response, side effects run exactly once.
+Send the same request twice and, while the idempotency record is retained, get the same response
+without normally running the handler again.
+
+Idempotency storage closes the common client-retry window; it cannot by itself make an arbitrary
+downstream side effect exactly-once. For payments and similarly critical work, combine it with a
+database transaction, an outbox, or a downstream idempotency/fencing token.
 
 ## When to use this
 
@@ -54,8 +59,8 @@ Annotate the endpoints that need idempotency:
 @PostMapping("/payments")
 @Idempotent
 public ResponseEntity<Payment> createPayment(@RequestBody PaymentRequest request) {
-    // Runs exactly once per unique Idempotency-Key value.
-    // Subsequent identical requests get the stored response replayed.
+    // Subsequent identical requests normally get the stored response replayed.
+    // The payment provider should also receive its own idempotency key.
     return ResponseEntity.ok(paymentService.charge(request));
 }
 ```
@@ -129,9 +134,29 @@ public IdempotencyStore idempotencyStore(StatefulRedisConnection<String, byte[]>
 }
 ```
 
-Lettuce connections are thread-safe, so one connection serves the whole application — no pool is needed. A six-argument constructor exposes the key prefix (default `idempotency:`), poll interval, retention grace, purge batch size, and `Clock`.
+Lettuce connections are thread-safe, so one connection serves the whole application — no pool is needed. The caller owns that connection. The extended constructors expose the key prefix (default `idempotency:`), poll interval, retention grace, approximate SCAN page size, `Clock`, optional replica acknowledgements, and the maximum number of SCAN pages processed by one purge call.
 
-Records carry their own expiry timestamps, and each write also sets a native Redis TTL that trails logical expiry by the retention grace (default 1h). Expired records are therefore reclaimed even if the purge job is disabled, while `purgeExpired()` still removes them promptly — which matters when responses contain sensitive data.
+Records carry their own expiry timestamps, and each write also sets a native Redis TTL that trails logical expiry by the retention grace (default 1h). Expired records are therefore reclaimed even if the purge job is disabled. `purgeExpired()` uses bounded, resumable SCAN pages to remove them promptly; there is no permanent global expiry index.
+
+Use a dedicated key prefix and Redis ACL, TLS for remote connections, persistence appropriate to your recovery objective, and `maxmemory-policy noeviction`. Eviction is a correctness event, not merely a cache miss: losing an IN_PROGRESS or COMPLETE record can allow the operation to execute again. Size Redis for the retained response bodies and use a `ResponseSanitizer` to remove sensitive or unnecessarily large data.
+
+Redis replication is asynchronous. Sentinel provides discovery and failover, but an acknowledged write can still be absent from the promoted replica. The eight-argument constructor can issue `WAIT` after every successful mutation:
+
+```java
+new RedisIdempotencyStore(
+        connection,
+        "payments:idempotency:",
+        50,
+        Duration.ofHours(1),
+        500,
+        Clock.systemUTC(),
+        1,                         // replica acknowledgements required
+        Duration.ofMillis(100));  // maximum WAIT latency
+```
+
+This reduces, but does not eliminate, failover data loss. It also adds a synchronous round trip to writes and can hold up the shared connection until the timeout when replicas are unavailable, so keep the timeout bounded and load-test the failure path. For Sentinel topology discovery, pass the `StatefulRedisMasterReplicaConnection` returned by Lettuce `MasterReplica.connect(...)` and keep reads on the master.
+
+Upgrading from the initial Redis-provider implementation requires a coordinated stop/start, not a rolling mix of old and new instances: the lease-fencing SPI and record writes changed. Existing COMPLETE records remain replayable, old IN_PROGRESS records become reclaimable after their lock expires, and the obsolete `<prefix>idx` key is removed by the next `purgeExpired()` call.
 
 ## Configuration
 
@@ -168,14 +193,20 @@ The autoconfiguration activates only when a Servlet-based Spring Web application
 
 **Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
 
+**Infrastructure failures are not an exactly-once guarantee.** Lease fencing prevents an expired owner from overwriting a newer owner's stored result, but it cannot roll back a side effect that happened before a process crash or store failure. Use transactional/outbox patterns or propagate an idempotency/fencing token to downstream systems.
+
+**Redis Cluster is not supported.** The provider accepts Lettuce's non-cluster `StatefulRedisConnection`, and its bounded SCAN purge is not node-aware. Standalone and Sentinel master-replica connections are supported.
+
 ## Security considerations
 
 The store persists full HTTP response bodies. Depending on your endpoints this may include PII, tokens, or financial data.
 
 - Enable encryption at rest on the backing database.
+- Use TLS and authentication/ACLs for Redis; restrict the ACL to the configured key prefix.
+- Configure Redis with `maxmemory-policy noeviction` and monitor memory headroom.
 - Use short TTL values to limit data retention.
 - Configure `idempotency.purge.cron` to remove expired records promptly.
-- Audit which endpoints are annotated `@Idempotent` and what their responses contain.
+- Audit which endpoints are annotated `@Idempotent`, what their responses contain, and their maximum response size.
 
 To strip or redact sensitive fields before storage, register a `ResponseSanitizer` bean. The default implementation is a no-op pass-through:
 
