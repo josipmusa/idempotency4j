@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Acquisition now returns an ownership lease. Completion, release, and heartbeat operations
-  require that lease, fencing a stale worker after its lock has been stolen. Fresh JDBC schemas
-  include the nullable `lease_id` ownership column.
+  require that lease, fencing a stale worker after its lock has been stolen. Automatically managed
+  JDBC schemas add the nullable `lease_id` ownership column when necessary.
 - Redis polling uses a monotonic timeout with jittered exponential backoff, and purge work is
   bounded per invocation. Records include explicit owner and format markers, and namespace
   collisions fail closed without modifying foreign data.
@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- A JDBC 0.1 to 0.2 deployment must use a coordinated stop/start because 0.1 workers do not honor
+  lease fencing. Default schema management adds `lease_id` automatically. With `initSchema = false`,
+  add a nullable `lease_id VARCHAR(36)` column through the application's schema-management tool.
 - Redis has no migration path because it is new in this release. Development-snapshot records with
   another format are preserved and rejected.
 

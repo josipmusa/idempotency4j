@@ -11,6 +11,9 @@
  * and loading the appropriate bundled script ({@code idempotency-schema-mysql.sql} or
  * {@code idempotency-schema-postgresql.sql}). To manage the schema externally (e.g. via
  * Flyway or Liquibase), pass {@code initSchema = false} to the two-argument constructor.
+ * Existing automatically managed schemas are upgraded with the nullable {@code lease_id}
+ * ownership-fencing column. Externally managed schemas must add the same column before deploying
+ * this version.
  *
  * <p>All expiry and lock decisions use the database server's current timestamp, so application
  * nodes do not need synchronized clocks for lease correctness.

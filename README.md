@@ -120,6 +120,10 @@ public IdempotencyStore idempotencyStore(DataSource dataSource) {
 }
 ```
 
+The default JDBC store manages its table and automatically adds the nullable `lease_id` column to
+an existing 0.1 schema. If schema management is disabled with `initSchema = false`, add
+`lease_id VARCHAR(36) NULL` through your normal schema-management tool before starting 0.2.
+
 ### Redis
 
 `idempotency-redis` is built on [Lettuce](https://lettuce.io/) and needs a connection opened with the store's codec, so that binary response bodies are stored as raw bytes:

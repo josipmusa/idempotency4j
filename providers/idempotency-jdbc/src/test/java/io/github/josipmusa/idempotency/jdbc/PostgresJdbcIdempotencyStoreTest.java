@@ -75,6 +75,22 @@ class PostgresJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
     }
 
     @Test
+    void When_ExistingSchemaPredatesLeaseFencing_Expect_ColumnMigratedAutomatically() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("ALTER TABLE idempotency_records DROP COLUMN lease_id");
+        }
+
+        new JdbcIdempotencyStore(dataSource, true);
+
+        try (Connection conn = dataSource.getConnection();
+                Statement stmt = conn.createStatement()) {
+            assertThatCode(() -> stmt.executeQuery("SELECT lease_id FROM idempotency_records WHERE 1 = 0"))
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    @Test
     void When_ConnectionExhausted_Expect_ThrowsIdempotencyStoreException() throws Exception {
         DataSource exhaustedDs = mock(DataSource.class);
         when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
