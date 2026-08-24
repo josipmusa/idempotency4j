@@ -19,7 +19,7 @@ import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -160,11 +160,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
         store.compute(key, (k, existing) -> {
             if (existing == null) {
-                throw new IdempotencyStoreException(
-                        "Cannot complete key '" + key + "': no entry exists. Was tryAcquire called?");
+                throw new IdempotencyLeaseLostException(
+                        "Cannot complete key '" + key + "': no entry exists or it expired");
             }
             if (existing.status() != Status.IN_PROGRESS) {
-                throw new IdempotencyStoreException(
+                throw new IdempotencyLeaseLostException(
                         "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
             requireLease(existing, leaseId, key, "complete");
@@ -183,11 +183,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     public void release(String key, String leaseId) {
         store.compute(key, (k, existing) -> {
             if (existing == null) {
-                throw new IdempotencyStoreException(
-                        "Cannot release key '" + key + "': no entry exists. Was tryAcquire called?");
+                throw new IdempotencyLeaseLostException(
+                        "Cannot release key '" + key + "': no entry exists or it expired");
             }
             if (existing.status() != Status.IN_PROGRESS) {
-                throw new IdempotencyStoreException(
+                throw new IdempotencyLeaseLostException(
                         "Cannot release key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
             requireLease(existing, leaseId, key, "release");
@@ -225,8 +225,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     private static void requireLease(Entry entry, String leaseId, String key, String operation) {
         Objects.requireNonNull(leaseId, "leaseId must not be null");
         if (!leaseId.equals(entry.leaseId())) {
-            throw new IdempotencyStoreException(
-                    "Cannot " + operation + " key '" + key + "': lease is stale or no longer owns the key");
+            throw new IdempotencyLeaseLostException(
+                    "Cannot " + operation + " key '" + key + "': lease no longer owns the key");
         }
     }
 

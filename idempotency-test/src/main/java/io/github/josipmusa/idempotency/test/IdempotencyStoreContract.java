@@ -23,7 +23,7 @@ import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -123,12 +123,12 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "release-key";
 
-        acquire(s, contextFor(key));
-        release(s, key);
+        var first = (AcquireResult.Acquired) acquire(s, contextFor(key));
+        s.release(key, first.leaseId());
 
-        AcquireResult result = acquire(s, contextFor(key));
+        var result = (AcquireResult.Acquired) acquire(s, contextFor(key));
 
-        assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(result.leaseId()).isNotEqualTo(first.leaseId());
     }
 
     @Test
@@ -194,10 +194,10 @@ public abstract class IdempotencyStoreContract {
         StoredResponse staleResponse = new StoredResponse(200, Map.of(), "stale".getBytes(), Instant.now());
 
         assertThatThrownBy(() -> s.complete(key, first.leaseId(), staleResponse, Duration.ofHours(1)))
-                .isInstanceOf(IdempotencyStoreException.class)
+                .isInstanceOf(IdempotencyLeaseLostException.class)
                 .hasMessageContaining("lease");
         assertThatThrownBy(() -> s.release(key, first.leaseId()))
-                .isInstanceOf(IdempotencyStoreException.class)
+                .isInstanceOf(IdempotencyLeaseLostException.class)
                 .hasMessageContaining("lease");
         assertThatCode(() -> s.extendLock(key, first.leaseId(), Duration.ofHours(1)))
                 .doesNotThrowAnyException();
@@ -477,7 +477,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
 
         assertThatThrownBy(() -> complete(s, "ghost-key", sampleResponse(), Duration.ofHours(1)))
-                .isInstanceOf(IdempotencyStoreException.class);
+                .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
@@ -489,14 +489,14 @@ public abstract class IdempotencyStoreContract {
         release(s, key);
 
         assertThatThrownBy(() -> complete(s, key, sampleResponse(), Duration.ofHours(1)))
-                .isInstanceOf(IdempotencyStoreException.class);
+                .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
     void When_ReleaseOnNonExistentKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
 
-        assertThatThrownBy(() -> release(s, "ghost-key")).isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> release(s, "ghost-key")).isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
@@ -508,7 +508,7 @@ public abstract class IdempotencyStoreContract {
         complete(s, key, sampleResponse(), Duration.ofHours(1));
 
         assertThatThrownBy(() -> complete(s, key, sampleResponse(), Duration.ofHours(1)))
-                .isInstanceOf(IdempotencyStoreException.class);
+                .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
@@ -519,7 +519,7 @@ public abstract class IdempotencyStoreContract {
         acquire(s, contextFor(key));
         complete(s, key, sampleResponse(), Duration.ofHours(1));
 
-        assertThatThrownBy(() -> release(s, key)).isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> release(s, key)).isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     // --- Full lifecycle ---
@@ -578,7 +578,7 @@ public abstract class IdempotencyStoreContract {
         acquire(s, contextFor(key));
         release(s, key);
 
-        assertThatThrownBy(() -> release(s, key)).isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> release(s, key)).isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test

@@ -15,6 +15,9 @@
  * ownership-fencing column. Externally managed schemas must apply the same column migration
  * before deploying this version.
  *
+ * <p>All expiry and lock decisions use the database server's current timestamp, so application
+ * nodes do not need synchronized clocks for lease correctness.
+ *
  * <p>All lock coordination (blocking, lock stealing) is handled inside the store
  * using database-level constructs. The engine never polls or waits externally.
  */

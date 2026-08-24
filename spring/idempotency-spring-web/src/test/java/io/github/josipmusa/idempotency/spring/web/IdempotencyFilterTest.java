@@ -342,7 +342,8 @@ class IdempotencyFilterTest {
         filter.doFilter(request, response, filterChain);
         assertThat(response.getStatus()).isEqualTo(200);
 
-        // Key is still IN_PROGRESS because complete failed — retry sees lock timeout
+        // The storage outcome is indeterminate. This retry models the backend reporting that the
+        // key is still in flight.
         MockHttpServletResponse response2 = new MockHttpServletResponse();
         doThrow(new IdempotencyLockTimeoutException("test-key", Duration.ofSeconds(10)))
                 .when(engine)
@@ -486,6 +487,37 @@ class IdempotencyFilterTest {
         var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
         verify(store).complete(eq("test-key"), eq(LEASE_ID), captor.capture(), any(Duration.class));
         assertThat(captor.getValue().headers()).doesNotContainKey("X-Secret");
+    }
+
+    @Test
+    void When_SanitizerThrows_Expect_OriginalResponseStillWrittenAndNotStored() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        IdempotencyFilter filterWithFailingSanitizer = new IdempotencyFilter(
+                engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, -1L, ignored -> {
+                    throw new IllegalStateException("sanitizer failed");
+                });
+        doAnswer(invocation -> {
+                    ThrowingRunnable action = invocation.getArgument(1);
+                    action.run();
+                    return ExecutionResult.executed(LEASE_ID);
+                })
+                .when(engine)
+                .execute(any(), any());
+        doAnswer(invocation -> {
+                    HttpServletResponse resp = invocation.getArgument(1);
+                    resp.setStatus(201);
+                    resp.getWriter().write("created");
+                    return null;
+                })
+                .when(filterChain)
+                .doFilter(any(), any());
+
+        filterWithFailingSanitizer.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(201);
+        assertThat(response.getContentAsString()).isEqualTo("created");
+        verify(store, never()).complete(any(), any(), any(), any());
     }
 
     @Test

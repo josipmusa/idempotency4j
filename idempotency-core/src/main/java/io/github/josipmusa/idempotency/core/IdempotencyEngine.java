@@ -97,6 +97,8 @@ public final class IdempotencyEngine {
      *         propagates unchanged, and the key is released for retry
      */
     public ExecutionResult execute(IdempotencyContext context, ThrowingRunnable action) throws Exception {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(action, "action must not be null");
         return switch (store.tryAcquire(context)) {
             case AcquireResult.Acquired acquired -> runWithHeartbeat(context, acquired.leaseId(), action);
             case AcquireResult.Duplicate d -> ExecutionResult.duplicate(d.response());
@@ -117,7 +119,17 @@ public final class IdempotencyEngine {
      */
     private ExecutionResult runWithHeartbeat(IdempotencyContext context, String leaseId, ThrowingRunnable action)
             throws Exception {
-        ScheduledFuture<?> heartbeat = startHeartbeat(context, leaseId);
+        ScheduledFuture<?> heartbeat;
+        try {
+            heartbeat = startHeartbeat(context, leaseId);
+        } catch (RuntimeException schedulingFailure) {
+            try {
+                store.release(context.key(), leaseId);
+            } catch (Exception releaseFailure) {
+                schedulingFailure.addSuppressed(releaseFailure);
+            }
+            throw schedulingFailure;
+        }
         try {
             action.run();
             // Give the adapter a fresh completion window before the scheduled heartbeat is

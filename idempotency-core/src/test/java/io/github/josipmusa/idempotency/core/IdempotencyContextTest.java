@@ -74,4 +74,11 @@ class IdempotencyContextTest {
                 "k".repeat(IdempotencyContext.MAX_KEY_LENGTH), TTL, LOCK_TIMEOUT, VALID_FINGERPRINT);
         assertThat(ctx.key()).hasSize(IdempotencyContext.MAX_KEY_LENGTH);
     }
+
+    @Test
+    void When_PositiveSubMillisecondTtl_Expect_ThrowsIllegalArgumentException() {
+        assertThatThrownBy(() -> new IdempotencyContext("key", Duration.ofNanos(1), LOCK_TIMEOUT, VALID_FINGERPRINT))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ttl must be at least 1ms");
+    }
 }

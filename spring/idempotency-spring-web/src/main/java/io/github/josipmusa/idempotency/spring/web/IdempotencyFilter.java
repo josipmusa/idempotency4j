@@ -24,7 +24,9 @@ import io.github.josipmusa.idempotency.core.IdempotencyEngine;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.ResponseSanitizer;
 import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -173,12 +175,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             return;
         }
 
-        ContentCachingRequestWrapper wrappedRequest = new ContentCachingRequestWrapper(request);
+        int cacheLimit = requestCacheLimit();
+        ContentCachingRequestWrapper wrappedRequest = new ContentCachingRequestWrapper(request, cacheLimit);
         // Read the body into the cache. When a size limit is configured, read only up to
         // limit + 1 bytes so we detect oversized bodies without buffering the full payload.
         if (maxBodyBytes != NO_LIMIT) {
-            long safeLimit = maxBodyBytes >= Integer.MAX_VALUE ? Integer.MAX_VALUE : maxBodyBytes + 1;
-            wrappedRequest.getInputStream().readNBytes((int) safeLimit);
+            wrappedRequest.getInputStream().readNBytes(cacheLimit);
             if (wrappedRequest.getContentAsByteArray().length > maxBodyBytes) {
                 writeJsonError(response, 413, ERROR_BODY_TOO_LARGE);
                 return;
@@ -214,12 +216,29 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                         collectHeaders(wrappedResponse),
                         wrappedResponse.getContentAsByteArray(),
                         Instant.now(clock));
-                StoredResponse sanitized = sanitizer.sanitize(storedResponse);
                 try {
-                    store.complete(context.key(), executed.leaseId(), sanitized, context.ttl());
+                    StoredResponse sanitized = sanitizer.sanitize(storedResponse);
+                    try {
+                        store.complete(context.key(), executed.leaseId(), sanitized, context.ttl());
+                    } catch (IdempotencyDurabilityException e) {
+                        log.error(
+                                "Stored idempotency response for key '{}', but requested durability was not confirmed; storage state is indeterminate",
+                                context.key(),
+                                e);
+                    } catch (IdempotencyLeaseLostException e) {
+                        log.error(
+                                "Could not store idempotency response for key '{}' because this execution no longer owns the lease",
+                                context.key(),
+                                e);
+                    } catch (Exception e) {
+                        log.error(
+                                "Failed while storing idempotency response for key '{}'; storage state is indeterminate",
+                                context.key(),
+                                e);
+                    }
                 } catch (Exception e) {
                     log.error(
-                            "Failed to store idempotency response for key '{}'; key will remain IN_PROGRESS until lock expires",
+                            "Failed to sanitize idempotency response for key '{}'; response was not stored",
                             context.key(),
                             e);
                 } finally {
@@ -280,6 +299,13 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             headers.put("Content-Type", List.of(contentType));
         }
         return headers;
+    }
+
+    private int requestCacheLimit() {
+        if (maxBodyBytes == NO_LIMIT) {
+            return 0;
+        }
+        return maxBodyBytes >= Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.toIntExact(maxBodyBytes + 1);
     }
 
     private static Set<String> nonReplayableHeaders(Map<String, List<String>> headers) {

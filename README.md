@@ -35,6 +35,13 @@ Replace `VERSION` with the latest version shown in the Maven Central badge above
     <artifactId>idempotency-jdbc</artifactId>
     <version>VERSION</version>
 </dependency>
+
+<!-- Or Redis -->
+<dependency>
+    <groupId>io.github.josipmusa</groupId>
+    <artifactId>idempotency-redis</artifactId>
+    <version>VERSION</version>
+</dependency>
 ```
 
 Or use the BOM to align all module versions:
@@ -134,29 +141,84 @@ public IdempotencyStore idempotencyStore(StatefulRedisConnection<String, byte[]>
 }
 ```
 
-Lettuce connections are thread-safe, so one connection serves the whole application — no pool is needed. The caller owns that connection. The extended constructors expose the key prefix (default `idempotency:`), poll interval, retention grace, approximate SCAN page size, `Clock`, optional replica acknowledgements, and the maximum number of SCAN pages processed by one purge call.
+Lettuce connections are thread-safe, so one connection can serve the application. The caller owns
+that connection. Use the immutable configuration object for operational settings. Always choose an
+application-specific prefix, even though the safe default is `idempotency4j:`:
+
+```java
+RedisIdempotencyStoreConfig config = RedisIdempotencyStoreConfig.builder()
+        .keyPrefix("payments:idempotency:")
+        .pollInterval(Duration.ofMillis(50))
+        .retentionGrace(Duration.ofHours(1))
+        .purgeBatchSize(500)
+        .maxPurgePagesPerCall(100)
+        .build();
+
+return new RedisIdempotencyStore(connection, config);
+```
+
+Every record is marked with `owner=idempotency4j` and `formatVersion=1`. The store refuses to
+overwrite a colliding string, an unowned hash, or an unsupported owned record. Purge skips all such
+keys. Lock and expiry decisions use Redis server time, not the application clock.
 
 Records carry their own expiry timestamps, and each write also sets a native Redis TTL that trails logical expiry by the retention grace (default 1h). Expired records are therefore reclaimed even if the purge job is disabled. `purgeExpired()` uses bounded, resumable SCAN pages to remove them promptly; there is no permanent global expiry index.
 
-Use a dedicated key prefix and Redis ACL, TLS for remote connections, persistence appropriate to your recovery objective, and `maxmemory-policy noeviction`. Eviction is a correctness event, not merely a cache miss: losing an IN_PROGRESS or COMPLETE record can allow the operation to execute again. Size Redis for the retained response bodies and use a `ResponseSanitizer` to remove sensitive or unnecessarily large data.
+Use Redis 7 or newer. A dedicated Redis deployment is recommended. An existing cache configured
+with an evicting policy is not suitable, even with a separate database number or prefix, because
+memory limits and eviction policy apply to the Redis instance. Configure persistence appropriate to
+your recovery objective and `maxmemory-policy noeviction`. Eviction is a correctness event, not
+merely a cache miss: losing an IN_PROGRESS or COMPLETE record can allow the operation to execute
+again. Size Redis for retained response bodies and use a `ResponseSanitizer` to remove sensitive or
+unnecessarily large data.
 
-Redis replication is asynchronous. Sentinel provides discovery and failover, but an acknowledged write can still be absent from the promoted replica. The eight-argument constructor can issue `WAIT` after every successful mutation:
+Use TLS for remote connections and an ACL restricted to the configured prefix. The provider needs
+`EVALSHA`, `EVAL`, `SCAN`, and optionally `WAIT`; its scripts use `TYPE`, `TIME`, `HGET`, `HSET`,
+`HDEL`, `DEL`, `PEXPIRE`, and `PTTL`. Validate the exact ACL against your Redis version in staging.
+For example, after replacing the username, password, and prefix:
+
+```text
+ACL SETUSER idempotency4j reset on >PASSWORD ~payments:idempotency:* resetchannels \
+  +evalsha +eval +scan +wait +type +time +hget +hset +hdel +del +pexpire +pttl
+```
+
+Redis replication is asynchronous. Sentinel provides discovery and failover, but an acknowledged
+write can still be absent from the promoted replica. Replica acknowledgement is disabled by
+default. Enable bounded `WAIT` acknowledgement when that tradeoff is appropriate:
 
 ```java
 new RedisIdempotencyStore(
         connection,
-        "payments:idempotency:",
-        50,
-        Duration.ofHours(1),
-        500,
-        Clock.systemUTC(),
-        1,                         // replica acknowledgements required
-        Duration.ofMillis(100));  // maximum WAIT latency
+        RedisIdempotencyStoreConfig.builder()
+                .keyPrefix("payments:idempotency:")
+                .replicaAcknowledgement(
+                        RedisReplicaAcknowledgement.require(1, Duration.ofMillis(100)))
+                .build());
 ```
 
-This reduces, but does not eliminate, failover data loss. It also adds a synchronous round trip to writes and can hold up the shared connection until the timeout when replicas are unavailable, so keep the timeout bounded and load-test the failure path. For Sentinel topology discovery, pass the `StatefulRedisMasterReplicaConnection` returned by Lettuce `MasterReplica.connect(...)` and keep reads on the master.
+This reduces, but does not eliminate, failover data loss. It adds a synchronous round trip and can
+cause head-of-line delay on the shared connection until the timeout when replicas are unavailable,
+so keep the timeout bounded and load-test the failure path. If `WAIT` reports insufficient replicas,
+the primary may already contain the mutation. The library throws `IdempotencyDurabilityException`
+to distinguish that indeterminate outcome from a backend outage. For Sentinel topology discovery,
+pass the `StatefulRedisMasterReplicaConnection` returned by Lettuce
+`MasterReplica.connect(...)` and keep reads on the master.
 
-Upgrading from the initial Redis-provider implementation requires a coordinated stop/start, not a rolling mix of old and new instances: the lease-fencing SPI and record writes changed. Existing COMPLETE records remain replayable, old IN_PROGRESS records become reclaimable after their lock expires, and the obsolete `<prefix>idx` key is removed by the next `purgeExpired()` call.
+There is intentionally no migration support for pre-release Redis record layouts. Foreign or
+unsupported records fail closed rather than being guessed at, rewritten, or deleted.
+
+### Upgrading JDBC from 0.1 to 0.2
+
+Version 0.2 adds lease fencing to the core SPI and JDBC writes. A 0.1 process can still update a row
+owned by a 0.2 lease, so this is a coordinated stop/start upgrade, not a rolling upgrade:
+
+1. Stop every application instance using the idempotency store.
+2. Add the nullable `lease_id VARCHAR(36)` column. Copy the bundled script for your database from
+   `idempotency-migrations/mysql/V0_2__add_lease_id.sql` or
+   `idempotency-migrations/postgresql/V0_2__add_lease_id.sql`. Automatic schema initialization also adds it,
+   but an explicit migration before startup is recommended.
+3. Upgrade the core, provider, Spring adapter, and starter together. Importing `idempotency-bom`
+   prevents mixed module versions.
+4. Start all instances on 0.2.
 
 ## Configuration
 
@@ -194,6 +256,11 @@ The autoconfiguration activates only when a Servlet-based Spring Web application
 **Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
 
 **Infrastructure failures are not an exactly-once guarantee.** Lease fencing prevents an expired owner from overwriting a newer owner's stored result, but it cannot roll back a side effect that happened before a process crash or store failure. Use transactional/outbox patterns or propagate an idempotency/fencing token to downstream systems.
+
+**Completion storage can be indeterminate.** A backend error may happen after the response record
+was accepted, particularly while Redis is waiting for replica acknowledgement. The successful
+business response is still sent. Use the typed store exceptions for logging and alerting; do not
+automatically repeat the business operation based only on a completion-storage error.
 
 **Redis Cluster is not supported.** The provider accepts Lettuce's non-cluster `StatefulRedisConnection`, and its bounded SCAN purge is not node-aware. Standalone and Sentinel master-replica connections are supported.
 

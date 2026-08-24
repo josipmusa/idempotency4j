@@ -30,6 +30,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -291,5 +292,18 @@ class IdempotencyEngineTest {
 
         // Heartbeat should have been called multiple times despite throwing each time
         verify(store, atLeast(2)).extendLock(eq("hb-error-key"), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+    }
+
+    @Test
+    void When_HeartbeatCannotBeScheduled_Expect_LeaseReleasedAndActionNotRun() {
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        scheduler.shutdownNow();
+        AtomicInteger actionCalls = new AtomicInteger();
+
+        assertThatThrownBy(() -> engine.execute(defaultContext("scheduler-rejected"), actionCalls::incrementAndGet))
+                .isInstanceOf(RejectedExecutionException.class);
+
+        assertThat(actionCalls).hasValue(0);
+        verify(store).release("scheduler-rejected", LEASE_ID);
     }
 }

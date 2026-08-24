@@ -17,23 +17,13 @@ package io.github.josipmusa.idempotency.core.exception;
 
 import java.io.Serial;
 
-/**
- * Base class for storage and persisted-state failures.
- *
- * <p>Callers that need to distinguish operational outcomes should catch one of the more specific
- * subclasses, such as {@link IdempotencyLeaseLostException}, {@link
- * IdempotencyDurabilityException}, or {@link IdempotencyStoreUnavailableException}.
- */
-public class IdempotencyStoreException extends IdempotencyException {
+/** Thrown when a configured namespace resolves to data not owned by idempotency4j. */
+public class IdempotencyForeignRecordException extends IdempotencyStoreException {
 
     @Serial
     private static final long serialVersionUID = 1L;
 
-    public IdempotencyStoreException(String message) {
+    public IdempotencyForeignRecordException(String message) {
         super(message);
-    }
-
-    public IdempotencyStoreException(String message, Throwable cause) {
-        super(message, cause);
     }
 }

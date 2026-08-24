@@ -22,7 +22,10 @@ import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreUnavailableException;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,7 +37,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -62,6 +64,7 @@ import javax.sql.DataSource;
 public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static final long DEFAULT_POLL_INTERVAL_MS = 100;
+    private static final String SELECT_CURRENT_TIME = "SELECT CURRENT_TIMESTAMP(3)";
 
     private static final String DELETE_EXPIRED =
             "DELETE FROM idempotency_records WHERE idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
@@ -129,7 +132,6 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private final DataSource dataSource;
     private final long pollIntervalMs;
-    private final Clock clock;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
 
@@ -142,16 +144,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema, long pollIntervalMs) {
-        this(dataSource, initSchema, pollIntervalMs, Clock.systemUTC());
-    }
-
-    public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema, long pollIntervalMs, Clock clock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
         if (pollIntervalMs <= 0) {
             throw new IllegalArgumentException("pollIntervalMs must be positive, got: " + pollIntervalMs);
         }
         this.pollIntervalMs = pollIntervalMs;
-        this.clock = Objects.requireNonNull(clock, "clock must not be null");
         if (initSchema) {
             initSchema();
         }
@@ -169,7 +166,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try (Connection conn = dataSource.getConnection()) {
             dialect = conn.getMetaData().getDatabaseProductName().toLowerCase();
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to detect database dialect", e);
+            throw new IdempotencyStoreUnavailableException("Failed to detect database dialect", e);
         }
 
         String schemaFile;
@@ -203,16 +200,16 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 }
             }
         } catch (IOException | SQLException e) {
-            throw new IdempotencyStoreException("Failed to initialize schema", e);
+            throw new IdempotencyStoreUnavailableException("Failed to initialize schema", e);
         }
 
         if (!dialect.contains("postgresql")) {
             createMysqlIndex();
         }
-        ensureLeaseColumn(dialect);
+        ensureLeaseColumn();
     }
 
-    private void ensureLeaseColumn(String dialect) {
+    private void ensureLeaseColumn() {
         try (Connection conn = dataSource.getConnection()) {
             try (ResultSet columns =
                     conn.getMetaData().getColumns(conn.getCatalog(), null, "idempotency_records", "lease_id")) {
@@ -228,7 +225,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 }
             }
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to add lease fencing column", e);
+            throw new IdempotencyStoreUnavailableException("Failed to add lease fencing column", e);
         }
     }
 
@@ -240,7 +237,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         } catch (SQLException e) {
             // MySQL error 1061 = duplicate key name (index already exists)
             if (e.getErrorCode() != 1061) {
-                throw new IdempotencyStoreException("Failed to create index", e);
+                throw new IdempotencyStoreUnavailableException("Failed to create index", e);
             }
         }
     }
@@ -293,23 +290,25 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
-        Instant now = clock.instant();
+        Objects.requireNonNull(response, "response must not be null");
+        requirePositiveDuration(ttl, "ttl");
         try (Connection conn = dataSource.getConnection()) {
+            Instant now = currentTime(conn);
             try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
                 ps.setInt(1, response.statusCode());
                 ps.setString(2, headersToJson(response.headers()));
                 ps.setBytes(3, response.body());
-                ps.setTimestamp(4, Timestamp.from(now));
-                ps.setTimestamp(5, Timestamp.from(now.plus(ttl)));
+                setTimestamp(ps, 4, response.completedAt());
+                setTimestamp(ps, 5, now.plus(ttl));
                 ps.setString(6, key);
                 ps.setString(7, leaseId);
                 int updated = ps.executeUpdate();
                 if (updated == 0) {
-                    throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, leaseId, "complete"));
+                    throw diagnoseMissingInProgress(conn, key, leaseId, "complete");
                 }
             }
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to complete key '" + key + "'", e);
+            throw unavailable("complete key '" + key + "'", e);
         }
     }
 
@@ -324,19 +323,18 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     sel.setString(2, leaseId);
                     try (ResultSet rs = sel.executeQuery()) {
                         if (!rs.next()) {
-                            throw new IdempotencyStoreException(
-                                    diagnoseMissingInProgress(conn, key, leaseId, "release"));
+                            throw diagnoseMissingInProgress(conn, key, leaseId, "release");
                         }
                         lockTimeoutMs = rs.getLong("lock_timeout_ms");
                     }
                 }
-                Instant failedExpiry = clock.instant().plus(Duration.ofMillis(lockTimeoutMs));
+                Instant failedExpiry = currentTime(conn).plusMillis(lockTimeoutMs);
                 try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
-                    ps.setTimestamp(1, Timestamp.from(failedExpiry));
+                    setTimestamp(ps, 1, failedExpiry);
                     ps.setString(2, key);
                     ps.setString(3, leaseId);
                     if (ps.executeUpdate() == 0) {
-                        throw new IdempotencyStoreException(diagnoseMissingInProgress(conn, key, leaseId, "release"));
+                        throw diagnoseMissingInProgress(conn, key, leaseId, "release");
                     }
                 }
                 conn.commit();
@@ -345,27 +343,29 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 throw e;
             } catch (SQLException e) {
                 rollbackQuietly(conn);
-                throw new IdempotencyStoreException("Failed to release key '" + key + "'", e);
+                throw unavailable("release key '" + key + "'", e);
             } finally {
                 resetAutoCommit(conn);
             }
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to release key '" + key + "'", e);
+            throw unavailable("release key '" + key + "'", e);
         }
     }
 
     @Override
     public void extendLock(String key, String leaseId, Duration extension) {
-        Instant newExpiry = clock.instant().plus(extension);
-        try (Connection conn = dataSource.getConnection();
-                PreparedStatement ps = conn.prepareStatement(EXTEND_LOCK)) {
-            ps.setTimestamp(1, Timestamp.from(newExpiry));
-            ps.setString(2, key);
-            ps.setString(3, leaseId);
-            ps.executeUpdate();
-            // Silently ignore if no rows updated — heartbeat may fire after completion
+        requirePositiveDuration(extension, "extension");
+        try (Connection conn = dataSource.getConnection()) {
+            Instant newExpiry = currentTime(conn).plus(extension);
+            try (PreparedStatement ps = conn.prepareStatement(EXTEND_LOCK)) {
+                setTimestamp(ps, 1, newExpiry);
+                ps.setString(2, key);
+                ps.setString(3, leaseId);
+                ps.executeUpdate();
+                // Silently ignore if no rows updated - heartbeat may fire after completion.
+            }
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to extend lock for key '" + key + "'", e);
+            throw unavailable("extend lock for key '" + key + "'", e);
         }
     }
 
@@ -380,17 +380,17 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      */
     @Override
     public int purgeExpired() {
-        Instant now = clock.instant();
-        Timestamp ts = Timestamp.from(now);
-        try (Connection conn = dataSource.getConnection();
-                PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
-            ps.setTimestamp(1, ts);
-            ps.setTimestamp(2, ts);
-            ps.setTimestamp(3, ts);
-            ps.setTimestamp(4, ts);
-            return ps.executeUpdate();
+        try (Connection conn = dataSource.getConnection()) {
+            Instant now = currentTime(conn);
+            try (PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
+                setTimestamp(ps, 1, now);
+                setTimestamp(ps, 2, now);
+                setTimestamp(ps, 3, now);
+                setTimestamp(ps, 4, now);
+                return ps.executeUpdate();
+            }
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to purge expired records", e);
+            throw unavailable("purge expired records", e);
         }
     }
 
@@ -403,17 +403,17 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      */
     private boolean tryInsert(IdempotencyContext context, String leaseId) {
         try (Connection conn = dataSource.getConnection()) {
+            Instant now = currentTime(conn);
             try (PreparedStatement del = conn.prepareStatement(DELETE_EXPIRED)) {
                 del.setString(1, context.key());
-                del.setTimestamp(2, Timestamp.from(clock.instant()));
+                setTimestamp(del, 2, now);
                 del.executeUpdate();
             }
             try (PreparedStatement ins = conn.prepareStatement(INSERT)) {
-                Instant now = clock.instant();
                 ins.setString(1, context.key());
-                ins.setTimestamp(2, Timestamp.from(now));
-                ins.setTimestamp(3, Timestamp.from(now.plus(context.lockTimeout())));
-                ins.setTimestamp(4, Timestamp.from(now.plus(context.ttl())));
+                setTimestamp(ins, 2, now);
+                setTimestamp(ins, 3, now.plus(context.lockTimeout()));
+                setTimestamp(ins, 4, now.plus(context.ttl()));
                 ins.setString(5, context.requestFingerprint());
                 ins.setString(6, leaseId);
                 ins.setLong(7, context.lockTimeout().toMillis());
@@ -421,12 +421,12 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 return true;
             } catch (SQLException e) {
                 if (!isDuplicateKeyViolation(e)) {
-                    throw new IdempotencyStoreException("Failed to insert record for key '" + context.key() + "'", e);
+                    throw unavailable("insert record for key '" + context.key() + "'", e);
                 }
                 return false; // duplicate key — row already exists
             }
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed during initial acquire for key '" + context.key() + "'", e);
+            throw unavailable("perform initial acquire for key '" + context.key() + "'", e);
         }
     }
 
@@ -441,14 +441,17 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 RowInspection inspection = doInspectRow(conn, context, leaseId);
                 conn.commit();
                 return inspection;
+            } catch (IdempotencyStoreException e) {
+                rollbackQuietly(conn);
+                throw e;
             } catch (SQLException e) {
                 rollbackQuietly(conn);
-                throw new IdempotencyStoreException("Failed during poll for key '" + context.key() + "'", e);
+                throw unavailable("poll key '" + context.key() + "'", e);
             } finally {
                 resetAutoCommit(conn);
             }
         } catch (SQLException e) {
-            throw new IdempotencyStoreException("Failed to get connection for key '" + context.key() + "'", e);
+            throw unavailable("get connection for key '" + context.key() + "'", e);
         }
     }
 
@@ -466,41 +469,50 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
                 if ("COMPLETE".equals(status)) {
                     String storedFingerprint = rs.getString("request_fingerprint");
-                    if (storedFingerprint != null && !storedFingerprint.equals(context.requestFingerprint())) {
+                    if (storedFingerprint == null) {
+                        throw new IdempotencyCorruptRecordException(
+                                "Completed JDBC record for key '" + context.key() + "' has no request fingerprint");
+                    }
+                    if (!storedFingerprint.equals(context.requestFingerprint())) {
                         return RowInspection.resolved(
                                 AcquireResult.fingerprintMismatch(storedFingerprint, context.requestFingerprint()));
                     }
                     return RowInspection.resolved(AcquireResult.duplicate(readResponse(rs)));
                 }
 
-                if ("FAILED".equals(status) || isStale(lockExpiresTs)) {
-                    boolean stolen = tryStealLock(conn, context, leaseId);
+                Instant now = currentTime(conn);
+                if ("FAILED".equals(status) || isStale(lockExpiresTs, now)) {
+                    boolean stolen = tryStealLock(conn, context, leaseId, now);
                     return stolen
                             ? RowInspection.resolved(AcquireResult.acquired(leaseId))
                             : RowInspection.keepPolling();
                 }
 
-                return RowInspection.keepPolling(); // active IN_PROGRESS
+                if ("IN_PROGRESS".equals(status)) {
+                    return RowInspection.keepPolling();
+                }
+                throw new IdempotencyCorruptRecordException(
+                        "JDBC record for key '" + context.key() + "' has unknown status '" + status + "'");
             }
         }
     }
 
-    private boolean tryStealLock(Connection conn, IdempotencyContext context, String leaseId) throws SQLException {
-        Instant now = clock.instant();
+    private boolean tryStealLock(Connection conn, IdempotencyContext context, String leaseId, Instant now)
+            throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(STEAL_LOCK)) {
-            ps.setTimestamp(1, Timestamp.from(now));
-            ps.setTimestamp(2, Timestamp.from(now.plus(context.lockTimeout())));
+            setTimestamp(ps, 1, now);
+            setTimestamp(ps, 2, now.plus(context.lockTimeout()));
             ps.setString(3, context.requestFingerprint());
             ps.setString(4, leaseId);
             ps.setLong(5, context.lockTimeout().toMillis());
             ps.setString(6, context.key());
-            ps.setTimestamp(7, Timestamp.from(now));
+            setTimestamp(ps, 7, now);
             return ps.executeUpdate() > 0;
         }
     }
 
-    private boolean isStale(Timestamp lockExpiresTs) {
-        return lockExpiresTs != null && lockExpiresTs.toInstant().isBefore(clock.instant());
+    private static boolean isStale(Timestamp lockExpiresTs, Instant now) {
+        return lockExpiresTs != null && lockExpiresTs.toInstant().isBefore(now);
     }
 
     /**
@@ -512,31 +524,37 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * this diagnostic SELECT. Another thread may change the key's state in between, so the
      * message is best-effort and should only be used for logging or debugging, not control flow.
      */
-    private String diagnoseMissingInProgress(Connection conn, String key, String leaseId, String operation)
-            throws SQLException {
+    private IdempotencyLeaseLostException diagnoseMissingInProgress(
+            Connection conn, String key, String leaseId, String operation) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(SELECT_STATUS_AND_LEASE)) {
             ps.setString(1, key);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
-                    return "Cannot " + operation + " key '" + key + "': no entry exists. Was tryAcquire called?";
+                    return new IdempotencyLeaseLostException(
+                            "Cannot " + operation + " key '" + key + "': no entry exists or it expired");
                 }
                 String status = rs.getString("status");
                 String currentLeaseId = rs.getString("lease_id");
                 if ("IN_PROGRESS".equals(status) && !Objects.equals(currentLeaseId, leaseId)) {
-                    return "Cannot " + operation + " key '" + key + "': lease is stale or no longer owns the key";
+                    return new IdempotencyLeaseLostException(
+                            "Cannot " + operation + " key '" + key + "': lease no longer owns the key");
                 }
-                return "Cannot " + operation + " key '" + key + "': entry is " + status + ", expected IN_PROGRESS";
+                return new IdempotencyLeaseLostException(
+                        "Cannot " + operation + " key '" + key + "': entry is " + status + ", expected IN_PROGRESS");
             }
         }
     }
 
     private StoredResponse readResponse(ResultSet rs) throws SQLException {
         int statusCode = rs.getInt("response_code");
+        if (rs.wasNull()) {
+            throw new IdempotencyCorruptRecordException("Completed JDBC record has no response_code value");
+        }
         String headersJson = rs.getString("response_headers");
         byte[] body = rs.getBytes("response_body");
         Timestamp completedAtTs = rs.getTimestamp("completed_at");
         if (completedAtTs == null) {
-            throw new IdempotencyStoreException("Completed request doesn't have completed_at value");
+            throw new IdempotencyCorruptRecordException("Completed JDBC record has no completed_at value");
         }
 
         Map<String, List<String>> headers = headersJson != null ? jsonToHeaders(headersJson) : Map.of();
@@ -549,6 +567,35 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private boolean isDuplicateKeyViolation(SQLException e) {
         String sqlState = e.getSQLState();
         return "23000".equals(sqlState) || "23505".equals(sqlState);
+    }
+
+    private static Instant currentTime(Connection conn) throws SQLException {
+        try (Statement statement = conn.createStatement();
+                ResultSet result = statement.executeQuery(SELECT_CURRENT_TIME)) {
+            if (!result.next()) {
+                throw new SQLException("Database did not return CURRENT_TIMESTAMP");
+            }
+            Timestamp timestamp = result.getTimestamp(1);
+            if (timestamp == null) {
+                throw new SQLException("Database returned null CURRENT_TIMESTAMP");
+            }
+            return timestamp.toInstant();
+        }
+    }
+
+    private static void setTimestamp(PreparedStatement statement, int index, Instant value) throws SQLException {
+        statement.setTimestamp(index, Timestamp.from(value));
+    }
+
+    private static void requirePositiveDuration(Duration value, String name) {
+        Objects.requireNonNull(value, name + " must not be null");
+        if (value.toMillis() < 1) {
+            throw new IllegalArgumentException(name + " must be at least 1ms, got: " + value);
+        }
+    }
+
+    private static IdempotencyStoreUnavailableException unavailable(String operation, SQLException cause) {
+        return new IdempotencyStoreUnavailableException("Failed to " + operation, cause);
     }
 
     private static void rollbackQuietly(Connection conn) {
@@ -582,7 +629,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try {
             return OBJECT_MAPPER.readValue(json, HEADERS_TYPE);
         } catch (JsonProcessingException e) {
-            throw new IdempotencyStoreException("Failed to deserialize response headers from JSON", e);
+            throw new IdempotencyCorruptRecordException("Failed to deserialize response headers from JSON", e);
         }
     }
 }

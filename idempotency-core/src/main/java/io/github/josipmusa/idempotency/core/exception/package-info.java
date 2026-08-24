@@ -8,12 +8,22 @@
  * <ul>
  *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyException} — base class
  *       for all idempotency-related exceptions.</li>
- *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException} — wraps
- *       storage-level failures (database unreachable, serialization errors).</li>
- *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException} —
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException} - base
+ *       class for storage-level failures.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException} - a
+ *       mutation no longer owns the record lease.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException} - a
+ *       mutation was accepted but its requested durability could not be confirmed.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyStoreUnavailableException}
+ *       - the backend is unavailable.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException} -
+ *       stored idempotency data is malformed or uses an unsupported format.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyForeignRecordException} -
+ *       a configured namespace contains data owned by another application.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException} -
  *       thrown when a caller's {@code lockTimeout} expires while waiting for an
  *       in-flight request to complete.</li>
- *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException} —
+ *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException} -
  *       thrown when the same idempotency key is reused with a different request body;
  *       the adapter maps this to HTTP 422.</li>
  * </ul>

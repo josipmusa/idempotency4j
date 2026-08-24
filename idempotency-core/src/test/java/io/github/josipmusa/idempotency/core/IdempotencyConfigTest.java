@@ -54,7 +54,7 @@ class IdempotencyConfigTest {
         assertThatThrownBy(() ->
                         IdempotencyConfig.builder().defaultTtl(Duration.ZERO).build())
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("defaultTtl must be positive");
+                .hasMessageContaining("defaultTtl must be at least 1ms");
     }
 
     @Test
@@ -63,7 +63,16 @@ class IdempotencyConfigTest {
                         .defaultTtl(Duration.ofSeconds(-1))
                         .build())
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("defaultTtl must be positive");
+                .hasMessageContaining("defaultTtl must be at least 1ms");
+    }
+
+    @Test
+    void When_PositiveSubMillisecondTtl_Expect_ThrowsIllegalArgumentException() {
+        assertThatThrownBy(() -> IdempotencyConfig.builder()
+                        .defaultTtl(Duration.ofNanos(1))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("defaultTtl must be at least 1ms");
     }
 
     @Test

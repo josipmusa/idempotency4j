@@ -76,8 +76,10 @@ public interface IdempotencyStore {
      *
      * @param context contains the key, TTL, and lockTimeout for this request
      * @return the acquisition outcome — never null
-     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreUnavailableException
      *         if the underlying storage is unreachable
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException
+     *         if an existing owned record cannot be interpreted safely
      */
     AcquireResult tryAcquire(IdempotencyContext context);
 
@@ -93,9 +95,10 @@ public interface IdempotencyStore {
      * @param leaseId  the lease returned by that successful {@code tryAcquire}
      * @param response the HTTP response to store for duplicate replay
      * @param ttl      how long to keep the completed entry before expiry
-     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
-     *         if the key does not exist, is not IN_PROGRESS, or is owned by a
-     *         different lease
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException
+     *         if the key does not exist, is not IN_PROGRESS, or is owned by a different lease
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException
+     *         if the mutation was accepted but requested durability could not be confirmed
      */
     void complete(String key, String leaseId, StoredResponse response, Duration ttl);
 
@@ -107,9 +110,8 @@ public interface IdempotencyStore {
      *
      * @param key     the idempotency key to release
      * @param leaseId the lease returned by the successful {@code tryAcquire}
-     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException
-     *         if the key does not exist, is not IN_PROGRESS, or is owned by a
-     *         different lease
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException
+     *         if the key does not exist, is not IN_PROGRESS, or is owned by a different lease
      */
     void release(String key, String leaseId);
 

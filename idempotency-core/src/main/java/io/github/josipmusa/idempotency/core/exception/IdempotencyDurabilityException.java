@@ -18,22 +18,21 @@ package io.github.josipmusa.idempotency.core.exception;
 import java.io.Serial;
 
 /**
- * Base class for storage and persisted-state failures.
+ * Thrown when a store accepted a mutation but could not confirm the requested durability level.
  *
- * <p>Callers that need to distinguish operational outcomes should catch one of the more specific
- * subclasses, such as {@link IdempotencyLeaseLostException}, {@link
- * IdempotencyDurabilityException}, or {@link IdempotencyStoreUnavailableException}.
+ * <p>The mutation may already be visible. Callers must not blindly retry a business operation in
+ * response to this exception.
  */
-public class IdempotencyStoreException extends IdempotencyException {
+public class IdempotencyDurabilityException extends IdempotencyStoreException {
 
     @Serial
     private static final long serialVersionUID = 1L;
 
-    public IdempotencyStoreException(String message) {
+    public IdempotencyDurabilityException(String message) {
         super(message);
     }
 
-    public IdempotencyStoreException(String message, Throwable cause) {
+    public IdempotencyDurabilityException(String message, Throwable cause) {
         super(message, cause);
     }
 }

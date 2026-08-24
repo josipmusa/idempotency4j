@@ -12,14 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded resumable SCAN-based purging, and a native Redis TTL as the memory-reclamation
   backstop. Supports standalone and Sentinel topologies, plus optional Redis `WAIT`
   acknowledgements to reduce failover data-loss risk.
+- Typed store failures distinguish lost leases, unavailable backends, malformed or foreign data,
+  and mutations whose requested durability could not be confirmed.
+- Bundled MySQL and PostgreSQL migration scripts for externally managed 0.1 schemas.
 
 ### Changed
 - Acquisition now returns an ownership lease. Completion, release, and heartbeat operations
   require that lease, fencing a stale worker after its lock has been stolen. JDBC schemas are
   migrated automatically with a nullable `lease_id` column.
 - Redis polling uses a monotonic timeout with jittered exponential backoff, and purge work is
-  bounded per invocation. The previous global sorted-set expiry index is no longer used and is
-  removed lazily by `purgeExpired()`.
+  bounded per invocation. Records include explicit owner and format markers, and namespace
+  collisions fail closed without modifying foreign data.
+- Redis and JDBC use backend server time for lock and expiry decisions.
+- The JDBC constructor accepting an application `Clock` was removed because database time is now
+  authoritative.
+- Redis configuration now uses `RedisIdempotencyStoreConfig`; the default prefix is
+  `idempotency4j:`. Positive sub-millisecond timeouts are rejected instead of being rounded to a
+  Redis `WAIT` timeout of zero.
+- A heartbeat scheduling failure releases the newly acquired lease before propagating.
+
+### Upgrade notes
+
+- JDBC 0.1 to 0.2 requires a coordinated stop/start. Do not run old workers alongside lease-fenced
+  workers. Apply the `lease_id` migration first and upgrade all modules together through the BOM.
+- Redis has no migration path because it is new in this release. Development-snapshot records with
+  another format are preserved and rejected.
 
 ### Security
 - Documented Redis ACL, TLS, persistence, response-retention, and mandatory `noeviction`
