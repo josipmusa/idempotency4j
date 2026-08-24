@@ -206,27 +206,6 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         if (!dialect.contains("postgresql")) {
             createMysqlIndex();
         }
-        ensureLeaseColumn();
-    }
-
-    private void ensureLeaseColumn() {
-        try (Connection conn = dataSource.getConnection()) {
-            try (ResultSet columns =
-                    conn.getMetaData().getColumns(conn.getCatalog(), null, "idempotency_records", "lease_id")) {
-                if (columns.next()) {
-                    return;
-                }
-            }
-            try (Statement stmt = conn.createStatement()) {
-                stmt.execute("ALTER TABLE idempotency_records ADD COLUMN lease_id VARCHAR(36) NULL");
-            } catch (SQLException e) {
-                if (e.getErrorCode() != 1060 && !"42701".equals(e.getSQLState())) {
-                    throw e;
-                }
-            }
-        } catch (SQLException e) {
-            throw new IdempotencyStoreUnavailableException("Failed to add lease fencing column", e);
-        }
     }
 
     private void createMysqlIndex() {

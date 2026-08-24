@@ -206,20 +206,6 @@ pass the `StatefulRedisMasterReplicaConnection` returned by Lettuce
 There is intentionally no migration support for pre-release Redis record layouts. Foreign or
 unsupported records fail closed rather than being guessed at, rewritten, or deleted.
 
-### Upgrading JDBC from 0.1 to 0.2
-
-Version 0.2 adds lease fencing to the core SPI and JDBC writes. A 0.1 process can still update a row
-owned by a 0.2 lease, so this is a coordinated stop/start upgrade, not a rolling upgrade:
-
-1. Stop every application instance using the idempotency store.
-2. Add the nullable `lease_id VARCHAR(36)` column. Copy the bundled script for your database from
-   `idempotency-migrations/mysql/V0_2__add_lease_id.sql` or
-   `idempotency-migrations/postgresql/V0_2__add_lease_id.sql`. Automatic schema initialization also adds it,
-   but an explicit migration before startup is recommended.
-3. Upgrade the core, provider, Spring adapter, and starter together. Importing `idempotency-bom`
-   prevents mixed module versions.
-4. Start all instances on 0.2.
-
 ## Configuration
 
 All properties are prefixed with `idempotency`:

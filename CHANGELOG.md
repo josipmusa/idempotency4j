@@ -14,12 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledgements to reduce failover data-loss risk.
 - Typed store failures distinguish lost leases, unavailable backends, malformed or foreign data,
   and mutations whose requested durability could not be confirmed.
-- Bundled MySQL and PostgreSQL migration scripts for externally managed 0.1 schemas.
 
 ### Changed
 - Acquisition now returns an ownership lease. Completion, release, and heartbeat operations
-  require that lease, fencing a stale worker after its lock has been stolen. JDBC schemas are
-  migrated automatically with a nullable `lease_id` column.
+  require that lease, fencing a stale worker after its lock has been stolen. Fresh JDBC schemas
+  include the nullable `lease_id` ownership column.
 - Redis polling uses a monotonic timeout with jittered exponential backoff, and purge work is
   bounded per invocation. Records include explicit owner and format markers, and namespace
   collisions fail closed without modifying foreign data.
@@ -33,8 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- JDBC 0.1 to 0.2 requires a coordinated stop/start. Do not run old workers alongside lease-fenced
-  workers. Apply the `lease_id` migration first and upgrade all modules together through the BOM.
 - Redis has no migration path because it is new in this release. Development-snapshot records with
   another format are preserved and rejected.
 
