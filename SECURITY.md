@@ -19,6 +19,14 @@ You will receive a response within 7 days. If you do not hear back, follow up on
 
 The store persists full HTTP response bodies. To strip or redact sensitive fields before they are written to the store, register a `ResponseSanitizer` bean. The Spring Boot starter picks it up automatically and calls it on every response before storage. See the README for an example.
 
+For Redis deployments, use Redis 7 or newer, TLS for remote connections, and an ACL restricted to
+the configured key prefix and documented command set. Prefer a dedicated Redis deployment, not an
+existing evicting cache. Configure `maxmemory-policy noeviction`: eviction of a live idempotency
+record can permit the protected action to execute again. Enable persistence appropriate to the
+required recovery objective and remember that Sentinel failover uses asynchronous replication;
+Redis `WAIT` can reduce but cannot eliminate acknowledged-write loss. Each record has an ownership
+and format marker, and the provider preserves foreign data when namespaces collide.
+
 ## Scope
 
 This library persists full HTTP response bodies, which may include sensitive data depending on which endpoints are annotated with `@Idempotent`. Key areas to consider when assessing impact:

@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit;
  *   <li><strong>Engine</strong> — calls {@code tryAcquire}, runs the action with
  *       a heartbeat, calls {@code release} on failure. Does NOT call {@code complete}.</li>
  *   <li><strong>Adapter</strong> — builds the context, calls {@code engine.execute()},
- *       captures the HTTP response, calls {@code store.complete()}.</li>
+ *       captures the HTTP response, calls {@code store.complete()} with the lease.</li>
  *   <li><strong>Store</strong> — handles persistence, blocking, and lock-stealing.</li>
  * </ul>
  *
@@ -79,14 +79,13 @@ public final class IdempotencyEngine {
      * (adapter) is responsible for:
      * <ol>
      *   <li>Capturing the HTTP response produced by the action</li>
-     *   <li>Calling {@link IdempotencyStore#complete} with that response</li>
+     *   <li>Calling {@link IdempotencyStore#complete} with the returned lease and that response</li>
      * </ol>
      * If {@code complete} throws after a successful execution, the response has
-     * already been produced and should still be sent to the client. The key
-     * remains IN_PROGRESS until the lock expires. Any retry from the same client
-     * before expiry will receive {@link IdempotencyLockTimeoutException} (503),
-     * consistent with the concurrent-request behavior. Once the lock expires, the
-     * next caller steals it and re-executes the action.
+     * already been produced and should still be sent to the client. The store's state
+     * may be indeterminate: a failure can happen before a mutation or, for example,
+     * while waiting for a Redis replica after the primary accepted it. Callers must not
+     * treat idempotency storage as a transaction around the business side effect.
      *
      * @param context fully resolved idempotency context (key, ttl, lockTimeout)
      * @param action  the business logic to execute — only runs for new keys
@@ -98,8 +97,10 @@ public final class IdempotencyEngine {
      *         propagates unchanged, and the key is released for retry
      */
     public ExecutionResult execute(IdempotencyContext context, ThrowingRunnable action) throws Exception {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(action, "action must not be null");
         return switch (store.tryAcquire(context)) {
-            case AcquireResult.Acquired ignored -> runWithHeartbeat(context, action);
+            case AcquireResult.Acquired acquired -> runWithHeartbeat(context, acquired.leaseId(), action);
             case AcquireResult.Duplicate d -> ExecutionResult.duplicate(d.response());
             case AcquireResult.LockTimeout ignored -> throw new IdempotencyLockTimeoutException(
                     context.key(), context.lockTimeout());
@@ -116,14 +117,32 @@ public final class IdempotencyEngine {
      * the application stops (e.g., via a Spring {@code @PreDestroy} method or a
      * {@link java.io.Closeable} wrapper).
      */
-    private ExecutionResult runWithHeartbeat(IdempotencyContext context, ThrowingRunnable action) throws Exception {
-        ScheduledFuture<?> heartbeat = startHeartbeat(context);
+    private ExecutionResult runWithHeartbeat(IdempotencyContext context, String leaseId, ThrowingRunnable action)
+            throws Exception {
+        ScheduledFuture<?> heartbeat;
+        try {
+            heartbeat = startHeartbeat(context, leaseId);
+        } catch (RuntimeException schedulingFailure) {
+            try {
+                store.release(context.key(), leaseId);
+            } catch (Exception releaseFailure) {
+                schedulingFailure.addSuppressed(releaseFailure);
+            }
+            throw schedulingFailure;
+        }
         try {
             action.run();
-            return ExecutionResult.executed();
+            // Give the adapter a fresh completion window before the scheduled heartbeat is
+            // cancelled. Lease fencing still protects against a genuinely stolen lock.
+            try {
+                store.extendLock(context.key(), leaseId, context.lockTimeout());
+            } catch (Exception ignored) {
+                // Completion may still succeed; preserve the successful action result.
+            }
+            return ExecutionResult.executed(leaseId);
         } catch (Exception e) {
             try {
-                store.release(context.key());
+                store.release(context.key(), leaseId);
             } catch (Exception releaseEx) {
                 e.addSuppressed(releaseEx);
             }
@@ -133,12 +152,12 @@ public final class IdempotencyEngine {
         }
     }
 
-    private ScheduledFuture<?> startHeartbeat(IdempotencyContext context) {
+    private ScheduledFuture<?> startHeartbeat(IdempotencyContext context, String leaseId) {
         long intervalMs = context.lockTimeout().dividedBy(2).toMillis();
         return scheduler.scheduleAtFixedRate(
                 () -> {
                     try {
-                        store.extendLock(context.key(), context.lockTimeout());
+                        store.extendLock(context.key(), leaseId, context.lockTimeout());
                     } catch (Exception e) {
                         // heartbeat failure is non-fatal - lock will eventually
                         // expire naturally and be stolen by a waiting request

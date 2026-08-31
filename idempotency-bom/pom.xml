@@ -37,6 +37,11 @@
             </dependency>
             <dependency>
                 <groupId>io.github.josipmusa</groupId>
+                <artifactId>idempotency-redis</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.josipmusa</groupId>
                 <artifactId>idempotency-test</artifactId>
                 <version>${project.version}</version>
             </dependency>

@@ -5,11 +5,12 @@
 
 A Java idempotency library with pluggable storage backends and Spring Web / Spring Boot support.
 
-Send the same request twice — get the same response, side effects run exactly once.
+Send the same request twice and, while its idempotency record is retained, completed requests replay
+the stored response instead of running the handler again.
 
 ## When to use this
 
-Your API needs idempotency if clients can retry on network failure (payment processing, order creation, resource provisioning) and a duplicated request would cause a real problem — money charged twice, two orders shipped, two VMs started.
+Your API needs idempotency if clients can retry on network failure (payment processing, order creation, resource provisioning) and a duplicated request would cause a real problem: money charged twice, two orders shipped, or two VMs started.
 
 ## Quick start
 
@@ -28,6 +29,13 @@ Replace `VERSION` with the latest version shown in the Maven Central badge above
 <dependency>
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency-jdbc</artifactId>
+    <version>VERSION</version>
+</dependency>
+
+<!-- Or Redis -->
+<dependency>
+    <groupId>io.github.josipmusa</groupId>
+    <artifactId>idempotency-redis</artifactId>
     <version>VERSION</version>
 </dependency>
 ```
@@ -54,8 +62,8 @@ Annotate the endpoints that need idempotency:
 @PostMapping("/payments")
 @Idempotent
 public ResponseEntity<Payment> createPayment(@RequestBody PaymentRequest request) {
-    // Runs exactly once per unique Idempotency-Key value.
-    // Subsequent identical requests get the stored response replayed.
+    // Subsequent identical requests normally get the stored response replayed.
+    // The payment provider should also receive its own idempotency key.
     return ResponseEntity.ok(paymentService.charge(request));
 }
 ```
@@ -89,14 +97,72 @@ If that key has been seen before with the same request body, the stored response
 | Yes                | Full idempotency enforcement |
 | No                 | Request passes through unmodified, no idempotency enforced |
 
-Use `required = false` on endpoints where idempotency is optional — clients that care send a key, clients that do not are not rejected.
+Use `required = false` on endpoints where idempotency is optional. Clients that care send a key;
+clients that do not are not rejected.
 
 ## Storage backends
 
 | Module | Use when |
 |--------|----------|
 | `idempotency-jdbc` | You have a relational database. Supports MySQL and PostgreSQL. Schema is initialized automatically. |
+| `idempotency-redis` | You have Redis. Standalone and Sentinel topologies; Redis Cluster is not supported. |
 | `idempotency-inmemory` | Single-instance deployments, local development, and tests. Not suitable for horizontally-scaled environments. |
+
+The Spring Boot starter wires the engine and HTTP filter around the `IdempotencyStore` bean you
+provide.
+
+### JDBC
+
+Provide a `DataSource` and construct the JDBC store. By default, the store creates and manages its
+schema:
+
+```java
+@Bean
+public IdempotencyStore idempotencyStore(DataSource dataSource) {
+    return new JdbcIdempotencyStore(dataSource);
+}
+```
+
+To manage the schema with Flyway, Liquibase, or another tool, initialize it from the bundled MySQL
+or PostgreSQL schema and disable automatic initialization:
+
+```java
+@Bean
+public IdempotencyStore idempotencyStore(DataSource dataSource) {
+    return new JdbcIdempotencyStore(dataSource, false);
+}
+```
+
+### Redis
+
+The Redis store uses [Lettuce](https://lettuce.io/). Open its connection with
+`RedisIdempotencyStore.CODEC` so response bodies remain binary-safe. The application owns the
+client and connection, which is why the beans declare their shutdown methods:
+
+```java
+@Bean(destroyMethod = "shutdown")
+public RedisClient redisClient() {
+    return RedisClient.create("redis://localhost:6379");
+}
+
+@Bean(destroyMethod = "close")
+public StatefulRedisConnection<String, byte[]> idempotencyRedisConnection(RedisClient client) {
+    return client.connect(RedisIdempotencyStore.CODEC);
+}
+
+@Bean
+public IdempotencyStore idempotencyStore(StatefulRedisConnection<String, byte[]> connection) {
+    RedisIdempotencyStoreConfig config = RedisIdempotencyStoreConfig.builder()
+            .keyPrefix("payments:idempotency:")
+            .build();
+
+    return new RedisIdempotencyStore(connection, config);
+}
+```
+
+Use Redis 7 or newer. Choose an application-specific key prefix and configure Redis persistence
+with `maxmemory-policy noeviction`. One thread-safe connection can serve the store. Standalone and
+Sentinel deployments are supported; Redis Cluster is not.
 
 ## Configuration
 
@@ -125,7 +191,7 @@ idempotency4j currently supports **Spring MVC (Servlet-based)** applications onl
 | Spring MVC (Servlet) | Supported |
 | Spring WebFlux (Reactive) | Not supported |
 
-The autoconfiguration activates only when a Servlet-based Spring Web application is detected (`@ConditionalOnWebApplication(type = SERVLET)`). In a WebFlux application it does nothing — no error is raised, the filter simply does not register.
+The autoconfiguration activates only when a Servlet-based Spring Web application is detected (`@ConditionalOnWebApplication(type = SERVLET)`). In a WebFlux application it does nothing: no error is raised, and the filter does not register.
 
 ## Known limitations
 
@@ -133,14 +199,23 @@ The autoconfiguration activates only when a Servlet-based Spring Web application
 
 **Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
 
+**Arbitrary downstream effects are not an exactly-once guarantee.** Lease fencing protects the
+idempotency record, but it cannot roll back an external side effect completed before a process
+failure. Use a shared transaction, a transactional outbox, or a downstream idempotency key when
+that guarantee is required.
+
+**Redis Cluster is not supported.** The provider accepts Lettuce's non-cluster `StatefulRedisConnection`, and its bounded SCAN purge is not node-aware. Standalone and Sentinel master-replica connections are supported.
+
 ## Security considerations
 
 The store persists full HTTP response bodies. Depending on your endpoints this may include PII, tokens, or financial data.
 
 - Enable encryption at rest on the backing database.
+- Use TLS and authentication/ACLs for Redis; restrict the ACL to the configured key prefix.
+- Configure Redis with `maxmemory-policy noeviction` and monitor memory headroom.
 - Use short TTL values to limit data retention.
 - Configure `idempotency.purge.cron` to remove expired records promptly.
-- Audit which endpoints are annotated `@Idempotent` and what their responses contain.
+- Audit which endpoints are annotated `@Idempotent`, what their responses contain, and their maximum response size.
 
 To strip or redact sensitive fields before storage, register a `ResponseSanitizer` bean. The default implementation is a no-op pass-through:
 

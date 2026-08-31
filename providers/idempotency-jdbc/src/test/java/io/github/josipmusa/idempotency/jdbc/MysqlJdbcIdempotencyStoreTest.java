@@ -15,7 +15,6 @@
  */
 package io.github.josipmusa.idempotency.jdbc;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -24,15 +23,12 @@ import static org.mockito.Mockito.when;
 import com.mysql.cj.jdbc.MysqlDataSource;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreUnavailableException;
 import io.github.josipmusa.idempotency.test.IdempotencyStoreContract;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -78,6 +74,22 @@ class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
     }
 
     @Test
+    void When_ExistingSchemaPredatesLeaseFencing_Expect_ColumnMigratedAutomatically() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("ALTER TABLE idempotency_records DROP COLUMN lease_id");
+        }
+
+        new JdbcIdempotencyStore(dataSource, true);
+
+        try (Connection conn = dataSource.getConnection();
+                Statement stmt = conn.createStatement()) {
+            assertThatCode(() -> stmt.executeQuery("SELECT lease_id FROM idempotency_records WHERE 1 = 0"))
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    @Test
     void When_ConnectionExhausted_Expect_ThrowsIdempotencyStoreException() throws Exception {
         DataSource exhaustedDs = mock(DataSource.class);
         when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
@@ -86,13 +98,7 @@ class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
         IdempotencyContext context =
                 new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
 
-        assertThatThrownBy(() -> failingStore.tryAcquire(context)).isInstanceOf(IdempotencyStoreException.class);
-    }
-
-    @Test
-    void When_CustomClockProvided_Expect_StoreConstructsSuccessfully() {
-        Clock fixedClock = Clock.fixed(Instant.parse("2025-01-01T00:00:00Z"), ZoneOffset.UTC);
-        var store = new JdbcIdempotencyStore(dataSource, true, 100L, fixedClock);
-        assertThat(store).isNotNull();
+        assertThatThrownBy(() -> failingStore.tryAcquire(context))
+                .isInstanceOf(IdempotencyStoreUnavailableException.class);
     }
 }

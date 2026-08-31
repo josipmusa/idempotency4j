@@ -43,7 +43,7 @@ mvn spotless:apply
 These rules are enforced by design, not by tooling — violating them will be caught in review:
 
 - `idempotency-core` has zero framework dependencies.
-- `idempotency-jdbc` and `idempotency-inmemory` depend on core only — no Spring.
+- `idempotency-jdbc`, `idempotency-redis`, and `idempotency-inmemory` depend on core only — no Spring.
 - `idempotency-spring-web` depends on core + Spring Web.
 - `idempotency-spring-boot-starter` depends on the spring module + providers.
 

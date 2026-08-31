@@ -63,8 +63,8 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout,
         if (key.length() > MAX_KEY_LENGTH) {
             throw new IllegalArgumentException("key length must not exceed " + MAX_KEY_LENGTH + " characters");
         }
-        if (ttl.isZero() || ttl.isNegative()) {
-            throw new IllegalArgumentException("ttl must be positive");
+        if (ttl.compareTo(Duration.ofMillis(1)) < 0) {
+            throw new IllegalArgumentException("ttl must be at least 1ms");
         }
         if (lockTimeout.compareTo(MIN_LOCK_TIMEOUT) < 0) {
             throw new IllegalArgumentException("lockTimeout must be at least 2ms");

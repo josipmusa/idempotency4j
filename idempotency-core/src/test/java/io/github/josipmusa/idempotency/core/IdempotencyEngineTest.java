@@ -30,6 +30,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -37,6 +38,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class IdempotencyEngineTest {
+
+    private static final String LEASE_ID = "test-lease-id";
 
     private IdempotencyStore store;
     private ScheduledExecutorService scheduler;
@@ -65,11 +68,12 @@ class IdempotencyEngineTest {
 
     @Test
     void When_NewKey_Expect_ReturnsExecuted() throws Exception {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         ExecutionResult result = engine.execute(defaultContext("new-key"), () -> {});
 
         assertThat(result).isInstanceOf(ExecutionResult.Executed.class);
+        assertThat(((ExecutionResult.Executed) result).leaseId()).isEqualTo(LEASE_ID);
     }
 
     @Test
@@ -96,7 +100,7 @@ class IdempotencyEngineTest {
 
     @Test
     void When_ActionThrows_Expect_ReleaseIsCalled() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         String key = "fail-key";
 
         try {
@@ -106,12 +110,12 @@ class IdempotencyEngineTest {
         } catch (Exception ignored) {
         }
 
-        verify(store, times(1)).release(key);
+        verify(store, times(1)).release(key, LEASE_ID);
     }
 
     @Test
     void When_ActionThrows_Expect_CompleteNeverCalled() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         try {
             engine.execute(defaultContext("fail-key"), () -> {
@@ -120,12 +124,12 @@ class IdempotencyEngineTest {
         } catch (Exception ignored) {
         }
 
-        verify(store, never()).complete(any(), any(), any());
+        verify(store, never()).complete(any(), any(), any(), any());
     }
 
     @Test
     void When_ActionThrows_Expect_OriginalExceptionPropagates() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         RuntimeException expected = new RuntimeException("specific failure");
 
         assertThatThrownBy(() -> engine.execute(defaultContext("fail-key"), () -> {
@@ -150,18 +154,18 @@ class IdempotencyEngineTest {
     void When_LongRunningAction_Expect_HeartbeatExtendsLock() throws Exception {
         IdempotencyContext context =
                 new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         engine.execute(context, () -> Thread.sleep(300));
 
-        verify(store, atLeastOnce()).extendLock(eq("hb-key"), eq(Duration.ofMillis(100)));
+        verify(store, atLeastOnce()).extendLock(eq("hb-key"), eq(LEASE_ID), eq(Duration.ofMillis(100)));
     }
 
     @Test
     void When_ActionCompletes_Expect_HeartbeatStops() throws Exception {
         IdempotencyContext context =
                 new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         engine.execute(context, () -> {});
 
@@ -186,7 +190,7 @@ class IdempotencyEngineTest {
     void When_ActionThrows_Expect_HeartbeatStops() throws Exception {
         IdempotencyContext context =
                 new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         try {
             engine.execute(context, () -> {
@@ -227,7 +231,7 @@ class IdempotencyEngineTest {
     @Test
     void When_Execute_Expect_ContextForwardedToStore() throws Exception {
         IdempotencyContext context = defaultContext("forwarded-key");
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         engine.execute(context, () -> {});
 
@@ -238,7 +242,7 @@ class IdempotencyEngineTest {
 
     @Test
     void When_ActionThrowsCheckedException_Expect_PropagatesUnwrapped() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         IOException expected = new IOException("disk full");
 
         assertThatThrownBy(() -> engine.execute(defaultContext("checked-key"), () -> {
@@ -251,10 +255,10 @@ class IdempotencyEngineTest {
 
     @Test
     void When_ActionThrowsAndReleaseFails_Expect_OriginalExceptionPropagates() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         RuntimeException actionException = new RuntimeException("action failed");
         IdempotencyStoreException releaseException = new IdempotencyStoreException("store unreachable");
-        doThrow(releaseException).when(store).release(any());
+        doThrow(releaseException).when(store).release(any(), any());
 
         assertThatThrownBy(() -> engine.execute(defaultContext("cascade-key"), () -> {
                     throw actionException;
@@ -274,19 +278,32 @@ class IdempotencyEngineTest {
                 .isSameAs(storeFailure);
 
         // Heartbeat should never have started
-        verify(store, never()).extendLock(any(), any());
+        verify(store, never()).extendLock(any(), any(), any());
     }
 
     @Test
     void When_HeartbeatExtendLockThrows_Expect_HeartbeatContinues() throws Exception {
         IdempotencyContext context =
                 new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired());
-        doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any());
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any(), any());
 
         engine.execute(context, () -> Thread.sleep(300));
 
         // Heartbeat should have been called multiple times despite throwing each time
-        verify(store, atLeast(2)).extendLock(eq("hb-error-key"), eq(Duration.ofMillis(100)));
+        verify(store, atLeast(2)).extendLock(eq("hb-error-key"), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+    }
+
+    @Test
+    void When_HeartbeatCannotBeScheduled_Expect_LeaseReleasedAndActionNotRun() {
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        scheduler.shutdownNow();
+        AtomicInteger actionCalls = new AtomicInteger();
+
+        assertThatThrownBy(() -> engine.execute(defaultContext("scheduler-rejected"), actionCalls::incrementAndGet))
+                .isInstanceOf(RejectedExecutionException.class);
+
+        assertThat(actionCalls).hasValue(0);
+        verify(store).release("scheduler-rejected", LEASE_ID);
     }
 }

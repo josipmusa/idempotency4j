@@ -16,13 +16,14 @@
 package io.github.josipmusa.idempotency.test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -46,6 +47,32 @@ public abstract class IdempotencyStoreContract {
 
     protected abstract IdempotencyStore store();
 
+    private final ThreadLocal<Map<String, String>> activeLeases = ThreadLocal.withInitial(java.util.HashMap::new);
+
+    protected AcquireResult acquire(IdempotencyStore store, IdempotencyContext context) {
+        AcquireResult result = store.tryAcquire(context);
+        if (result instanceof AcquireResult.Acquired acquired) {
+            activeLeases.get().put(context.key(), acquired.leaseId());
+        }
+        return result;
+    }
+
+    protected void complete(IdempotencyStore store, String key, StoredResponse response, Duration ttl) {
+        store.complete(key, activeLease(key), response, ttl);
+    }
+
+    protected void release(IdempotencyStore store, String key) {
+        store.release(key, activeLease(key));
+    }
+
+    protected void extendLock(IdempotencyStore store, String key, Duration extension) {
+        store.extendLock(key, activeLease(key), extension);
+    }
+
+    private String activeLease(String key) {
+        return activeLeases.get().getOrDefault(key, "unknown-test-lease");
+    }
+
     protected IdempotencyContext contextFor(String key) {
         return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_DEFAULT);
     }
@@ -68,7 +95,7 @@ public abstract class IdempotencyStoreContract {
 
     @Test
     void When_NewKey_Expect_ReturnsAcquired() {
-        AcquireResult result = store().tryAcquire(contextFor("new-key"));
+        AcquireResult result = acquire(store(), contextFor("new-key"));
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
     }
@@ -79,10 +106,10 @@ public abstract class IdempotencyStoreContract {
         String key = "complete-key";
         StoredResponse response = sampleResponse();
 
-        s.tryAcquire(contextFor(key));
-        s.complete(key, response, Duration.ofHours(1));
+        acquire(s, contextFor(key));
+        complete(s, key, response, Duration.ofHours(1));
 
-        AcquireResult result = s.tryAcquire(contextFor(key));
+        AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
@@ -96,12 +123,12 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "release-key";
 
-        s.tryAcquire(contextFor(key));
-        s.release(key);
+        var first = (AcquireResult.Acquired) acquire(s, contextFor(key));
+        s.release(key, first.leaseId());
 
-        AcquireResult result = s.tryAcquire(contextFor(key));
+        var result = (AcquireResult.Acquired) acquire(s, contextFor(key));
 
-        assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(result.leaseId()).isNotEqualTo(first.leaseId());
     }
 
     @Test
@@ -109,12 +136,12 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "expired-key";
 
-        s.tryAcquire(contextFor(key));
-        s.complete(key, sampleResponse(), Duration.ofMillis(1));
+        acquire(s, contextFor(key));
+        complete(s, key, sampleResponse(), Duration.ofMillis(1));
 
         Thread.sleep(10);
 
-        AcquireResult result = s.tryAcquire(contextFor(key));
+        AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
     }
@@ -124,12 +151,12 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "stale-key";
 
-        s.tryAcquire(contextFor(key, Duration.ofMillis(100)));
+        acquire(s, contextFor(key, Duration.ofMillis(100)));
         // Simulate crashed caller — do not complete or release
 
         Thread.sleep(150);
 
-        AcquireResult result = s.tryAcquire(contextFor(key));
+        AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
     }
@@ -141,16 +168,46 @@ public abstract class IdempotencyStoreContract {
         Duration sharedTimeout = Duration.ofMillis(100);
 
         // Acquire with a 100ms lock
-        s.tryAcquire(contextFor(key, sharedTimeout));
+        acquire(s, contextFor(key, sharedTimeout));
         // Simulate crashed caller — never complete or release
         Thread.sleep(150); // past lockExpiresAt
 
         // Second caller uses the SAME timeout — must still steal the stale lock
-        AcquireResult result = s.tryAcquire(contextFor(key, sharedTimeout));
+        AcquireResult result = acquire(s, contextFor(key, sharedTimeout));
 
         assertThat(result)
                 .as("A stale lock should be stealable regardless of the caller's lockTimeout")
                 .isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_OldOwnerResumesAfterLockIsStolen_Expect_CannotMutateNewLease() throws InterruptedException {
+        IdempotencyStore s = store();
+        String key = "stale-owner-fencing";
+        var firstContext = new IdempotencyContext(key, Duration.ofHours(1), Duration.ofMillis(30), FINGERPRINT_A);
+        var first = (AcquireResult.Acquired) s.tryAcquire(firstContext);
+
+        Thread.sleep(80);
+
+        var secondContext = new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_B);
+        var second = (AcquireResult.Acquired) s.tryAcquire(secondContext);
+        StoredResponse staleResponse = new StoredResponse(200, Map.of(), "stale".getBytes(), Instant.now());
+
+        assertThatThrownBy(() -> s.complete(key, first.leaseId(), staleResponse, Duration.ofHours(1)))
+                .isInstanceOf(IdempotencyLeaseLostException.class)
+                .hasMessageContaining("lease");
+        assertThatThrownBy(() -> s.release(key, first.leaseId()))
+                .isInstanceOf(IdempotencyLeaseLostException.class)
+                .hasMessageContaining("lease");
+        assertThatCode(() -> s.extendLock(key, first.leaseId(), Duration.ofHours(1)))
+                .doesNotThrowAnyException();
+
+        StoredResponse currentResponse = new StoredResponse(201, Map.of(), "current".getBytes(), Instant.now());
+        s.complete(key, second.leaseId(), currentResponse, Duration.ofHours(1));
+
+        AcquireResult replay = s.tryAcquire(secondContext);
+        assertThat(replay).isInstanceOf(AcquireResult.Duplicate.class);
+        assertThat(((AcquireResult.Duplicate) replay).response().body()).isEqualTo("current".getBytes());
     }
 
     @Test
@@ -166,21 +223,21 @@ public abstract class IdempotencyStoreContract {
             CountDownLatch lockAcquired = new CountDownLatch(1);
 
             Future<?> thread1 = executor.submit(() -> {
-                s.tryAcquire(contextFor(key));
+                acquire(s, contextFor(key));
                 lockAcquired.countDown();
                 try {
                     Thread.sleep(300);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                s.complete(key, response, Duration.ofHours(1));
+                complete(s, key, response, Duration.ofHours(1));
                 thread1CompleteTime[0] = System.nanoTime();
             });
 
             lockAcquired.await(5, TimeUnit.SECONDS);
 
             Future<AcquireResult> thread2 = executor.submit(() -> {
-                AcquireResult result = s.tryAcquire(contextFor(key));
+                AcquireResult result = acquire(s, contextFor(key));
                 thread2ResultTime[0] = System.nanoTime();
                 return result;
             });
@@ -209,7 +266,7 @@ public abstract class IdempotencyStoreContract {
             CountDownLatch lockAcquired = new CountDownLatch(1);
             // Thread 1 acquires and never completes
             Future<?> thread1 = executor.submit(() -> {
-                s.tryAcquire(contextFor(key, Duration.ofSeconds(30)));
+                acquire(s, contextFor(key, Duration.ofSeconds(30)));
                 lockAcquired.countDown();
                 // Never complete or release — simulate infinite hang
                 try {
@@ -222,8 +279,7 @@ public abstract class IdempotencyStoreContract {
             lockAcquired.await(5, TimeUnit.SECONDS);
 
             long start = System.nanoTime();
-            Future<AcquireResult> thread2 =
-                    executor.submit(() -> s.tryAcquire(contextFor(key, Duration.ofMillis(200))));
+            Future<AcquireResult> thread2 = executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(200))));
 
             AcquireResult result = thread2.get(5, TimeUnit.SECONDS);
             long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
@@ -260,9 +316,9 @@ public abstract class IdempotencyStoreContract {
                         return;
                     }
 
-                    AcquireResult result = s.tryAcquire(contextFor(key));
+                    AcquireResult result = acquire(s, contextFor(key));
                     if (result instanceof AcquireResult.Acquired) {
-                        s.complete(key, response, Duration.ofHours(1));
+                        complete(s, key, response, Duration.ofHours(1));
                     }
                     results.add(result);
                 }));
@@ -303,8 +359,8 @@ public abstract class IdempotencyStoreContract {
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<AcquireResult> futureA = executor.submit(() -> s.tryAcquire(contextFor("key-a")));
-            Future<AcquireResult> futureB = executor.submit(() -> s.tryAcquire(contextFor("key-b")));
+            Future<AcquireResult> futureA = executor.submit(() -> acquire(s, contextFor("key-a")));
+            Future<AcquireResult> futureB = executor.submit(() -> acquire(s, contextFor("key-b")));
 
             AcquireResult resultA = futureA.get(5, TimeUnit.SECONDS);
             AcquireResult resultB = futureB.get(5, TimeUnit.SECONDS);
@@ -323,17 +379,17 @@ public abstract class IdempotencyStoreContract {
         StoredResponse response = sampleResponse();
 
         // First attempt — acquire and fail
-        AcquireResult first = s.tryAcquire(contextFor(key));
+        AcquireResult first = acquire(s, contextFor(key));
         assertThat(first).isInstanceOf(AcquireResult.Acquired.class);
-        s.release(key);
+        release(s, key);
 
         // Second attempt — acquire and succeed
-        AcquireResult second = s.tryAcquire(contextFor(key));
+        AcquireResult second = acquire(s, contextFor(key));
         assertThat(second).isInstanceOf(AcquireResult.Acquired.class);
-        s.complete(key, response, Duration.ofHours(1));
+        complete(s, key, response, Duration.ofHours(1));
 
         // Third attempt — should be duplicate
-        AcquireResult third = s.tryAcquire(contextFor(key));
+        AcquireResult third = acquire(s, contextFor(key));
         assertThat(third).isInstanceOf(AcquireResult.Duplicate.class);
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
         assertThat(duplicate.response().statusCode()).isEqualTo(200);
@@ -348,10 +404,10 @@ public abstract class IdempotencyStoreContract {
         String key = "extend-key";
 
         // Acquire with short lock (100ms)
-        s.tryAcquire(contextFor(key, Duration.ofMillis(100)));
+        acquire(s, contextFor(key, Duration.ofMillis(100)));
 
         // Extend lock to 500ms from now
-        s.extendLock(key, Duration.ofMillis(500));
+        extendLock(s, key, Duration.ofMillis(500));
 
         // Wait past the original 100ms lock expiry
         Thread.sleep(150);
@@ -359,7 +415,7 @@ public abstract class IdempotencyStoreContract {
         // Lock should still be valid — second caller should NOT steal it
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            Future<AcquireResult> future = executor.submit(() -> s.tryAcquire(contextFor(key, Duration.ofMillis(100))));
+            Future<AcquireResult> future = executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(100))));
             AcquireResult result = future.get(5, TimeUnit.SECONDS);
 
             assertThat(result)
@@ -375,7 +431,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
 
         // Must not throw — heartbeat may fire after key is already gone
-        s.extendLock("nonexistent-key", Duration.ofSeconds(10));
+        extendLock(s, "nonexistent-key", Duration.ofSeconds(10));
     }
 
     @Test
@@ -384,14 +440,14 @@ public abstract class IdempotencyStoreContract {
         String key = "completed-extend-key";
         StoredResponse response = sampleResponse();
 
-        s.tryAcquire(contextFor(key));
-        s.complete(key, response, Duration.ofHours(1));
+        acquire(s, contextFor(key));
+        complete(s, key, response, Duration.ofHours(1));
 
         // Must not throw — heartbeat may fire after completion
-        s.extendLock(key, Duration.ofSeconds(10));
+        extendLock(s, key, Duration.ofSeconds(10));
 
         // Key should still be a valid duplicate
-        AcquireResult result = s.tryAcquire(contextFor(key));
+        AcquireResult result = acquire(s, contextFor(key));
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
     }
 
@@ -403,11 +459,11 @@ public abstract class IdempotencyStoreContract {
         String key = "ttl-durable-key";
         StoredResponse response = sampleResponse();
 
-        s.tryAcquire(contextFor(key));
-        s.complete(key, response, Duration.ofHours(1));
+        acquire(s, contextFor(key));
+        complete(s, key, response, Duration.ofHours(1));
 
         // Immediately re-acquire — must still be Duplicate
-        AcquireResult result = s.tryAcquire(contextFor(key));
+        AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
@@ -420,8 +476,8 @@ public abstract class IdempotencyStoreContract {
     void When_CompleteOnNonExistentKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
 
-        assertThatThrownBy(() -> s.complete("ghost-key", sampleResponse(), Duration.ofHours(1)))
-                .isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> complete(s, "ghost-key", sampleResponse(), Duration.ofHours(1)))
+                .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
@@ -429,18 +485,18 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "failed-key";
 
-        s.tryAcquire(contextFor(key));
-        s.release(key);
+        acquire(s, contextFor(key));
+        release(s, key);
 
-        assertThatThrownBy(() -> s.complete(key, sampleResponse(), Duration.ofHours(1)))
-                .isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> complete(s, key, sampleResponse(), Duration.ofHours(1)))
+                .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
     void When_ReleaseOnNonExistentKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
 
-        assertThatThrownBy(() -> s.release("ghost-key")).isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> release(s, "ghost-key")).isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
@@ -448,11 +504,11 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "double-complete-key";
 
-        s.tryAcquire(contextFor(key));
-        s.complete(key, sampleResponse(), Duration.ofHours(1));
+        acquire(s, contextFor(key));
+        complete(s, key, sampleResponse(), Duration.ofHours(1));
 
-        assertThatThrownBy(() -> s.complete(key, sampleResponse(), Duration.ofHours(1)))
-                .isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> complete(s, key, sampleResponse(), Duration.ofHours(1)))
+                .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
@@ -460,10 +516,10 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "release-completed-key";
 
-        s.tryAcquire(contextFor(key));
-        s.complete(key, sampleResponse(), Duration.ofHours(1));
+        acquire(s, contextFor(key));
+        complete(s, key, sampleResponse(), Duration.ofHours(1));
 
-        assertThatThrownBy(() -> s.release(key)).isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> release(s, key)).isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     // --- Full lifecycle ---
@@ -474,26 +530,26 @@ public abstract class IdempotencyStoreContract {
         String key = "lifecycle-key";
 
         // First generation: acquire → complete
-        AcquireResult first = s.tryAcquire(contextFor(key));
+        AcquireResult first = acquire(s, contextFor(key));
         assertThat(first).isInstanceOf(AcquireResult.Acquired.class);
 
         StoredResponse firstResponse = new StoredResponse(200, Map.of(), "first".getBytes(), Instant.now());
-        s.complete(key, firstResponse, Duration.ofMillis(1));
+        complete(s, key, firstResponse, Duration.ofMillis(1));
 
         // Wait for TTL to expire
         Thread.sleep(10);
 
         // Second generation: re-acquire → complete with different response
-        AcquireResult second = s.tryAcquire(contextFor(key));
+        AcquireResult second = acquire(s, contextFor(key));
         assertThat(second)
                 .as("Key should be acquirable again after TTL expires")
                 .isInstanceOf(AcquireResult.Acquired.class);
 
         StoredResponse secondResponse = new StoredResponse(201, Map.of(), "second".getBytes(), Instant.now());
-        s.complete(key, secondResponse, Duration.ofHours(1));
+        complete(s, key, secondResponse, Duration.ofHours(1));
 
         // Verify the new response is stored, not the old one
-        AcquireResult third = s.tryAcquire(contextFor(key));
+        AcquireResult third = acquire(s, contextFor(key));
         assertThat(third).isInstanceOf(AcquireResult.Duplicate.class);
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
         assertThat(duplicate.response().statusCode()).isEqualTo(201);
@@ -507,11 +563,11 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "failed-extend-key";
 
-        s.tryAcquire(contextFor(key));
-        s.release(key);
+        acquire(s, contextFor(key));
+        release(s, key);
 
         // Must not throw — FAILED is not IN_PROGRESS
-        s.extendLock(key, Duration.ofSeconds(10));
+        extendLock(s, key, Duration.ofSeconds(10));
     }
 
     @Test
@@ -519,10 +575,10 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "double-release-key";
 
-        s.tryAcquire(contextFor(key));
-        s.release(key);
+        acquire(s, contextFor(key));
+        release(s, key);
 
-        assertThatThrownBy(() -> s.release(key)).isInstanceOf(IdempotencyStoreException.class);
+        assertThatThrownBy(() -> release(s, key)).isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
     @Test
@@ -534,8 +590,8 @@ public abstract class IdempotencyStoreContract {
         CountDownLatch chaosReady = new CountDownLatch(chaosThreadCount);
 
         // Put key in FAILED state
-        s.tryAcquire(contextFor(key, Duration.ofSeconds(10)));
-        s.release(key);
+        acquire(s, contextFor(key, Duration.ofSeconds(10)));
+        release(s, key);
 
         ExecutorService executor = Executors.newFixedThreadPool(chaosThreadCount + 1);
         try {
@@ -544,9 +600,9 @@ public abstract class IdempotencyStoreContract {
                 executor.submit(() -> {
                     chaosReady.countDown();
                     while (!stop.get()) {
-                        AcquireResult r = s.tryAcquire(contextFor(key, Duration.ofSeconds(10)));
+                        AcquireResult r = acquire(s, contextFor(key, Duration.ofSeconds(10)));
                         if (r instanceof AcquireResult.Acquired) {
-                            s.release(key);
+                            release(s, key);
                         }
                     }
                 });
@@ -554,7 +610,7 @@ public abstract class IdempotencyStoreContract {
             chaosReady.await(5, TimeUnit.SECONDS);
 
             // Victim thread with short lockTimeout — must return within bounded time
-            Future<AcquireResult> victim = executor.submit(() -> s.tryAcquire(contextFor(key, Duration.ofMillis(200))));
+            Future<AcquireResult> victim = executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(200))));
 
             // Without the fix, the victim can loop indefinitely under contention.
             // victim.get(5s) will throw TimeoutException, failing the test.
@@ -572,10 +628,10 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "self-deadlock-key";
 
-        s.tryAcquire(contextFor(key, Duration.ofSeconds(30)));
+        acquire(s, contextFor(key, Duration.ofSeconds(30)));
 
         // Second acquire on same key should timeout, not succeed
-        AcquireResult result = s.tryAcquire(contextFor(key, Duration.ofMillis(200)));
+        AcquireResult result = acquire(s, contextFor(key, Duration.ofMillis(200)));
 
         assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
     }
@@ -587,20 +643,20 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         // Both TTL and lockTimeout are short so the IN_PROGRESS entry is eligible for purge
         var ctx = contextFor("purge-expired-1", Duration.ofMillis(10), Duration.ofMillis(2));
-        s.tryAcquire(ctx);
+        acquire(s, ctx);
         Thread.sleep(50);
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
-        assertThat(s.tryAcquire(ctx)).isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(acquire(s, ctx)).isInstanceOf(AcquireResult.Acquired.class);
     }
 
     @Test
     void When_NonExpiredTtlEntryExists_Expect_PurgeKeepsIt() {
         IdempotencyStore s = store();
         var ctx = contextFor("purge-keep-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
-        s.tryAcquire(ctx);
-        s.complete(ctx.key(), sampleResponse(), ctx.ttl());
+        acquire(s, ctx);
+        complete(s, ctx.key(), sampleResponse(), ctx.ttl());
         s.purgeExpired();
-        var result = s.tryAcquire(ctx);
+        var result = acquire(s, ctx);
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
     }
 
@@ -608,12 +664,15 @@ public abstract class IdempotencyStoreContract {
     void When_CompletedEntryTtlExpired_Expect_PurgeRemovesIt() throws InterruptedException {
         IdempotencyStore s = store();
         var ctx = contextFor("purge-completed-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
-        s.tryAcquire(ctx);
-        s.complete(
-                ctx.key(), new StoredResponse(200, Map.of(), "body".getBytes(), Instant.now()), Duration.ofMillis(1));
+        acquire(s, ctx);
+        complete(
+                s,
+                ctx.key(),
+                new StoredResponse(200, Map.of(), "body".getBytes(), Instant.now()),
+                Duration.ofMillis(1));
         Thread.sleep(50);
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
-        assertThat(s.tryAcquire(ctx)).isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(acquire(s, ctx)).isInstanceOf(AcquireResult.Acquired.class);
     }
 
     @Test
@@ -621,7 +680,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         // Lock expires quickly (2ms), but TTL is long (10 min)
         var ctx = contextFor("purge-stale-inprogress-1", Duration.ofMinutes(10), Duration.ofMillis(2));
-        s.tryAcquire(ctx);
+        acquire(s, ctx);
         Thread.sleep(50);
         int purged = s.purgeExpired();
         // The entry TTL has not expired, so purge should keep it (even though lock expired).
@@ -636,17 +695,17 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         // Both lockTimeout and TTL are short — entry is fully expired and safe to purge
         var ctx = contextFor("purge-stale-both-1", Duration.ofMillis(2), Duration.ofMillis(2));
-        s.tryAcquire(ctx);
+        acquire(s, ctx);
         Thread.sleep(50);
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
-        assertThat(s.tryAcquire(ctx)).isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(acquire(s, ctx)).isInstanceOf(AcquireResult.Acquired.class);
     }
 
     @Test
     void When_NoExpiredEntries_Expect_PurgeReturnsZero() {
         IdempotencyStore s = store();
         var ctx = contextFor("purge-none-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
-        s.tryAcquire(ctx);
+        acquire(s, ctx);
         int removed = s.purgeExpired();
         assertThat(removed).isEqualTo(0);
     }
@@ -657,10 +716,10 @@ public abstract class IdempotencyStoreContract {
     void When_SameKeyAndSameFingerprint_Expect_Duplicate() {
         IdempotencyStore s = store();
         var context = contextFor("fp-same", FINGERPRINT_A);
-        s.tryAcquire(context);
-        s.complete("fp-same", sampleResponse(), Duration.ofHours(1));
+        acquire(s, context);
+        complete(s, "fp-same", sampleResponse(), Duration.ofHours(1));
 
-        var result = s.tryAcquire(context);
+        var result = acquire(s, context);
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
     }
@@ -669,11 +728,11 @@ public abstract class IdempotencyStoreContract {
     void When_SameKeyButDifferentFingerprint_Expect_FingerprintMismatch() {
         IdempotencyStore s = store();
         var original = contextFor("fp-diff", FINGERPRINT_A);
-        s.tryAcquire(original);
-        s.complete("fp-diff", sampleResponse(), Duration.ofHours(1));
+        acquire(s, original);
+        complete(s, "fp-diff", sampleResponse(), Duration.ofHours(1));
 
         var reused = contextFor("fp-diff", FINGERPRINT_B);
-        var result = s.tryAcquire(reused);
+        var result = acquire(s, reused);
 
         assertThat(result).isInstanceOf(AcquireResult.FingerprintMismatch.class);
         var mismatch = (AcquireResult.FingerprintMismatch) result;
@@ -685,11 +744,11 @@ public abstract class IdempotencyStoreContract {
     void When_KeyReleasedAndReAcquiredWithDifferentFingerprint_Expect_Acquired() {
         IdempotencyStore s = store();
         var first = contextFor("fp-reacquire", FINGERPRINT_A);
-        s.tryAcquire(first);
-        s.release("fp-reacquire");
+        acquire(s, first);
+        release(s, "fp-reacquire");
 
         var second = contextFor("fp-reacquire", FINGERPRINT_B);
-        var result = s.tryAcquire(second);
+        var result = acquire(s, second);
 
         assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
     }
@@ -700,16 +759,16 @@ public abstract class IdempotencyStoreContract {
         String key = "fp-stolen-complete";
 
         // First attempt with FINGERPRINT_A — fails
-        s.tryAcquire(contextFor(key, FINGERPRINT_A));
-        s.release(key);
+        acquire(s, contextFor(key, FINGERPRINT_A));
+        release(s, key);
 
         // Second attempt steals with FINGERPRINT_B and completes
-        s.tryAcquire(contextFor(key, FINGERPRINT_B));
-        s.complete(key, sampleResponse(), Duration.ofHours(1));
+        acquire(s, contextFor(key, FINGERPRINT_B));
+        complete(s, key, sampleResponse(), Duration.ofHours(1));
 
         // Third request with original FINGERPRINT_A must be rejected as a mismatch —
         // the stored fingerprint is now B, not A
-        var result = s.tryAcquire(contextFor(key, FINGERPRINT_A));
+        var result = acquire(s, contextFor(key, FINGERPRINT_A));
 
         assertThat(result)
                 .as("Original fingerprint must be a mismatch after the key was re-completed with a new fingerprint")
@@ -725,11 +784,11 @@ public abstract class IdempotencyStoreContract {
         String key = "failed-expiry-contract";
 
         // Acquire with a very short lock
-        s.tryAcquire(contextFor(key, Duration.ofMillis(50)));
+        acquire(s, contextFor(key, Duration.ofMillis(50)));
 
         // Wait for the lock to expire, then release
         Thread.sleep(100);
-        s.release(key);
+        release(s, key);
 
         // Purge immediately — the FAILED record should NOT be eligible yet.
         int purged = s.purgeExpired();

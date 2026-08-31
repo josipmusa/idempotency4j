@@ -95,9 +95,9 @@ public final class IdempotencyConfig {
          * <p>After this duration the record expires and the key can be reused
          * for a new request. Defaults to 24 hours.
          *
-         * @param ttl must be positive (non-zero, non-negative)
+         * @param ttl must be at least one millisecond
          * @return this builder
-         * @throws IllegalArgumentException if {@code ttl} is zero or negative
+         * @throws IllegalArgumentException if {@code ttl} is less than one millisecond
          */
         public Builder defaultTtl(Duration ttl) {
             Objects.requireNonNull(ttl, "defaultTtl must not be null");
@@ -157,8 +157,8 @@ public final class IdempotencyConfig {
          *         must be &ge; 2 ms; {@code keyHeader} must not be blank)
          */
         public IdempotencyConfig build() {
-            if (defaultTtl.isZero() || defaultTtl.isNegative()) {
-                throw new IllegalArgumentException("defaultTtl must be positive, got: " + defaultTtl);
+            if (defaultTtl.toMillis() < 1) {
+                throw new IllegalArgumentException("defaultTtl must be at least 1ms, got: " + defaultTtl);
             }
             if (defaultLockTimeout.toMillis() < 2) {
                 throw new IllegalArgumentException(

@@ -19,12 +19,14 @@ import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -60,7 +62,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             Instant lockExpiresAt,
             Instant expiresAt,
             Duration lockTimeout,
-            String requestFingerprint) {}
+            String requestFingerprint,
+            String leaseId) {}
 
     private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
     private final Clock clock;
@@ -84,13 +87,17 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
-        Instant deadline = clock.instant().plus(context.lockTimeout());
+        long startedAtNanos = System.nanoTime();
+        long timeoutNanos = context.lockTimeout().toNanos();
+        String leaseId = UUID.randomUUID().toString();
+        boolean firstAttempt = true;
 
         while (true) {
-            Instant now = clock.instant();
-            if (now.isAfter(deadline)) {
+            if (!firstAttempt && System.nanoTime() - startedAtNanos >= timeoutNanos) {
                 return AcquireResult.lockTimeout(context.key());
             }
+            firstAttempt = false;
+            Instant now = clock.instant();
 
             // Evict expired COMPLETE entry for this key so a fresh insert can follow
             store.computeIfPresent(
@@ -106,12 +113,13 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     now.plus(context.lockTimeout()),
                     now.plus(context.ttl()),
                     context.lockTimeout(),
-                    context.requestFingerprint());
+                    context.requestFingerprint(),
+                    leaseId);
 
             Entry existing = store.putIfAbsent(context.key(), newEntry);
 
             if (existing == null) {
-                return AcquireResult.acquired();
+                return AcquireResult.acquired(leaseId);
             }
 
             if (existing.status() == Status.COMPLETE) {
@@ -129,17 +137,18 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     || (existing.lockExpiresAt() != null
                             && existing.lockExpiresAt().isBefore(now))) {
                 if (store.replace(context.key(), existing, newEntry)) {
-                    return AcquireResult.acquired();
+                    return AcquireResult.acquired(leaseId);
                 }
                 continue; // lost the race — re-inspect on next iteration
             }
 
             // Active IN_PROGRESS — wait before retrying
-            if (clock.instant().isAfter(deadline)) {
+            long remainingNanos = timeoutNanos - (System.nanoTime() - startedAtNanos);
+            if (remainingNanos <= 0) {
                 return AcquireResult.lockTimeout(context.key());
             }
             try {
-                Thread.sleep(pollIntervalMs);
+                TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, TimeUnit.MILLISECONDS.toNanos(pollIntervalMs)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return AcquireResult.lockTimeout(context.key());
@@ -148,44 +157,58 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void complete(String key, StoredResponse response, Duration ttl) {
+    public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
         store.compute(key, (k, existing) -> {
             if (existing == null) {
-                throw new IdempotencyStoreException(
-                        "Cannot complete key '" + key + "': no entry exists. Was tryAcquire called?");
+                throw new IdempotencyLeaseLostException(
+                        "Cannot complete key '" + key + "': no entry exists or it expired");
             }
             if (existing.status() != Status.IN_PROGRESS) {
-                throw new IdempotencyStoreException(
+                throw new IdempotencyLeaseLostException(
                         "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
+            requireLease(existing, leaseId, key, "complete");
             return new Entry(
-                    Status.COMPLETE, response, null, clock.instant().plus(ttl), null, existing.requestFingerprint());
+                    Status.COMPLETE,
+                    response,
+                    null,
+                    clock.instant().plus(ttl),
+                    null,
+                    existing.requestFingerprint(),
+                    null);
         });
     }
 
     @Override
-    public void release(String key) {
+    public void release(String key, String leaseId) {
         store.compute(key, (k, existing) -> {
             if (existing == null) {
-                throw new IdempotencyStoreException(
-                        "Cannot release key '" + key + "': no entry exists. Was tryAcquire called?");
+                throw new IdempotencyLeaseLostException(
+                        "Cannot release key '" + key + "': no entry exists or it expired");
             }
             if (existing.status() != Status.IN_PROGRESS) {
-                throw new IdempotencyStoreException(
+                throw new IdempotencyLeaseLostException(
                         "Cannot release key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
             }
+            requireLease(existing, leaseId, key, "release");
             // Expire after lockTimeout rather than full TTL — FAILED entries are immediately
             // re-acquirable, so keeping them for the full TTL would unnecessarily retain memory.
             Instant failedExpiry = clock.instant().plus(existing.lockTimeout());
             return new Entry(
-                    Status.FAILED, null, null, failedExpiry, existing.lockTimeout(), existing.requestFingerprint());
+                    Status.FAILED,
+                    null,
+                    null,
+                    failedExpiry,
+                    existing.lockTimeout(),
+                    existing.requestFingerprint(),
+                    null);
         });
     }
 
     @Override
-    public void extendLock(String key, Duration extension) {
+    public void extendLock(String key, String leaseId, Duration extension) {
         store.computeIfPresent(key, (k, entry) -> {
-            if (entry.status() != Status.IN_PROGRESS) {
+            if (entry.status() != Status.IN_PROGRESS || !Objects.equals(entry.leaseId(), leaseId)) {
                 return entry;
             }
             return new Entry(
@@ -194,8 +217,17 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     clock.instant().plus(extension),
                     entry.expiresAt(),
                     entry.lockTimeout(),
-                    entry.requestFingerprint());
+                    entry.requestFingerprint(),
+                    entry.leaseId());
         });
+    }
+
+    private static void requireLease(Entry entry, String leaseId, String key, String operation) {
+        Objects.requireNonNull(leaseId, "leaseId must not be null");
+        if (!leaseId.equals(entry.leaseId())) {
+            throw new IdempotencyLeaseLostException(
+                    "Cannot " + operation + " key '" + key + "': lease no longer owns the key");
+        }
     }
 
     /**

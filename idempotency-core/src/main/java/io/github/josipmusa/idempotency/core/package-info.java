@@ -14,7 +14,7 @@
  *       defaults used by adapters to build an {@code IdempotencyContext}.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.AcquireResult} — sealed outcome of
  *       {@code IdempotencyStore.tryAcquire}: {@code Acquired}, {@code Duplicate},
- *       or {@code LockTimeout}.</li>
+ *       {@code LockTimeout}, or {@code FingerprintMismatch}.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.ExecutionResult} — sealed outcome of
  *       {@code IdempotencyEngine.execute}: {@code Executed} or {@code Duplicate}.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.StoredResponse} — captured HTTP response

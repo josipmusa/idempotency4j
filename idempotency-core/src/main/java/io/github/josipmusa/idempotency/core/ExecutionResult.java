@@ -15,6 +15,8 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.util.Objects;
+
 /**
  * The result of {@link IdempotencyEngine#execute} — tells the adapter
  * whether the action ran or was skipped.
@@ -29,11 +31,18 @@ public sealed interface ExecutionResult permits ExecutionResult.Executed, Execut
      * The action executed successfully. The adapter must now:
      * <ol>
      *   <li>Capture the HTTP response that was written during the action</li>
-     *   <li>Call {@link IdempotencyStore#complete} with that response</li>
+     *   <li>Call {@link IdempotencyStore#complete} with this result's lease ID and that response</li>
      *   <li>Return the response to the client</li>
      * </ol>
      */
-    record Executed() implements ExecutionResult {}
+    record Executed(String leaseId) implements ExecutionResult {
+        public Executed {
+            Objects.requireNonNull(leaseId, "leaseId must not be null");
+            if (leaseId.isBlank()) {
+                throw new IllegalArgumentException("leaseId must not be blank");
+            }
+        }
+    }
 
     /**
      * The action was skipped — a previous request already completed this key.
@@ -42,8 +51,8 @@ public sealed interface ExecutionResult permits ExecutionResult.Executed, Execut
      */
     record Duplicate(StoredResponse response) implements ExecutionResult {}
 
-    static ExecutionResult executed() {
-        return new Executed();
+    static ExecutionResult executed(String leaseId) {
+        return new Executed(leaseId);
     }
 
     static ExecutionResult duplicate(StoredResponse response) {
