@@ -51,7 +51,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerExecutionChain;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
-import org.springframework.web.util.ContentCachingRequestWrapper;
 import org.springframework.web.util.ContentCachingResponseWrapper;
 
 /**
@@ -175,20 +174,15 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             return;
         }
 
-        int cacheLimit = requestCacheLimit();
-        ContentCachingRequestWrapper wrappedRequest = new ContentCachingRequestWrapper(request, cacheLimit);
-        // Read the body into the cache. When a size limit is configured, read only up to
-        // limit + 1 bytes so we detect oversized bodies without buffering the full payload.
-        if (maxBodyBytes != NO_LIMIT) {
-            wrappedRequest.getInputStream().readNBytes(cacheLimit);
-            if (wrappedRequest.getContentAsByteArray().length > maxBodyBytes) {
-                writeJsonError(response, 413, ERROR_BODY_TOO_LARGE);
-                return;
-            }
-        } else {
-            wrappedRequest.getInputStream().readAllBytes();
+        // When a size limit is configured, buffer only up to limit + 1 bytes so we detect
+        // oversized bodies without holding the full payload.
+        ReplayableBodyRequestWrapper wrappedRequest =
+                ReplayableBodyRequestWrapper.buffer(request, maxBodyBytes == NO_LIMIT ? NO_LIMIT : maxBodyBytes + 1);
+        if (maxBodyBytes != NO_LIMIT && wrappedRequest.body().length > maxBodyBytes) {
+            writeJsonError(response, 413, ERROR_BODY_TOO_LARGE);
+            return;
         }
-        String fingerprint = RequestFingerprint.of(wrappedRequest.getContentAsByteArray());
+        String fingerprint = RequestFingerprint.of(wrappedRequest.body());
 
         IdempotencyContext context =
                 new IdempotencyContext(key, resolvedIdempotent.ttl(), resolvedIdempotent.lockTimeout(), fingerprint);
@@ -299,13 +293,6 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             headers.put("Content-Type", List.of(contentType));
         }
         return headers;
-    }
-
-    private int requestCacheLimit() {
-        if (maxBodyBytes == NO_LIMIT) {
-            return 0;
-        }
-        return maxBodyBytes >= Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.toIntExact(maxBodyBytes + 1);
     }
 
     private static Set<String> nonReplayableHeaders(Map<String, List<String>> headers) {
