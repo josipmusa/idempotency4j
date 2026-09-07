@@ -81,8 +81,7 @@ class HeaderJsonTest {
 
     @Test
     void When_ValueIsNonAscii_Expect_RawUtf8NotEscaped() {
-        assertThat(HeaderJson.encode(Map.of("X", List.of("héllo → 🎉"))))
-                .isEqualTo("{\"X\":[\"héllo → 🎉\"]}");
+        assertThat(HeaderJson.encode(Map.of("X", List.of("héllo → 🎉")))).isEqualTo("{\"X\":[\"héllo → 🎉\"]}");
     }
 
     @Test
@@ -119,7 +118,8 @@ class HeaderJsonTest {
 
     @Test
     void When_DuplicateKeys_Expect_LastWins() {
-        assertThat(HeaderJson.decode("{\"X\":[\"first\"],\"X\":[\"second\"]}")).isEqualTo(Map.of("X", List.of("second")));
+        assertThat(HeaderJson.decode("{\"X\":[\"first\"],\"X\":[\"second\"]}"))
+                .isEqualTo(Map.of("X", List.of("second")));
     }
 
     @Test

@@ -15,9 +15,8 @@
  */
 package io.github.josipmusa.idempotency.redis;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
+import io.github.josipmusa.idempotency.core.HeaderJson;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
@@ -38,7 +37,6 @@ import io.lettuce.core.api.sync.RedisCommands;
 import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.codec.RedisCodec;
 import io.lettuce.core.codec.StringCodec;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -92,8 +90,6 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     static final String FORMAT_VERSION = "1";
 
     private static final long MAX_POLL_INTERVAL_MS = 1_000;
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
 
     /** KEYS: record. ARGV: lock timeout, TTL, grace, fingerprint, lease, owner, format. */
     private static final LuaScript ACQUIRE = LuaScript.of(
@@ -592,21 +588,13 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     }
 
     static byte[] headersToJson(Map<String, List<String>> headers) {
-        try {
-            return OBJECT_MAPPER.writeValueAsBytes(headers);
-        } catch (IOException e) {
-            throw new IdempotencyStoreException("Failed to serialize response headers to JSON", e);
-        }
+        return HeaderJson.encode(headers).getBytes(StandardCharsets.UTF_8);
     }
 
     static Map<String, List<String>> jsonToHeaders(byte[] json) {
         if (json == null || json.length == 0) {
             return Map.of();
         }
-        try {
-            return OBJECT_MAPPER.readValue(json, HEADERS_TYPE);
-        } catch (IOException e) {
-            throw new IdempotencyCorruptRecordException("Stored Redis response headers are malformed", e);
-        }
+        return HeaderJson.decode(new String(json, StandardCharsets.UTF_8));
     }
 }
