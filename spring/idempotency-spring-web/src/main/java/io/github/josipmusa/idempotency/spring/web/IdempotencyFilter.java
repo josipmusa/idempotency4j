@@ -246,8 +246,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             handlerChain = handlerMapping.getHandler(request);
         } catch (Exception e) {
             log.warn(
-                    "Could not resolve handler for request [" + request.getMethod() + " " + request.getRequestURI()
-                            + "]; skipping idempotency enforcement",
+                    "Could not resolve handler for request [{} {}]; skipping idempotency enforcement",
+                    request.getMethod(),
+                    request.getRequestURI(),
                     e);
             return null;
         }
