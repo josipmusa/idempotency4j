@@ -62,6 +62,31 @@ class IdempotencyContextTest {
     }
 
     @Test
+    void When_NullFingerprint_Expect_ConstructsWithoutFingerprint() {
+        IdempotencyContext ctx = new IdempotencyContext("key", TTL, LOCK_TIMEOUT, null);
+
+        assertThat(ctx.requestFingerprint()).isNull();
+        assertThat(ctx.fingerprint()).isEmpty();
+    }
+
+    @Test
+    void When_BuiltWithoutFingerprint_Expect_FingerprintIsAbsent() {
+        IdempotencyContext ctx = IdempotencyContext.withoutFingerprint("key", TTL, LOCK_TIMEOUT);
+
+        assertThat(ctx.key()).isEqualTo("key");
+        assertThat(ctx.ttl()).isEqualTo(TTL);
+        assertThat(ctx.lockTimeout()).isEqualTo(LOCK_TIMEOUT);
+        assertThat(ctx.fingerprint()).isEmpty();
+    }
+
+    @Test
+    void When_FingerprintPresent_Expect_FingerprintAccessorReturnsIt() {
+        IdempotencyContext ctx = new IdempotencyContext("key", TTL, LOCK_TIMEOUT, VALID_FINGERPRINT);
+
+        assertThat(ctx.fingerprint()).contains(VALID_FINGERPRINT);
+    }
+
+    @Test
     void When_KeyTooLong_Expect_ThrowsIllegalArgumentException() {
         assertThatThrownBy(() -> new IdempotencyContext("k".repeat(256), TTL, LOCK_TIMEOUT, VALID_FINGERPRINT))
                 .isInstanceOf(IllegalArgumentException.class)

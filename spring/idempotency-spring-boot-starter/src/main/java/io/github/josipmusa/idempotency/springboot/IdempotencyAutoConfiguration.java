@@ -18,9 +18,10 @@ package io.github.josipmusa.idempotency.springboot;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
+import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
+import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -44,10 +45,15 @@ public class IdempotencyAutoConfiguration {
     @ConditionalOnMissingBean
     IdempotencyConfig idempotencyConfig(IdempotencyProperties idempotencyProperties) {
         return IdempotencyConfig.builder()
-                .keyHeader(idempotencyProperties.getKeyHeader())
                 .defaultTtl(idempotencyProperties.getDefaultTtl())
                 .defaultLockTimeout(idempotencyProperties.getDefaultLockTimeout())
                 .build();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    WebIdempotencyConfig webIdempotencyConfig(IdempotencyProperties idempotencyProperties) {
+        return WebIdempotencyConfig.withKeyHeader(idempotencyProperties.getKeyHeader());
     }
 
     @Bean
@@ -89,13 +95,13 @@ public class IdempotencyAutoConfiguration {
     public IdempotencyFilter idempotencyFilter(
             IdempotencyEngine engine,
             IdempotencyStore store,
-            IdempotencyConfig config,
+            WebIdempotencyConfig webConfig,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             IdempotencyProperties properties,
             ResponseSanitizer sanitizer) {
         return new IdempotencyFilter(
-                engine, store, config, handlerMapping, registry, properties.getMaxBodyBytes(), sanitizer);
+                engine, store, webConfig, handlerMapping, registry, properties.getMaxBodyBytes(), sanitizer);
     }
 
     @Bean

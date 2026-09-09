@@ -15,6 +15,10 @@
  *       at startup to determine which endpoints are annotated with {@code @Idempotent}.</li>
  *   <li>{@link io.github.josipmusa.idempotency.spring.web.RequestFingerprint} — computes
  *       a SHA-256 hex digest of the request body for fingerprint mismatch detection.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig} — HTTP-only
+ *       settings, notably the header carrying the idempotency key.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.spring.web.ResponseSanitizer} — SPI for
+ *       scrubbing sensitive data from responses before they are persisted.</li>
  * </ul>
  *
  * <p>The adapter is responsible for calling {@code store.complete()} with the engine-provided

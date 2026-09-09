@@ -22,6 +22,7 @@ import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import java.nio.charset.StandardCharsets;
@@ -137,12 +138,13 @@ class IdempotencyFilterIntegrationTest {
 
         RequestMappingHandlerMapping mapping = wac.getBean(RequestMappingHandlerMapping.class);
         IdempotencyConfig config = IdempotencyConfig.defaults();
+        WebIdempotencyConfig webConfig = WebIdempotencyConfig.defaults();
         IdempotencyEngine engine = new IdempotencyEngine(store, scheduler);
         IdempotentHandlerRegistry registry = new IdempotentHandlerRegistry(mapping, config);
         registry.afterSingletonsInstantiated();
         IdempotencyFilter filter = maxBodyBytes == null
-                ? new IdempotencyFilter(engine, store, config, mapping, registry)
-                : new IdempotencyFilter(engine, store, config, mapping, registry, maxBodyBytes);
+                ? new IdempotencyFilter(engine, store, webConfig, mapping, registry)
+                : new IdempotencyFilter(engine, store, webConfig, mapping, registry, maxBodyBytes);
 
         return MockMvcBuilders.webAppContextSetup(wac).addFilters(filter).build();
     }
@@ -172,8 +174,8 @@ class IdempotencyFilterIntegrationTest {
         }
 
         @Override
-        public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
-            completed.put(key, response);
+        public void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl) {
+            completed.put(key, (StoredResponse) payload);
         }
 
         @Override

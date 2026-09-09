@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking.** `idempotency-core` no longer models HTTP. The engine, the store SPI and the
+  context are transport-neutral, so a message listener or an event handler can drive them the
+  same way the Servlet filter does.
+- **Breaking.** `IdempotencyContext.requestFingerprint` is now optional. Build a context without
+  one via `IdempotencyContext.withoutFingerprint(key, ttl, lockTimeout)`; `fingerprint()` returns
+  it as an `Optional`. A blank string is still rejected - `null` is how a caller says "none".
+  Two acquisitions mismatch only when both carry a fingerprint and the two differ; a fingerprint
+  present on just one side proceeds normally, because a caller that does not fingerprint its
+  payload cannot contradict one that does.
+- **Breaking.** `IdempotencyPayload` replaces `StoredResponse` in `AcquireResult.Duplicate`,
+  `ExecutionResult.Duplicate` and `IdempotencyStore.complete(...)`, and the accessor on both
+  `Duplicate` records is now `payload()` rather than `response()`. `StoredResponse` is unchanged
+  apart from implementing the new interface, and is joined by `NoPayload` for callers with
+  nothing to replay. Stores round-trip both variants; no schema or Redis format change was
+  needed, because a completed record with no response code already reads back unambiguously.
+- **Breaking.** `ResponseSanitizer` moved from `io.github.josipmusa.idempotency.core` to
+  `io.github.josipmusa.idempotency.spring.web`. It only ever sanitized HTTP responses.
+- **Breaking.** `IdempotencyConfig.keyHeader` moved to the new
+  `io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig`; core config keeps
+  `defaultTtl` and `defaultLockTimeout`. The `idempotency.key-header` property is unchanged, and
+  the starter registers a `WebIdempotencyConfig` bean from it. Applications constructing
+  `IdempotencyFilter` by hand pass a `WebIdempotencyConfig` where they passed `IdempotencyConfig`.
+
+### Added
+
+- `NoPayload` for recording a completed operation that has nothing to replay, so non-HTTP callers
+  can use the engine without fabricating a response.
+
 ## [0.2.0] - 2026-08-31
 
 ### Added

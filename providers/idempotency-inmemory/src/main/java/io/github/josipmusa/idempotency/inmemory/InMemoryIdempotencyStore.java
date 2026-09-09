@@ -17,8 +17,8 @@ package io.github.josipmusa.idempotency.inmemory;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.StoredResponse;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Clock;
 import java.time.Duration;
@@ -58,7 +58,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
      */
     private record Entry(
             Status status,
-            StoredResponse response,
+            IdempotencyPayload payload,
             Instant lockExpiresAt,
             Instant expiresAt,
             Duration lockTimeout,
@@ -123,11 +123,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             }
 
             if (existing.status() == Status.COMPLETE) {
-                if (!existing.requestFingerprint().equals(context.requestFingerprint())) {
+                if (isMismatch(existing.requestFingerprint(), context.requestFingerprint())) {
                     return AcquireResult.fingerprintMismatch(
                             existing.requestFingerprint(), context.requestFingerprint());
                 }
-                return AcquireResult.duplicate(existing.response());
+                return AcquireResult.duplicate(existing.payload());
             }
 
             // FAILED or stale IN_PROGRESS — attempt to claim the lock atomically.
@@ -157,7 +157,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
+    public void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl) {
+        Objects.requireNonNull(payload, "payload must not be null");
         store.compute(key, (k, existing) -> {
             if (existing == null) {
                 throw new IdempotencyLeaseLostException(
@@ -170,7 +171,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             requireLease(existing, leaseId, key, "complete");
             return new Entry(
                     Status.COMPLETE,
-                    response,
+                    payload,
                     null,
                     clock.instant().plus(ttl),
                     null,
@@ -220,6 +221,17 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     entry.requestFingerprint(),
                     entry.leaseId());
         });
+    }
+
+    /**
+     * A fingerprint present on only one side is not a mismatch — a caller that does not
+     * fingerprint its payload cannot contradict one that does. See
+     * {@link IdempotencyStore#tryAcquire}.
+     */
+    private static boolean isMismatch(String storedFingerprint, String incomingFingerprint) {
+        return storedFingerprint != null
+                && incomingFingerprint != null
+                && !storedFingerprint.equals(incomingFingerprint);
     }
 
     private static void requireLease(Entry entry, String leaseId, String key, String operation) {

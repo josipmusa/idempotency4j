@@ -20,7 +20,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
+import io.github.josipmusa.idempotency.core.NoPayload;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
@@ -37,6 +39,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -289,16 +292,14 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
-        Objects.requireNonNull(response, "response must not be null");
+    public void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl) {
+        Objects.requireNonNull(payload, "payload must not be null");
         requirePositiveDuration(ttl, "ttl");
         try (Connection conn = dataSource.getConnection()) {
             Instant now = currentTime(conn);
             try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
-                ps.setInt(1, response.statusCode());
-                ps.setString(2, headersToJson(response.headers()));
-                ps.setBytes(3, response.body());
-                setTimestamp(ps, 4, response.completedAt());
+                bindPayload(ps, payload);
+                setTimestamp(ps, 4, payload.completedAt());
                 setTimestamp(ps, 5, now.plus(ttl));
                 ps.setString(6, key);
                 ps.setString(7, leaseId);
@@ -309,6 +310,29 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             }
         } catch (SQLException e) {
             throw unavailable("complete key '" + key + "'", e);
+        }
+    }
+
+    /**
+     * Binds the response columns of {@link #COMPLETE}.
+     *
+     * <p>{@link NoPayload} leaves {@code response_code}, {@code response_headers} and
+     * {@code response_body} NULL — those columns are already nullable, so no schema change
+     * is needed. A NULL {@code response_code} on a COMPLETE row is what
+     * {@link #readPayload} reads back as {@code NoPayload}.
+     */
+    private static void bindPayload(PreparedStatement ps, IdempotencyPayload payload) throws SQLException {
+        switch (payload) {
+            case StoredResponse response -> {
+                ps.setInt(1, response.statusCode());
+                ps.setString(2, headersToJson(response.headers()));
+                ps.setBytes(3, response.body());
+            }
+            case NoPayload ignored -> {
+                ps.setNull(1, Types.INTEGER);
+                ps.setNull(2, Types.VARCHAR);
+                ps.setNull(3, Types.VARBINARY);
+            }
         }
     }
 
@@ -469,15 +493,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
                 if ("COMPLETE".equals(status)) {
                     String storedFingerprint = rs.getString("request_fingerprint");
-                    if (storedFingerprint == null) {
-                        throw new IdempotencyCorruptRecordException(
-                                "Completed JDBC record for key '" + context.key() + "' has no request fingerprint");
-                    }
-                    if (!storedFingerprint.equals(context.requestFingerprint())) {
+                    if (isMismatch(storedFingerprint, context.requestFingerprint())) {
                         return RowInspection.resolved(
                                 AcquireResult.fingerprintMismatch(storedFingerprint, context.requestFingerprint()));
                     }
-                    return RowInspection.resolved(AcquireResult.duplicate(readResponse(rs)));
+                    return RowInspection.resolved(AcquireResult.duplicate(readPayload(rs)));
                 }
 
                 Instant now = currentTime(conn);
@@ -545,23 +565,41 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    private StoredResponse readResponse(ResultSet rs) throws SQLException {
+    /**
+     * Materializes the payload of a COMPLETE row.
+     *
+     * <p>A NULL {@code response_code} means the record was completed by a caller with
+     * nothing to replay, and reads back as {@link NoPayload}.
+     */
+    private IdempotencyPayload readPayload(ResultSet rs) throws SQLException {
         int statusCode = rs.getInt("response_code");
-        if (rs.wasNull()) {
-            throw new IdempotencyCorruptRecordException("Completed JDBC record has no response_code value");
-        }
-        String headersJson = rs.getString("response_headers");
-        byte[] body = rs.getBytes("response_body");
+        boolean noResponse = rs.wasNull();
         Timestamp completedAtTs = rs.getTimestamp("completed_at");
         if (completedAtTs == null) {
             throw new IdempotencyCorruptRecordException("Completed JDBC record has no completed_at value");
         }
+        Instant completedAt = completedAtTs.toInstant();
+        if (noResponse) {
+            return NoPayload.at(completedAt);
+        }
 
+        String headersJson = rs.getString("response_headers");
+        byte[] body = rs.getBytes("response_body");
         Map<String, List<String>> headers = headersJson != null ? jsonToHeaders(headersJson) : Map.of();
         byte[] responseBody = body != null ? body : new byte[0];
-        Instant completedAt = completedAtTs.toInstant();
 
         return new StoredResponse(statusCode, headers, responseBody, completedAt);
+    }
+
+    /**
+     * A fingerprint present on only one side is not a mismatch — a caller that does not
+     * fingerprint its payload cannot contradict one that does. See
+     * {@link IdempotencyStore#tryAcquire}.
+     */
+    private static boolean isMismatch(String storedFingerprint, String incomingFingerprint) {
+        return storedFingerprint != null
+                && incomingFingerprint != null
+                && !storedFingerprint.equals(incomingFingerprint);
     }
 
     private boolean isDuplicateKeyViolation(SQLException e) {

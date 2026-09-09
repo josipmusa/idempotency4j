@@ -17,18 +17,21 @@ package io.github.josipmusa.idempotency.core;
 
 import java.time.Duration;
 import java.util.Objects;
-import java.util.regex.Pattern;
 
 /**
  * Application-level defaults for idempotency behavior.
  *
  * <p>Used by the adapter layer to resolve {@link IdempotencyContext} when
- * per-request values are not specified. The engine itself never reads this
+ * per-operation values are not specified. The engine itself never reads this
  * class — it only sees the fully resolved context.
+ *
+ * <p>Transport-specific settings do not live here. The HTTP header carrying
+ * the key, for instance, is configured on
+ * {@code io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig}.
  *
  * <h2>Defaults</h2>
  * <ul>
- *   <li>{@code defaultTtl} = 24 hours — how long completed responses are kept</li>
+ *   <li>{@code defaultTtl} = 24 hours — how long completed payloads are kept</li>
  *   <li>{@code defaultLockTimeout} = 10 seconds — how long a second caller waits</li>
  * </ul>
  */
@@ -36,12 +39,10 @@ public final class IdempotencyConfig {
 
     private final Duration defaultTtl;
     private final Duration defaultLockTimeout;
-    private final String keyHeader;
 
     private IdempotencyConfig(Builder builder) {
         this.defaultTtl = builder.defaultTtl;
         this.defaultLockTimeout = builder.defaultLockTimeout;
-        this.keyHeader = builder.keyHeader;
     }
 
     /**
@@ -54,8 +55,8 @@ public final class IdempotencyConfig {
     }
 
     /**
-     * Returns an {@link IdempotencyConfig} with all defaults: 24h TTL,
-     * 10s lock timeout, and {@code "Idempotency-Key"} header.
+     * Returns an {@link IdempotencyConfig} with all defaults: 24h TTL and a
+     * 10s lock timeout.
      *
      * @return a default config instance
      */
@@ -71,29 +72,21 @@ public final class IdempotencyConfig {
         return defaultLockTimeout;
     }
 
-    public String keyHeader() {
-        return keyHeader;
-    }
-
     @Override
     public String toString() {
-        return "IdempotencyConfig{defaultTtl=" + defaultTtl + ", defaultLockTimeout=" + defaultLockTimeout
-                + ", keyHeader='" + keyHeader + "'}";
+        return "IdempotencyConfig{defaultTtl=" + defaultTtl + ", defaultLockTimeout=" + defaultLockTimeout + "}";
     }
 
     public static final class Builder {
-        // RFC 7230 §3.2.6: header field names are tokens composed of tchar characters
-        private static final Pattern HEADER_TOKEN = Pattern.compile("[!#$%&'*+\\-.0-9A-Za-z^_`|~]+");
 
         private Duration defaultTtl = Duration.ofHours(24);
         private Duration defaultLockTimeout = Duration.ofSeconds(10);
-        private String keyHeader = "Idempotency-Key";
 
         /**
          * Sets the default TTL for completed idempotency records.
          *
          * <p>After this duration the record expires and the key can be reused
-         * for a new request. Defaults to 24 hours.
+         * for a new operation. Defaults to 24 hours.
          *
          * @param ttl must be at least one millisecond
          * @return this builder
@@ -106,7 +99,7 @@ public final class IdempotencyConfig {
         }
 
         /**
-         * Sets the default lock timeout for in-flight requests.
+         * Sets the default lock timeout for in-flight operations.
          *
          * <p>A second caller arriving while the key is IN_PROGRESS will block
          * for up to this duration waiting for a result. If the holder does not
@@ -133,28 +126,12 @@ public final class IdempotencyConfig {
         }
 
         /**
-         * Sets the HTTP header name used to carry the idempotency key.
-         *
-         * <p>Defaults to {@code "Idempotency-Key"} per the IETF draft standard.
-         * Override if your API uses a different header convention
-         * (e.g. {@code "X-Idempotency-Key"}).
-         *
-         * @param keyHeader must not be null or blank
-         * @return this builder
-         * @throws IllegalArgumentException if {@code keyHeader} is blank
-         */
-        public Builder keyHeader(String keyHeader) {
-            this.keyHeader = keyHeader;
-            return this;
-        }
-
-        /**
          * Constructs the {@link IdempotencyConfig} with the configured values.
          *
          * @return a new immutable config instance
          * @throws IllegalArgumentException if any value fails validation
          *         ({@code defaultTtl} must be positive; {@code defaultLockTimeout}
-         *         must be &ge; 2 ms; {@code keyHeader} must not be blank)
+         *         must be &ge; 2 ms)
          */
         public IdempotencyConfig build() {
             if (defaultTtl.toMillis() < 1) {
@@ -164,13 +141,6 @@ public final class IdempotencyConfig {
                 throw new IllegalArgumentException(
                         "defaultLockTimeout must be at least 2ms (engine divides by 2 for heartbeat interval), got: "
                                 + defaultLockTimeout);
-            }
-            if (keyHeader == null || keyHeader.isBlank()) {
-                throw new IllegalArgumentException("keyHeader must not be blank");
-            }
-            if (!HEADER_TOKEN.matcher(keyHeader).matches()) {
-                throw new IllegalArgumentException("keyHeader '" + keyHeader
-                        + "' contains characters not permitted in an HTTP header name (RFC 7230 token)");
             }
             return new IdempotencyConfig(this);
         }

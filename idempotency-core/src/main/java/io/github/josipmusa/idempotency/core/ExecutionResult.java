@@ -30,9 +30,9 @@ public sealed interface ExecutionResult permits ExecutionResult.Executed, Execut
     /**
      * The action executed successfully. The adapter must now:
      * <ol>
-     *   <li>Capture the HTTP response that was written during the action</li>
-     *   <li>Call {@link IdempotencyStore#complete} with this result's lease ID and that response</li>
-     *   <li>Return the response to the client</li>
+     *   <li>Capture whatever the action produced (an HTTP response, or nothing)</li>
+     *   <li>Call {@link IdempotencyStore#complete} with this result's lease ID and that payload</li>
+     *   <li>Return the response to the caller</li>
      * </ol>
      */
     record Executed(String leaseId) implements ExecutionResult {
@@ -45,17 +45,21 @@ public sealed interface ExecutionResult permits ExecutionResult.Executed, Execut
     }
 
     /**
-     * The action was skipped — a previous request already completed this key.
-     * The adapter should replay the attached {@link StoredResponse} to the
-     * client as if the action had just run.
+     * The action was skipped — a previous operation already completed this key.
+     * The adapter should replay the attached {@link IdempotencyPayload} as if
+     * the action had just run.
      */
-    record Duplicate(StoredResponse response) implements ExecutionResult {}
+    record Duplicate(IdempotencyPayload payload) implements ExecutionResult {
+        public Duplicate {
+            Objects.requireNonNull(payload, "payload must not be null");
+        }
+    }
 
     static ExecutionResult executed(String leaseId) {
         return new Executed(leaseId);
     }
 
-    static ExecutionResult duplicate(StoredResponse response) {
-        return new Duplicate(response);
+    static ExecutionResult duplicate(IdempotencyPayload payload) {
+        return new Duplicate(payload);
     }
 }

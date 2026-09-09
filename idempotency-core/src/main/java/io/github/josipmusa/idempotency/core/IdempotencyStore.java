@@ -63,7 +63,7 @@ public interface IdempotencyStore {
      *   <li>{@link AcquireResult.Acquired} — lock obtained, caller should
      *       execute the action and then call {@link #complete}.</li>
      *   <li>{@link AcquireResult.Duplicate} — key was already completed,
-     *       response is attached for replay.</li>
+     *       the stored payload is attached for replay.</li>
      *   <li>{@link AcquireResult.LockTimeout} — key is in-flight and the
      *       caller's {@code lockTimeout} expired while waiting.</li>
      *   <li>{@link AcquireResult.FingerprintMismatch} — the key is COMPLETE but
@@ -73,6 +73,18 @@ public interface IdempotencyStore {
      * <p>Stale locks (IN_PROGRESS with expired {@code lockExpiresAt}) are
      * stolen atomically — the caller receives {@code Acquired} as if the
      * key were new. FAILED keys are reclaimed the same way.
+     *
+     * <p><strong>Fingerprint comparison.</strong>
+     * {@link IdempotencyContext#requestFingerprint()} is optional, so a stored
+     * record and an incoming acquisition may disagree about whether a fingerprint
+     * exists at all. Every implementation must apply the same rule:
+     * <ul>
+     *   <li>Both present and different — {@link AcquireResult.FingerprintMismatch}.</li>
+     *   <li>Both present and equal, or both absent — proceed normally.</li>
+     *   <li>One present and the other absent — <strong>not</strong> a mismatch;
+     *       proceed normally (duplicate or in-flight, as the state dictates).
+     *       A caller that does not fingerprint cannot contradict one that does.</li>
+     * </ul>
      *
      * @param context contains the key, TTL, and lockTimeout for this request
      * @return the acquisition outcome — never null
@@ -84,23 +96,28 @@ public interface IdempotencyStore {
     AcquireResult tryAcquire(IdempotencyContext context);
 
     /**
-     * Transitions an IN_PROGRESS key to COMPLETE with the given response.
+     * Transitions an IN_PROGRESS key to COMPLETE with the given payload.
      *
      * <p>Called by the adapter (not the engine) after the action has
-     * executed and the HTTP response has been captured. The stored
-     * response will be returned to subsequent callers via
+     * executed and its result has been captured. The stored payload
+     * will be returned to subsequent callers via
      * {@link AcquireResult.Duplicate} until {@code ttl} expires.
+     *
+     * <p>Implementations must round-trip every {@link IdempotencyPayload}
+     * variant: a {@link StoredResponse} replays as an equal
+     * {@code StoredResponse}, and a {@link NoPayload} replays as a
+     * {@code NoPayload} carrying the same {@code completedAt}.
      *
      * @param key      the idempotency key, must match a prior {@code tryAcquire}
      * @param leaseId  the lease returned by that successful {@code tryAcquire}
-     * @param response the HTTP response to store for duplicate replay
+     * @param payload  what to store for duplicate replay
      * @param ttl      how long to keep the completed entry before expiry
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException
      *         if the key does not exist, is not IN_PROGRESS, or is owned by a different lease
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException
      *         if the mutation was accepted but requested durability could not be confirmed
      */
-    void complete(String key, String leaseId, StoredResponse response, Duration ttl);
+    void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl);
 
     /**
      * Transitions an IN_PROGRESS key to FAILED, allowing it to be retried.

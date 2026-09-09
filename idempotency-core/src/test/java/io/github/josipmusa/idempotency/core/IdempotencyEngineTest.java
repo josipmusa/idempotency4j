@@ -85,7 +85,7 @@ class IdempotencyEngineTest {
 
         assertThat(result).isInstanceOf(ExecutionResult.Duplicate.class);
         ExecutionResult.Duplicate duplicate = (ExecutionResult.Duplicate) result;
-        assertThat(duplicate.response()).isSameAs(response);
+        assertThat(duplicate.payload()).isSameAs(response);
     }
 
     @Test
