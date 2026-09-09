@@ -15,8 +15,10 @@
  */
 package io.github.josipmusa.idempotency.jdbc;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
-import io.github.josipmusa.idempotency.core.HeaderJson;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
@@ -130,6 +132,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private final DataSource dataSource;
     private final long pollIntervalMs;
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
 
     public JdbcIdempotencyStore(DataSource dataSource) {
         this(dataSource, true);
@@ -611,13 +615,21 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     // --- JSON serialization ---
 
     static String headersToJson(Map<String, List<String>> headers) {
-        return HeaderJson.encode(headers);
+        try {
+            return OBJECT_MAPPER.writeValueAsString(headers);
+        } catch (JsonProcessingException e) {
+            throw new IdempotencyStoreException("Failed to serialize response headers to JSON", e);
+        }
     }
 
     static Map<String, List<String>> jsonToHeaders(String json) {
         if (json == null || json.equals("{}")) {
             return Map.of();
         }
-        return HeaderJson.decode(json);
+        try {
+            return OBJECT_MAPPER.readValue(json, HEADERS_TYPE);
+        } catch (JsonProcessingException e) {
+            throw new IdempotencyCorruptRecordException("Failed to deserialize response headers from JSON", e);
+        }
     }
 }
