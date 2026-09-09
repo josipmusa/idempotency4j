@@ -783,11 +783,16 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "failed-expiry-contract";
 
-        // Acquire with a very short lock
-        acquire(s, contextFor(key, Duration.ofMillis(50)));
+        // release() dates the FAILED record at now + lockTimeout, so lockTimeout is also the
+        // budget this test has between release() and purgeExpired(). Keep it far above the
+        // round-trip cost of those two calls: a 50ms budget was roughly the cost of the calls
+        // themselves against a containerised database and made this test flaky on CI.
+        Duration lockTimeout = Duration.ofSeconds(2);
+
+        acquire(s, contextFor(key, lockTimeout));
 
         // Wait for the lock to expire, then release
-        Thread.sleep(100);
+        Thread.sleep(lockTimeout.toMillis() + 100);
         release(s, key);
 
         // Purge immediately — the FAILED record should NOT be eligible yet.
