@@ -71,15 +71,15 @@ public final class IdempotencyEngine {
      * Executes the given action idempotently.
      *
      * <p>If the key is new, acquires the lock, starts a heartbeat, and runs the
-     * action. If the key was already completed, returns the stored response
+     * action. If the key was already completed, returns the stored payload
      * without running the action. If the key is in-flight and the lock timeout
      * is exceeded, throws {@link IdempotencyLockTimeoutException}.
      *
      * <p>When {@link ExecutionResult.Executed} is returned, the <strong>caller</strong>
      * (adapter) is responsible for:
      * <ol>
-     *   <li>Capturing the HTTP response produced by the action</li>
-     *   <li>Calling {@link IdempotencyStore#complete} with the returned lease and that response</li>
+     *   <li>Capturing whatever the action produced (an HTTP response, or nothing)</li>
+     *   <li>Calling {@link IdempotencyStore#complete} with the returned lease and that payload</li>
      * </ol>
      * If {@code complete} throws after a successful execution, the response has
      * already been produced and should still be sent to the client. The store's state
@@ -90,7 +90,7 @@ public final class IdempotencyEngine {
      * @param context fully resolved idempotency context (key, ttl, lockTimeout)
      * @param action  the business logic to execute — only runs for new keys
      * @return {@link ExecutionResult.Executed} if the action ran, or
-     *         {@link ExecutionResult.Duplicate} with the stored response
+     *         {@link ExecutionResult.Duplicate} with the stored payload
      * @throws IdempotencyLockTimeoutException if the key is in-flight and the
      *         lock timeout expired while waiting
      * @throws Exception if the action itself throws — the original exception
@@ -101,7 +101,7 @@ public final class IdempotencyEngine {
         Objects.requireNonNull(action, "action must not be null");
         return switch (store.tryAcquire(context)) {
             case AcquireResult.Acquired acquired -> runWithHeartbeat(context, acquired.leaseId(), action);
-            case AcquireResult.Duplicate d -> ExecutionResult.duplicate(d.response());
+            case AcquireResult.Duplicate d -> ExecutionResult.duplicate(d.payload());
             case AcquireResult.LockTimeout ignored -> throw new IdempotencyLockTimeoutException(
                     context.key(), context.lockTimeout());
             case AcquireResult.FingerprintMismatch fm -> throw new IdempotencyFingerprintMismatchException(

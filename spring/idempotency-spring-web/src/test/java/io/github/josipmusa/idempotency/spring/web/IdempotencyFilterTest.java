@@ -61,7 +61,7 @@ class IdempotencyFilterTest {
         handlerMapping = mock(RequestMappingHandlerMapping.class);
         IdempotencyConfig idempotencyConfig = IdempotencyConfig.defaults();
         registry = new IdempotentHandlerRegistry(handlerMapping, idempotencyConfig);
-        filter = new IdempotencyFilter(engine, store, idempotencyConfig, handlerMapping, registry);
+        filter = new IdempotencyFilter(engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry);
 
         request = new MockHttpServletRequest();
         response = new MockHttpServletResponse();
@@ -376,7 +376,7 @@ class IdempotencyFilterTest {
         request.setContent("this body is definitely longer than ten bytes".getBytes());
 
         IdempotencyFilter limitedFilter =
-                new IdempotencyFilter(engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, 10);
+                new IdempotencyFilter(engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, 10);
 
         limitedFilter.doFilter(request, response, filterChain);
 
@@ -402,7 +402,7 @@ class IdempotencyFilterTest {
         request.addHeader("Idempotency-Key", "key-123");
         request.setContent("0123456789".getBytes()); // exactly 10 bytes
         IdempotencyFilter limitedFilter =
-                new IdempotencyFilter(engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, 10);
+                new IdempotencyFilter(engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, 10);
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
@@ -461,7 +461,7 @@ class IdempotencyFilterTest {
                 response.completedAt());
 
         IdempotencyFilter filterWithSanitizer = new IdempotencyFilter(
-                engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);
+                engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);
 
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
@@ -494,7 +494,7 @@ class IdempotencyFilterTest {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         IdempotencyFilter filterWithFailingSanitizer = new IdempotencyFilter(
-                engine, store, IdempotencyConfig.defaults(), handlerMapping, registry, -1L, ignored -> {
+                engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, ignored -> {
                     throw new IllegalStateException("sanitizer failed");
                 });
         doAnswer(invocation -> {
@@ -560,6 +560,20 @@ class IdempotencyFilterTest {
         when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
         registry.afterSingletonsInstantiated();
         when(handlerMapping.getHandler(request)).thenReturn(chain);
+    }
+
+    @Test
+    void When_DuplicateCarriesNoPayload_Expect_NoContentMarkedAsReplayed() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(NoPayload.at(Instant.now())));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(204);
+        assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
+        assertThat(response.getContentAsByteArray()).isEmpty();
+        verify(filterChain, never()).doFilter(any(), any());
     }
 
     private StoredResponse storedResponse() {

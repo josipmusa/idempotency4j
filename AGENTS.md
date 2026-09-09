@@ -35,11 +35,13 @@ Always pass `-am` with `-pl` so upstream SNAPSHOT modules build from source.
 
 Three layers with strict responsibility boundaries (documented in `IdempotencyEngine` and `IdempotencyStore` Javadoc - read those before touching the lifecycle):
 
-- **Engine** (`idempotency-core`): framework-agnostic orchestrator. Calls `tryAcquire`, runs the action with a lock-extending heartbeat (fires at lockTimeout/2), calls `release` on failure. Never calls `complete`.
-- **Adapter** (`spring/idempotency-spring-web`): `IdempotencyFilter` builds the context, invokes the engine, captures the HTTP response, and is the one that calls `store.complete()` with the engine-provided lease. Maps exceptions to HTTP: lock timeout -> 503, fingerprint mismatch -> 422.
+- **Engine** (`idempotency-core`): transport- and framework-agnostic orchestrator - no HTTP types live here, so non-HTTP callers drive it directly. Calls `tryAcquire`, runs the action with a lock-extending heartbeat (fires at lockTimeout/2), calls `release` on failure. Never calls `complete`.
+- **Adapter** (`spring/idempotency-spring-web`): `IdempotencyFilter` builds the context, invokes the engine, captures the HTTP response, and is the one that calls `store.complete()` with the engine-provided lease. Servlet translation (capture, replay, error bodies) lives in `HttpIdempotencyMapper`; HTTP-only settings live in `WebIdempotencyConfig` and `ResponseSanitizer`. Maps exceptions to HTTP: lock timeout -> 503, fingerprint mismatch -> 422.
 - **Store** (`providers/*`): implements the `IdempotencyStore` SPI. All blocking, waiting, and stale-lock stealing happens inside `tryAcquire` - the engine never polls or retries.
 
 Key state machine (in `IdempotencyStore` Javadoc): new -> IN_PROGRESS -> COMPLETE, or IN_PROGRESS -> FAILED on error (reclaimable by the next `tryAcquire`). Expired IN_PROGRESS locks are stolen atomically. Every acquisition has a lease; complete, release, and heartbeat mutations must match it to fence stale owners.
+
+Completion stores an `IdempotencyPayload`: a `StoredResponse` for HTTP, or `NoPayload` when there is nothing to replay. The request fingerprint is optional; two acquisitions mismatch only when both carry one and they differ.
 
 ### Module dependency rules
 

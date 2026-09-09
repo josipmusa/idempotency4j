@@ -233,7 +233,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        assertThat(((AcquireResult.Duplicate) result).response().body()).isEqualTo(binary);
+        assertThat(storedResponseOf(result).body()).isEqualTo(binary);
     }
 
     @Test
@@ -247,7 +247,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        StoredResponse replayed = ((AcquireResult.Duplicate) result).response();
+        StoredResponse replayed = storedResponseOf(result);
         assertThat(replayed.statusCode()).isEqualTo(204);
         assertThat(replayed.body()).isEmpty();
         assertThat(replayed.headers()).isEmpty();
@@ -358,7 +358,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
         AcquireResult result = acquire(s, contextFor(key));
 
-        assertThat(((AcquireResult.Duplicate) result).response().headers()).isEqualTo(headers);
+        assertThat(storedResponseOf(result).headers()).isEqualTo(headers);
     }
 
     @Test
@@ -454,7 +454,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
         AcquireResult retry = normal.tryAcquire(contextFor(key));
         assertThat(retry).isInstanceOf(AcquireResult.Duplicate.class);
-        assertThat(((AcquireResult.Duplicate) retry).response().body()).isEqualTo("saved".getBytes());
+        assertThat(storedResponseOf(retry).body()).isEqualTo("saved".getBytes());
     }
 
     @Test

@@ -19,7 +19,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
+import io.github.josipmusa.idempotency.core.NoPayload;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
@@ -92,10 +94,16 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     static final String FORMAT_VERSION = "1";
 
     private static final long MAX_POLL_INTERVAL_MS = 1_000;
+    private static final byte[] EMPTY = new byte[0];
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
 
-    /** KEYS: record. ARGV: lock timeout, TTL, grace, fingerprint, lease, owner, format. */
+    /**
+     * KEYS: record. ARGV: lock timeout, TTL, grace, fingerprint, lease, owner, format.
+     *
+     * <p>The fingerprint argument is the empty string when the caller supplied none, and is
+     * stored as such. An absent fingerprint on either side never mismatches.
+     */
     private static final LuaScript ACQUIRE = LuaScript.of(
             """
             local rec = KEYS[1]
@@ -116,7 +124,9 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 local storedFingerprint = redis.call('HGET', rec, 'fingerprint')
                 if not expiresAt or not storedFingerprint then return {'CORRUPT', 'complete fields'} end
                 if expiresAt > now then
-                    if storedFingerprint ~= ARGV[4] then return {'MISMATCH', storedFingerprint} end
+                    if storedFingerprint ~= '' and ARGV[4] ~= '' and storedFingerprint ~= ARGV[4] then
+                        return {'MISMATCH', storedFingerprint}
+                    end
                     return {'DUPLICATE',
                             redis.call('HGET', rec, 'code') or '',
                             redis.call('HGET', rec, 'headers') or '',
@@ -151,7 +161,12 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             return {'ACQUIRED'}
             """);
 
-    /** KEYS: record. ARGV: lease, TTL, grace, code, headers, body, completed, owner, format. */
+    /**
+     * KEYS: record. ARGV: lease, TTL, grace, code, headers, body, completed, owner, format.
+     *
+     * <p>The code argument is the empty string for a record completed with no payload to
+     * replay; {@code headers} and {@code body} are empty alongside it.
+     */
     private static final LuaScript COMPLETE = LuaScript.of(
             """
             local rec = KEYS[1]
@@ -322,9 +337,24 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void complete(String key, String leaseId, StoredResponse response, Duration ttl) {
-        Objects.requireNonNull(response, "response must not be null");
+    public void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl) {
+        Objects.requireNonNull(payload, "payload must not be null");
         requireMillisecondDuration(ttl, "ttl");
+        byte[] code;
+        byte[] headers;
+        byte[] body;
+        switch (payload) {
+            case StoredResponse response -> {
+                code = arg(response.statusCode());
+                headers = headersToJson(response.headers());
+                body = response.body();
+            }
+            case NoPayload ignored -> {
+                code = EMPTY;
+                headers = EMPTY;
+                body = EMPTY;
+            }
+        }
         List<Object> reply = eval(
                 COMPLETE,
                 "complete key '" + key + "'",
@@ -332,10 +362,10 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 arg(leaseId),
                 arg(ttl.toMillis()),
                 arg(graceMs),
-                arg(response.statusCode()),
-                headersToJson(response.headers()),
-                response.body(),
-                arg(response.completedAt().toEpochMilli()),
+                code,
+                headers,
+                body,
+                arg(payload.completedAt().toEpochMilli()),
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
         requireOk(reply, key, "complete");
@@ -418,7 +448,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 arg(context.lockTimeout().toMillis()),
                 arg(context.ttl().toMillis()),
                 arg(graceMs),
-                arg(context.requestFingerprint()),
+                arg(context.fingerprint().orElse("")),
                 arg(leaseId),
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
@@ -432,19 +462,29 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             case "BUSY" -> null;
             case "MISMATCH" -> AcquireResult.fingerprintMismatch(
                     token(reply, 1, "acquire key '" + context.key() + "'"), context.requestFingerprint());
-            case "DUPLICATE" -> AcquireResult.duplicate(readResponse(reply, context.key()));
+            case "DUPLICATE" -> AcquireResult.duplicate(readPayload(reply, context.key()));
             case "FOREIGN" -> throw foreignRecord(context.key());
             case "CORRUPT" -> throw corruptRecord(context.key(), reply);
             default -> throw unexpectedOutcome(outcome, context.key(), "acquire");
         };
     }
 
-    private StoredResponse readResponse(List<Object> reply, String key) {
+    /**
+     * Materializes the payload carried by a {@code DUPLICATE} reply.
+     *
+     * <p>An empty {@code code} field means the record was completed by a caller with nothing
+     * to replay, and reads back as {@link NoPayload}.
+     */
+    private IdempotencyPayload readPayload(List<Object> reply, String key) {
         try {
-            int statusCode = Integer.parseInt(token(reply, 1, "read response"));
+            String code = token(reply, 1, "read response");
+            Instant completedAt = Instant.ofEpochMilli(Long.parseLong(token(reply, 4, "read response")));
+            if (code.isEmpty()) {
+                return NoPayload.at(completedAt);
+            }
+            int statusCode = Integer.parseInt(code);
             Map<String, List<String>> headers = jsonToHeaders(bytes(reply, 2, "read response"));
             byte[] body = bytes(reply, 3, "read response");
-            Instant completedAt = Instant.ofEpochMilli(Long.parseLong(token(reply, 4, "read response")));
             return new StoredResponse(statusCode, headers, body, completedAt);
         } catch (IdempotencyCorruptRecordException e) {
             throw e;

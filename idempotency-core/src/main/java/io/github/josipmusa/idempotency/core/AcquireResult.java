@@ -25,7 +25,7 @@ import java.util.Objects;
  * <pre>{@code
  * switch (store.tryAcquire(context)) {
  *     case AcquireResult.Acquired a   -> // run the action
- *     case AcquireResult.Duplicate d  -> // replay d.response()
+ *     case AcquireResult.Duplicate d  -> // replay d.payload()
  *     case AcquireResult.LockTimeout t -> // timeout, reject request
  *     case AcquireResult.FingerprintMismatch fm -> // reject: key reused with different body
  * }
@@ -53,10 +53,14 @@ public sealed interface AcquireResult
     }
 
     /**
-     * Key was already completed — contains the stored response for replay.
+     * Key was already completed — carries the stored payload for replay.
      * The action must NOT be executed again.
      */
-    record Duplicate(StoredResponse response) implements AcquireResult {}
+    record Duplicate(IdempotencyPayload payload) implements AcquireResult {
+        public Duplicate {
+            Objects.requireNonNull(payload, "payload must not be null");
+        }
+    }
 
     /**
      * Key is in-flight (held by another caller) and this caller's
@@ -66,9 +70,12 @@ public sealed interface AcquireResult
     record LockTimeout(String key) implements AcquireResult {}
 
     /**
-     * Key was already completed but the request fingerprint does not match
-     * the one stored with the original request. The caller should return
-     * HTTP 422 to indicate the key was reused with a different payload.
+     * Key was already completed and both the stored and the incoming request
+     * carry a fingerprint, but the two differ. An HTTP adapter should return
+     * 422 to indicate the key was reused with a different payload.
+     *
+     * <p>A missing fingerprint on either side is not a mismatch — see
+     * {@link IdempotencyStore#tryAcquire}.
      */
     record FingerprintMismatch(String storedFingerprint, String receivedFingerprint) implements AcquireResult {}
 
@@ -76,8 +83,8 @@ public sealed interface AcquireResult
         return new Acquired(leaseId);
     }
 
-    static AcquireResult duplicate(StoredResponse response) {
-        return new Duplicate(response);
+    static AcquireResult duplicate(IdempotencyPayload payload) {
+        return new Duplicate(payload);
     }
 
     static AcquireResult lockTimeout(String key) {

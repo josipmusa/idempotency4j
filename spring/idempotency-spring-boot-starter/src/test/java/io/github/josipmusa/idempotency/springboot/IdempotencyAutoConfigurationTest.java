@@ -21,8 +21,9 @@ import static org.mockito.Mockito.mock;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
+import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
+import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -72,7 +73,7 @@ class IdempotencyAutoConfigurationTest {
     @Test
     void When_CustomConfigBeanPresent_Expect_AutoConfiguredConfigSkipped() {
         IdempotencyConfig customConfig =
-                IdempotencyConfig.builder().keyHeader("X-Custom-Key").build();
+                IdempotencyConfig.builder().defaultTtl(Duration.ofHours(3)).build();
         contextRunner.withBean(IdempotencyConfig.class, () -> customConfig).run(context -> {
             assertThat(context).hasSingleBean(IdempotencyConfig.class);
             assertThat(context.getBean(IdempotencyConfig.class)).isSameAs(customConfig);
@@ -91,9 +92,9 @@ class IdempotencyAutoConfigurationTest {
     void When_DefaultProperties_Expect_AppliedToConfig() {
         contextRunner.run(context -> {
             IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
-            assertThat(config.keyHeader()).isEqualTo("Idempotency-Key");
             assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(24));
             assertThat(config.defaultLockTimeout()).isEqualTo(Duration.ofSeconds(10));
+            assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader()).isEqualTo("Idempotency-Key");
         });
     }
 
@@ -106,9 +107,10 @@ class IdempotencyAutoConfigurationTest {
                         "idempotency.default-lock-timeout=PT30S")
                 .run(context -> {
                     IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
-                    assertThat(config.keyHeader()).isEqualTo("X-Request-Id");
                     assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(2));
                     assertThat(config.defaultLockTimeout()).isEqualTo(Duration.ofSeconds(30));
+                    assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader())
+                            .isEqualTo("X-Request-Id");
                 });
     }
 
@@ -150,6 +152,18 @@ class IdempotencyAutoConfigurationTest {
                 .run(context -> {
                     assertThat(context).doesNotHaveBean(IdempotencyFilter.class);
                     assertThat(context).doesNotHaveBean(IdempotencyConfig.class);
+                    assertThat(context).doesNotHaveBean(WebIdempotencyConfig.class);
+                });
+    }
+
+    @Test
+    void When_CustomWebConfigBeanPresent_Expect_AutoConfiguredWebConfigSkipped() {
+        WebIdempotencyConfig customWebConfig = WebIdempotencyConfig.withKeyHeader("X-Custom-Key");
+        contextRunner
+                .withBean(WebIdempotencyConfig.class, () -> customWebConfig)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(WebIdempotencyConfig.class);
+                    assertThat(context.getBean(WebIdempotencyConfig.class)).isSameAs(customWebConfig);
                 });
     }
 

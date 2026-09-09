@@ -13,13 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.josipmusa.idempotency.core;
+package io.github.josipmusa.idempotency.spring.web;
+
+import io.github.josipmusa.idempotency.core.IdempotencyStore;
+import io.github.josipmusa.idempotency.core.StoredResponse;
 
 /**
  * SPI for sanitizing {@link StoredResponse} instances before they are persisted.
  *
- * <p>Called by the adapter layer (e.g. {@code IdempotencyFilter}) immediately
- * before {@link IdempotencyStore#complete}. The returned value is what gets
+ * <p>Called by {@link IdempotencyFilter} immediately before
+ * {@link IdempotencyStore#complete}. The returned value is what gets
  * stored and replayed on duplicate requests.
  *
  */

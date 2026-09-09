@@ -21,7 +21,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
+import io.github.josipmusa.idempotency.core.NoPayload;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Duration;
@@ -57,8 +59,8 @@ public abstract class IdempotencyStoreContract {
         return result;
     }
 
-    protected void complete(IdempotencyStore store, String key, StoredResponse response, Duration ttl) {
-        store.complete(key, activeLease(key), response, ttl);
+    protected void complete(IdempotencyStore store, String key, IdempotencyPayload payload, Duration ttl) {
+        store.complete(key, activeLease(key), payload, ttl);
     }
 
     protected void release(IdempotencyStore store, String key) {
@@ -89,6 +91,10 @@ public abstract class IdempotencyStoreContract {
         return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), fingerprint);
     }
 
+    protected IdempotencyContext contextWithoutFingerprint(String key) {
+        return IdempotencyContext.withoutFingerprint(key, Duration.ofHours(1), Duration.ofSeconds(5));
+    }
+
     private StoredResponse sampleResponse() {
         return new StoredResponse(200, Map.of("X-Request-Id", List.of("abc-123")), "hello".getBytes(), Instant.now());
     }
@@ -112,10 +118,10 @@ public abstract class IdempotencyStoreContract {
         AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
-        assertThat(duplicate.response().statusCode()).isEqualTo(200);
-        assertThat(duplicate.response().headers()).containsEntry("X-Request-Id", List.of("abc-123"));
-        assertThat(duplicate.response().body()).isEqualTo("hello".getBytes());
+        StoredResponse replayed = storedResponseOf(result);
+        assertThat(replayed.statusCode()).isEqualTo(200);
+        assertThat(replayed.headers()).containsEntry("X-Request-Id", List.of("abc-123"));
+        assertThat(replayed.body()).isEqualTo("hello".getBytes());
     }
 
     @Test
@@ -207,7 +213,7 @@ public abstract class IdempotencyStoreContract {
 
         AcquireResult replay = s.tryAcquire(secondContext);
         assertThat(replay).isInstanceOf(AcquireResult.Duplicate.class);
-        assertThat(((AcquireResult.Duplicate) replay).response().body()).isEqualTo("current".getBytes());
+        assertThat(storedResponseOf(replay).body()).isEqualTo("current".getBytes());
     }
 
     @Test
@@ -247,9 +253,9 @@ public abstract class IdempotencyStoreContract {
 
             assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
             AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
-            assertThat(duplicate.response().statusCode()).isEqualTo(200);
-            assertThat(duplicate.response().headers()).containsEntry("X-Request-Id", List.of("abc-123"));
-            assertThat(duplicate.response().body()).isEqualTo("hello".getBytes());
+            assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(200);
+            assertThat(storedResponseOf(duplicate).headers()).containsEntry("X-Request-Id", List.of("abc-123"));
+            assertThat(storedResponseOf(duplicate).body()).isEqualTo("hello".getBytes());
             assertThat(thread2ResultTime[0]).isGreaterThan(thread1CompleteTime[0]);
         } finally {
             executor.shutdownNow();
@@ -343,7 +349,7 @@ public abstract class IdempotencyStoreContract {
 
             results.stream()
                     .filter(r -> r instanceof AcquireResult.Duplicate)
-                    .map(r -> ((AcquireResult.Duplicate) r).response())
+                    .map(r -> storedResponseOf(r))
                     .forEach(r -> {
                         assertThat(r.statusCode()).isEqualTo(200);
                         assertThat(r.body()).isEqualTo("hello".getBytes());
@@ -392,8 +398,8 @@ public abstract class IdempotencyStoreContract {
         AcquireResult third = acquire(s, contextFor(key));
         assertThat(third).isInstanceOf(AcquireResult.Duplicate.class);
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
-        assertThat(duplicate.response().statusCode()).isEqualTo(200);
-        assertThat(duplicate.response().body()).isEqualTo("hello".getBytes());
+        assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(200);
+        assertThat(storedResponseOf(duplicate).body()).isEqualTo("hello".getBytes());
     }
 
     // --- extendLock contract ---
@@ -467,7 +473,7 @@ public abstract class IdempotencyStoreContract {
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
-        assertThat(duplicate.response().statusCode()).isEqualTo(200);
+        assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(200);
     }
 
     // --- Error contracts ---
@@ -552,8 +558,8 @@ public abstract class IdempotencyStoreContract {
         AcquireResult third = acquire(s, contextFor(key));
         assertThat(third).isInstanceOf(AcquireResult.Duplicate.class);
         AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
-        assertThat(duplicate.response().statusCode()).isEqualTo(201);
-        assertThat(duplicate.response().body()).isEqualTo("second".getBytes());
+        assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(201);
+        assertThat(storedResponseOf(duplicate).body()).isEqualTo("second".getBytes());
     }
 
     // --- Additional edge-case contracts ---
@@ -797,5 +803,140 @@ public abstract class IdempotencyStoreContract {
                 .as("FAILED record should survive an immediate purgeExpired() call; "
                         + "its expires_at must be now + lockTimeout, not the already-past lock_expires_at")
                 .isEqualTo(0);
+    }
+
+    // ── Optional fingerprint tests ─────────────────────────────────────
+
+    @Test
+    void When_NeitherStoredNorIncomingHasFingerprint_Expect_Duplicate() {
+        IdempotencyStore s = store();
+        String key = "fp-absent-absent";
+        acquire(s, contextWithoutFingerprint(key));
+        complete(s, key, sampleResponse(), Duration.ofHours(1));
+
+        var result = acquire(s, contextWithoutFingerprint(key));
+
+        assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
+    }
+
+    @Test
+    void When_StoredHasNoFingerprintButIncomingDoes_Expect_DuplicateNotMismatch() {
+        IdempotencyStore s = store();
+        String key = "fp-absent-present";
+        acquire(s, contextWithoutFingerprint(key));
+        complete(s, key, sampleResponse(), Duration.ofHours(1));
+
+        var result = acquire(s, contextFor(key, FINGERPRINT_A));
+
+        assertThat(result)
+                .as("A caller that fingerprints cannot mismatch a record stored without one")
+                .isInstanceOf(AcquireResult.Duplicate.class);
+    }
+
+    @Test
+    void When_StoredHasFingerprintButIncomingDoesNot_Expect_DuplicateNotMismatch() {
+        IdempotencyStore s = store();
+        String key = "fp-present-absent";
+        acquire(s, contextFor(key, FINGERPRINT_A));
+        complete(s, key, sampleResponse(), Duration.ofHours(1));
+
+        var result = acquire(s, contextWithoutFingerprint(key));
+
+        assertThat(result)
+                .as("A caller that does not fingerprint cannot contradict a record stored with one")
+                .isInstanceOf(AcquireResult.Duplicate.class);
+    }
+
+    @Test
+    void When_BothHaveDifferentFingerprints_Expect_FingerprintMismatch() {
+        IdempotencyStore s = store();
+        String key = "fp-present-different";
+        acquire(s, contextFor(key, FINGERPRINT_A));
+        complete(s, key, sampleResponse(), Duration.ofHours(1));
+
+        var result = acquire(s, contextFor(key, FINGERPRINT_B));
+
+        assertThat(result).isInstanceOf(AcquireResult.FingerprintMismatch.class);
+        var mismatch = (AcquireResult.FingerprintMismatch) result;
+        assertThat(mismatch.storedFingerprint()).isEqualTo(FINGERPRINT_A);
+        assertThat(mismatch.receivedFingerprint()).isEqualTo(FINGERPRINT_B);
+    }
+
+    @Test
+    void When_KeyAcquiredWithoutFingerprint_Expect_InFlightCallerStillBlocked() {
+        IdempotencyStore s = store();
+        String key = "fp-absent-in-flight";
+        acquire(s, contextWithoutFingerprint(key));
+
+        var result =
+                s.tryAcquire(IdempotencyContext.withoutFingerprint(key, Duration.ofHours(1), Duration.ofMillis(50)));
+
+        assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+    }
+
+    // ── Payload tests ──────────────────────────────────────────────────
+
+    @Test
+    void When_CompletedWithNoPayload_Expect_DuplicateReturnsNoPayloadWithStoredCompletedAt() {
+        IdempotencyStore s = store();
+        String key = "payload-none";
+        Instant completedAt = Instant.now().minusSeconds(7);
+
+        acquire(s, contextFor(key));
+        complete(s, key, NoPayload.at(completedAt), Duration.ofHours(1));
+
+        var result = acquire(s, contextFor(key));
+
+        assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
+        var payload = ((AcquireResult.Duplicate) result).payload();
+        assertThat(payload).isInstanceOf(NoPayload.class);
+        assertThat(payload.completedAt().toEpochMilli()).isEqualTo(completedAt.toEpochMilli());
+    }
+
+    @Test
+    void When_CompletedWithNoPayloadAndNoFingerprint_Expect_RoundTrips() {
+        IdempotencyStore s = store();
+        String key = "payload-none-no-fp";
+        Instant completedAt = Instant.now();
+
+        acquire(s, contextWithoutFingerprint(key));
+        complete(s, key, NoPayload.at(completedAt), Duration.ofHours(1));
+
+        var result = acquire(s, contextWithoutFingerprint(key));
+
+        assertThat(((AcquireResult.Duplicate) result).payload()).isInstanceOf(NoPayload.class);
+    }
+
+    @Test
+    void When_NoPayloadRecordIsReleased_Expect_KeyIsReacquirable() {
+        IdempotencyStore s = store();
+        String key = "payload-none-release";
+
+        acquire(s, contextWithoutFingerprint(key));
+        release(s, key);
+
+        assertThat(acquire(s, contextWithoutFingerprint(key))).isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_ResponseWithEmptyBodyCompleted_Expect_StillReadBackAsStoredResponse() {
+        IdempotencyStore s = store();
+        String key = "payload-empty-body";
+        var response = new StoredResponse(204, Map.of(), new byte[0], Instant.now());
+
+        acquire(s, contextFor(key));
+        complete(s, key, response, Duration.ofHours(1));
+
+        var payload = ((AcquireResult.Duplicate) acquire(s, contextFor(key))).payload();
+
+        assertThat(payload).isInstanceOf(StoredResponse.class);
+        assertThat(((StoredResponse) payload).statusCode()).isEqualTo(204);
+        assertThat(((StoredResponse) payload).body()).isEmpty();
+    }
+
+    protected static StoredResponse storedResponseOf(AcquireResult result) {
+        var payload = ((AcquireResult.Duplicate) result).payload();
+        assertThat(payload).isInstanceOf(StoredResponse.class);
+        return (StoredResponse) payload;
     }
 }

@@ -182,9 +182,42 @@ idempotency:
 
 Per-endpoint values in `@Idempotent` override these defaults.
 
+## Using the engine outside HTTP
+
+`idempotency-core` has no HTTP types in it. Drive the engine directly from a message listener, an
+event handler, or anything else that needs a key to run at most once - the annotation, the filter
+and `StoredResponse` are the Spring adapter's business, not the engine's.
+
+A caller with no request body to hash builds a context without a fingerprint, and completes with
+`NoPayload` because there is nothing for a duplicate to replay:
+
+```java
+IdempotencyEngine engine = new IdempotencyEngine(store, scheduler);
+
+IdempotencyContext context = IdempotencyContext.withoutFingerprint(
+        "order-shipped:" + event.id(), Duration.ofHours(24), Duration.ofSeconds(10));
+
+ExecutionResult result = engine.execute(context, () -> handler.handle(event));
+
+switch (result) {
+    case ExecutionResult.Executed executed ->
+            store.complete(context.key(), executed.leaseId(), NoPayload.at(Instant.now()), context.ttl());
+    case ExecutionResult.Duplicate ignored -> {
+        // already handled under this key - nothing to do
+    }
+}
+```
+
+As in the HTTP flow, the engine acquires the lock and runs the action with a heartbeat, but calling
+`complete` is the caller's job: only the caller knows what, if anything, is worth storing for a
+duplicate. Pass a fingerprint (`new IdempotencyContext(key, ttl, lockTimeout, sha256Hex)`) when the
+payload is worth guarding against key reuse, and a `StoredResponse` to `complete` when a duplicate
+should get a real result back.
+
 ## Framework support
 
-idempotency4j currently supports **Spring MVC (Servlet-based)** applications only.
+The bundled *adapter* supports **Spring MVC (Servlet-based)** applications only. The engine itself
+is transport-neutral - see [Using the engine outside HTTP](#using-the-engine-outside-http).
 
 | Runtime | Status |
 |---------|--------|
@@ -196,6 +229,8 @@ The autoconfiguration activates only when a Servlet-based Spring Web application
 ## Known limitations
 
 **No WebFlux/reactive support.** The filter is built on `OncePerRequestFilter` (Servlet API). A reactive `WebFilter`-based adapter is a candidate for a future release.
+
+**No messaging adapter.** Non-HTTP callers drive `IdempotencyEngine` directly; there is no ready-made listener integration yet.
 
 **Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
 
@@ -217,7 +252,7 @@ The store persists full HTTP response bodies. Depending on your endpoints this m
 - Configure `idempotency.purge.cron` to remove expired records promptly.
 - Audit which endpoints are annotated `@Idempotent`, what their responses contain, and their maximum response size.
 
-To strip or redact sensitive fields before storage, register a `ResponseSanitizer` bean. The default implementation is a no-op pass-through:
+To strip or redact sensitive fields before storage, register a `ResponseSanitizer` bean (`io.github.josipmusa.idempotency.spring.web.ResponseSanitizer`). The default implementation is a no-op pass-through:
 
 ```java
 @Bean
