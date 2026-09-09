@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
@@ -305,5 +306,52 @@ class IdempotencyEngineTest {
 
         assertThat(actionCalls).hasValue(0);
         verify(store).release("scheduler-rejected", LEASE_ID);
+    }
+
+    @Test
+    void When_Complete_Expect_DelegatesToStoreWithContextKey() {
+        IdempotencyContext context = defaultContext("complete-key");
+        StoredResponse payload = anyStoredResponse();
+
+        engine.complete(context, LEASE_ID, payload, context.ttl());
+
+        verify(store).complete("complete-key", LEASE_ID, payload, context.ttl());
+    }
+
+    @Test
+    void When_CompleteWithNoPayload_Expect_PayloadForwardedUnchanged() {
+        IdempotencyContext context =
+                IdempotencyContext.withoutFingerprint("no-payload-key", Duration.ofHours(1), Duration.ofSeconds(5));
+        NoPayload payload = NoPayload.at(Instant.now());
+
+        engine.complete(context, LEASE_ID, payload, context.ttl());
+
+        verify(store).complete("no-payload-key", LEASE_ID, payload, context.ttl());
+    }
+
+    @Test
+    void When_StoreCompleteThrows_Expect_ExceptionPropagatesUnchanged() {
+        IdempotencyContext context = defaultContext("durability-key");
+        IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
+        doThrow(failure).when(store).complete(any(), any(), any(), any());
+
+        assertThatThrownBy(() -> engine.complete(context, LEASE_ID, anyStoredResponse(), context.ttl()))
+                .isSameAs(failure);
+    }
+
+    @Test
+    void When_Complete_Expect_LockNotExtendedAgain() {
+        IdempotencyContext context = defaultContext("no-extend-key");
+
+        engine.complete(context, LEASE_ID, anyStoredResponse(), context.ttl());
+
+        verify(store, never()).extendLock(any(), any(), any());
+    }
+
+    @Test
+    void When_NullListeners_Expect_Rejected() {
+        assertThatThrownBy(() -> new IdempotencyEngine(store, scheduler, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("listeners");
     }
 }

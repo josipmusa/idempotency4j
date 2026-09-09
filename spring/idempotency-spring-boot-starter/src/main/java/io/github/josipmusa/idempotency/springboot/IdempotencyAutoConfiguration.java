@@ -17,6 +17,7 @@ package io.github.josipmusa.idempotency.springboot;
 
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
@@ -25,6 +26,7 @@ import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -78,8 +80,13 @@ public class IdempotencyAutoConfiguration {
     @ConditionalOnMissingBean
     @ConditionalOnBean(IdempotencyStore.class)
     IdempotencyEngine idempotencyEngine(
-            IdempotencyStore idempotencyStore, ScheduledExecutorService idempotencyScheduler) {
-        return new IdempotencyEngine(idempotencyStore, idempotencyScheduler);
+            IdempotencyStore idempotencyStore,
+            ScheduledExecutorService idempotencyScheduler,
+            ObjectProvider<IdempotencyLifecycleListener> lifecycleListeners) {
+        return new IdempotencyEngine(
+                idempotencyStore,
+                idempotencyScheduler,
+                lifecycleListeners.orderedStream().toList());
     }
 
     @Bean
@@ -91,17 +98,16 @@ public class IdempotencyAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnBean({IdempotencyEngine.class, IdempotencyStore.class})
+    @ConditionalOnBean(IdempotencyEngine.class)
     public IdempotencyFilter idempotencyFilter(
             IdempotencyEngine engine,
-            IdempotencyStore store,
             WebIdempotencyConfig webConfig,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             IdempotencyProperties properties,
             ResponseSanitizer sanitizer) {
         return new IdempotencyFilter(
-                engine, store, webConfig, handlerMapping, registry, properties.getMaxBodyBytes(), sanitizer);
+                engine, webConfig, handlerMapping, registry, properties.getMaxBodyBytes(), sanitizer);
     }
 
     @Bean

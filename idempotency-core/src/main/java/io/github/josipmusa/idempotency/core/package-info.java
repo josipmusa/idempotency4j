@@ -19,6 +19,8 @@
  *       {@code LockTimeout}, or {@code FingerprintMismatch}.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.ExecutionResult} — sealed outcome of
  *       {@code IdempotencyEngine.execute}: {@code Executed} or {@code Duplicate}.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener} - observes
+ *       acquisition, completion, failure, and duplicate detection on the calling thread.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.IdempotencyPayload} — sealed type for
  *       what a completed operation left behind: a
  *       {@link io.github.josipmusa.idempotency.core.StoredResponse} for an HTTP caller, or

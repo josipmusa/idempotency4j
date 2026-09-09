@@ -98,8 +98,9 @@ public interface IdempotencyStore {
     /**
      * Transitions an IN_PROGRESS key to COMPLETE with the given payload.
      *
-     * <p>Called by the adapter (not the engine) after the action has
-     * executed and its result has been captured. The stored payload
+     * <p>Called once the action has executed and its result has been
+     * captured - normally through {@link IdempotencyEngine#complete}, which
+     * adds the lifecycle callbacks around this call. The stored payload
      * will be returned to subsequent callers via
      * {@link AcquireResult.Duplicate} until {@code ttl} expires.
      *

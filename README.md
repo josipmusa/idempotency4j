@@ -201,7 +201,7 @@ ExecutionResult result = engine.execute(context, () -> handler.handle(event));
 
 switch (result) {
     case ExecutionResult.Executed executed ->
-            store.complete(context.key(), executed.leaseId(), NoPayload.at(Instant.now()), context.ttl());
+            engine.complete(context, executed.leaseId(), NoPayload.at(Instant.now()), context.ttl());
     case ExecutionResult.Duplicate ignored -> {
         // already handled under this key - nothing to do
     }
@@ -213,6 +213,59 @@ As in the HTTP flow, the engine acquires the lock and runs the action with a hea
 duplicate. Pass a fingerprint (`new IdempotencyContext(key, ttl, lockTimeout, sha256Hex)`) when the
 payload is worth guarding against key reuse, and a `StoredResponse` to `complete` when a duplicate
 should get a real result back.
+
+Complete through `engine.complete(...)` rather than `store.complete(...)`: it does the same store
+call but also fires the [lifecycle callbacks](#lifecycle-callbacks).
+
+## Lifecycle callbacks
+
+Register an `IdempotencyLifecycleListener` bean to observe the idempotent boundary. The starter
+picks up every listener bean and honours `@Order`; no other configuration is needed.
+
+```java
+@Bean
+public IdempotencyLifecycleListener auditListener(AuditService audit) {
+    return new IdempotencyLifecycleListener() {
+        @Override
+        public void onAcquired(IdempotencyContext ctx, String leaseId) {
+            audit.begin(ctx.key());   // runs on the request thread, before the handler
+        }
+
+        @Override
+        public void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {
+            audit.end(ctx.key());
+        }
+
+        @Override
+        public void onFailed(IdempotencyContext ctx, String leaseId, Throwable cause, FailurePhase phase) {
+            audit.abandon(ctx.key(), phase);
+        }
+    };
+}
+```
+
+The contract, in short:
+
+- Callbacks run **synchronously on the calling thread** (the servlet thread, for HTTP), in
+  registration order. That is deliberate: it lets a listener bind thread-local state that the
+  guarded action then sees. A listener that blocks blocks the request.
+- Exceptions thrown by a listener are logged at WARN and swallowed. They never change the stored
+  payload, the response, or the exception the engine is propagating.
+- Every acquired lease gets **exactly one** terminal callback: `onCompleted` **or** `onFailed`,
+  always preceded by `onAcquired` with the same lease. Use the pair to unbind whatever
+  `onAcquired` bound.
+- `onDuplicate` stands alone - a duplicate acquires no lease, so no terminal callback follows.
+- `onCompleted` fires only once the store has confirmed the completion. An unconfirmed durability
+  guarantee counts as `onFailed` with `FailurePhase.COMPLETION`, which means the action's side
+  effects happened but a retry will most likely run them again.
+- A lock timeout or a fingerprint mismatch acquires no lease and fires nothing. Heartbeat activity
+  is not surfaced either.
+
+Outside Spring, pass the listeners to the engine directly:
+
+```java
+IdempotencyEngine engine = new IdempotencyEngine(store, scheduler, List.of(auditListener));
+```
 
 ## Framework support
 
@@ -230,7 +283,7 @@ The autoconfiguration activates only when a Servlet-based Spring Web application
 
 **No WebFlux/reactive support.** The filter is built on `OncePerRequestFilter` (Servlet API). A reactive `WebFilter`-based adapter is a candidate for a future release.
 
-**No messaging adapter.** Non-HTTP callers drive `IdempotencyEngine` directly; there is no ready-made listener integration yet.
+**No messaging adapter.** Non-HTTP callers drive `IdempotencyEngine` directly; there is no ready-made message-listener integration yet.
 
 **Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
 

@@ -15,12 +15,18 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener.FailurePhase;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
+import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Orchestrates the idempotency lifecycle: acquire lock, run action, manage heartbeat.
@@ -32,9 +38,10 @@ import java.util.concurrent.TimeUnit;
  * <h2>Responsibility boundaries</h2>
  * <ul>
  *   <li><strong>Engine</strong> — calls {@code tryAcquire}, runs the action with
- *       a heartbeat, calls {@code release} on failure. Does NOT call {@code complete}.</li>
+ *       a heartbeat, calls {@code release} on failure. Does NOT decide when a key
+ *       is complete: the adapter calls {@link #complete} once it knows what to store.</li>
  *   <li><strong>Adapter</strong> — builds the context, calls {@code engine.execute()},
- *       captures the HTTP response, calls {@code store.complete()} with the lease.</li>
+ *       captures the HTTP response, calls {@code engine.complete()} with the lease.</li>
  *   <li><strong>Store</strong> — handles persistence, blocking, and lock-stealing.</li>
  * </ul>
  *
@@ -51,11 +58,21 @@ import java.util.concurrent.TimeUnit;
  * itself throws (e.g. store is down), the release exception is added as a
  * suppressed exception on the original — the action's exception always
  * propagates as the primary.
+ *
+ * <h2>Lifecycle callbacks</h2>
+ * <p>Registered {@link IdempotencyLifecycleListener}s observe each execution
+ * synchronously on the calling thread. See that interface for the callback
+ * contract; the engine guarantees exactly one terminal callback per acquired
+ * lease and never lets a listener influence store state, the return value, or
+ * the exception being propagated.
  */
 public final class IdempotencyEngine {
 
+    private static final Logger log = LoggerFactory.getLogger(IdempotencyEngine.class);
+
     private final IdempotencyStore store;
     private final ScheduledExecutorService scheduler;
+    private final List<IdempotencyLifecycleListener> listeners;
 
     /**
      * @param store     the persistence backend for idempotency keys
@@ -63,8 +80,21 @@ public final class IdempotencyEngine {
      *                  across engine instances, not created per-request
      */
     public IdempotencyEngine(IdempotencyStore store, ScheduledExecutorService scheduler) {
+        this(store, scheduler, List.of());
+    }
+
+    /**
+     * @param store     the persistence backend for idempotency keys
+     * @param scheduler used to schedule heartbeat tasks - should be shared
+     *                  across engine instances, not created per-request
+     * @param listeners lifecycle observers, invoked in the given order on the
+     *                  calling thread; copied defensively
+     */
+    public IdempotencyEngine(
+            IdempotencyStore store, ScheduledExecutorService scheduler, List<IdempotencyLifecycleListener> listeners) {
         this.store = Objects.requireNonNull(store, "store must not be null");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
+        this.listeners = List.copyOf(Objects.requireNonNull(listeners, "listeners must not be null"));
     }
 
     /**
@@ -79,7 +109,7 @@ public final class IdempotencyEngine {
      * (adapter) is responsible for:
      * <ol>
      *   <li>Capturing whatever the action produced (an HTTP response, or nothing)</li>
-     *   <li>Calling {@link IdempotencyStore#complete} with the returned lease and that payload</li>
+     *   <li>Calling {@link #complete} with the returned lease and that payload</li>
      * </ol>
      * If {@code complete} throws after a successful execution, the response has
      * already been produced and should still be sent to the client. The store's state
@@ -101,12 +131,53 @@ public final class IdempotencyEngine {
         Objects.requireNonNull(action, "action must not be null");
         return switch (store.tryAcquire(context)) {
             case AcquireResult.Acquired acquired -> runWithHeartbeat(context, acquired.leaseId(), action);
-            case AcquireResult.Duplicate d -> ExecutionResult.duplicate(d.payload());
+            case AcquireResult.Duplicate d -> {
+                notify("onDuplicate", context, listener -> listener.onDuplicate(context, d.payload()));
+                yield ExecutionResult.duplicate(d.payload());
+            }
             case AcquireResult.LockTimeout ignored -> throw new IdempotencyLockTimeoutException(
                     context.key(), context.lockTimeout());
             case AcquireResult.FingerprintMismatch fm -> throw new IdempotencyFingerprintMismatchException(
                     context.key(), fm.storedFingerprint(), fm.receivedFingerprint());
         };
+    }
+
+    /**
+     * Records the completion of an executed action, closing the idempotent boundary.
+     *
+     * <p>Delegates to {@link IdempotencyStore#complete} and adds the lifecycle
+     * callback the store SPI knows nothing about: {@link IdempotencyLifecycleListener#onCompleted}
+     * once the store has confirmed the transition, or
+     * {@link IdempotencyLifecycleListener#onFailed} with
+     * {@link FailurePhase#COMPLETION} if it did not. Store exceptions are rethrown
+     * unchanged, so callers keep whatever handling they already had around
+     * {@code store.complete}.
+     *
+     * <p>Call this exactly once per {@link ExecutionResult.Executed}, passing that
+     * result's lease. The engine does not extend the lock here - {@link #execute}
+     * already did so after the action returned.
+     *
+     * @param context the context the execution ran under
+     * @param leaseId the lease from the {@link ExecutionResult.Executed} being completed
+     * @param payload what to store for a duplicate to replay
+     * @param ttl     how long to keep the completed entry before expiry
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException
+     *         if this execution no longer owns the key
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException
+     *         if the mutation was accepted but requested durability could not be confirmed
+     */
+    public void complete(IdempotencyContext context, String leaseId, IdempotencyPayload payload, Duration ttl) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(leaseId, "leaseId must not be null");
+        Objects.requireNonNull(payload, "payload must not be null");
+        Objects.requireNonNull(ttl, "ttl must not be null");
+        try {
+            store.complete(context.key(), leaseId, payload, ttl);
+        } catch (Exception e) {
+            notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
+            throw e;
+        }
+        notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload));
     }
 
     /**
@@ -116,6 +187,12 @@ public final class IdempotencyEngine {
      * Callers should share a single scheduler across all engine instances and shut it down when
      * the application stops (e.g., via a Spring {@code @PreDestroy} method or a
      * {@link java.io.Closeable} wrapper).
+     *
+     * <p>{@code onAcquired} fires once the heartbeat is running and the action is
+     * genuinely about to execute. A lease whose heartbeat could not be scheduled is
+     * released here and reported to nobody: firing {@code onAcquired} for an execution
+     * that never happens would leave a listener holding per-request state with no
+     * terminal callback to release it.
      */
     private ExecutionResult runWithHeartbeat(IdempotencyContext context, String leaseId, ThrowingRunnable action)
             throws Exception {
@@ -131,13 +208,11 @@ public final class IdempotencyEngine {
             throw schedulingFailure;
         }
         try {
+            notify("onAcquired", context, listener -> listener.onAcquired(context, leaseId));
             action.run();
-            // Give the adapter a fresh completion window before the scheduled heartbeat is
-            // cancelled. Lease fencing still protects against a genuinely stolen lock.
             try {
                 store.extendLock(context.key(), leaseId, context.lockTimeout());
             } catch (Exception ignored) {
-                // Completion may still succeed; preserve the successful action result.
             }
             return ExecutionResult.executed(leaseId);
         } catch (Exception e) {
@@ -146,6 +221,7 @@ public final class IdempotencyEngine {
             } catch (Exception releaseEx) {
                 e.addSuppressed(releaseEx);
             }
+            notifyFailed(context, leaseId, e, FailurePhase.ACTION);
             throw e;
         } finally {
             heartbeat.cancel(false);
@@ -166,5 +242,35 @@ public final class IdempotencyEngine {
                 intervalMs,
                 intervalMs,
                 TimeUnit.MILLISECONDS);
+    }
+
+    private void notifyFailed(IdempotencyContext context, String leaseId, Throwable cause, FailurePhase phase) {
+        notify("onFailed", context, listener -> listener.onFailed(context, leaseId, cause, phase));
+    }
+
+    /**
+     * Invokes one callback on every listener, in registration order.
+     *
+     * <p>A listener is not allowed to influence the execution it is observing, so
+     * anything it throws is logged and dropped and the remaining listeners still
+     * run. An {@link Error} is left to propagate: it signals a problem this engine
+     * must not hide.
+     */
+    private void notify(
+            String callback, IdempotencyContext context, Consumer<IdempotencyLifecycleListener> invocation) {
+        for (IdempotencyLifecycleListener listener : listeners) {
+            try {
+                invocation.accept(listener);
+            } catch (Error e) {
+                throw e;
+            } catch (Throwable t) {
+                log.warn(
+                        "Idempotency lifecycle listener {} threw from {} for key '{}'; ignoring",
+                        listener.getClass().getName(),
+                        callback,
+                        context.key(),
+                        t);
+            }
+        }
     }
 }

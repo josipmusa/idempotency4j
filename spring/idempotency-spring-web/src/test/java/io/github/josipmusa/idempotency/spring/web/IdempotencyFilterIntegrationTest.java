@@ -22,17 +22,21 @@ import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -58,14 +62,23 @@ class IdempotencyFilterIntegrationTest {
     private static final String KEY_HEADER = "Idempotency-Key";
     private static final AtomicInteger invocations = new AtomicInteger();
 
+    /** Shared timeline so listener callbacks can be ordered against the controller invocation. */
+    private static final List<String> events = new CopyOnWriteArrayList<>();
+
+    private static final AtomicReference<Thread> controllerThread = new AtomicReference<>();
+
     private ScheduledExecutorService scheduler;
     private RecordingStore store;
+    private RecordingListener listener;
 
     @BeforeEach
     void setUp() {
         invocations.set(0);
+        events.clear();
+        controllerThread.set(null);
         scheduler = Executors.newSingleThreadScheduledExecutor();
         store = new RecordingStore();
+        listener = new RecordingListener();
     }
 
     @AfterEach
@@ -130,7 +143,77 @@ class IdempotencyFilterIntegrationTest {
         assertThat(invocations).hasValue(1);
     }
 
+    @Test
+    void When_HandlerRuns_Expect_AcquiredOnServletThreadBeforeControllerThenCompleted() throws Exception {
+        MockMvc mockMvc = mockMvc(null);
+
+        MvcResult result = mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "listener-1")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("hello-body"))
+                .andReturn();
+
+        assertThat(result.getResponse().getStatus()).isEqualTo(200);
+        assertThat(events).containsExactly("onAcquired:listener-1", "controller", "onCompleted:listener-1");
+        assertThat(listener.acquiredThread).hasValue(controllerThread.get());
+        assertThat(listener.completed).singleElement().isInstanceOf(StoredResponse.class);
+    }
+
+    @Test
+    void When_CompletedFires_Expect_ResponseAlreadyStored() throws Exception {
+        MockMvc mockMvc = mockMvc(null);
+
+        mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "listener-2")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("hello-body"))
+                .andReturn();
+
+        StoredResponse observed = (StoredResponse) listener.completed.getFirst();
+        assertThat(observed).isEqualTo(store.completed.get("listener-2"));
+        assertThat(new String(observed.body(), StandardCharsets.UTF_8)).isEqualTo("echo:hello-body");
+    }
+
+    @Test
+    void When_DuplicateKey_Expect_ListenerSeesDuplicateWithStoredPayload() throws Exception {
+        MockMvc mockMvc = mockMvc(null);
+
+        mockMvc.perform(post("/echo")
+                .header(KEY_HEADER, "listener-3")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("hello-body"));
+        mockMvc.perform(post("/echo")
+                .header(KEY_HEADER, "listener-3")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("hello-body"));
+
+        assertThat(events)
+                .containsExactly(
+                        "onAcquired:listener-3", "controller", "onCompleted:listener-3", "onDuplicate:listener-3");
+        assertThat(listener.duplicates).singleElement().isInstanceOf(StoredResponse.class);
+    }
+
+    @Test
+    void When_ListenerThrows_Expect_ResponseAndStorageUnaffected() throws Exception {
+        MockMvc mockMvc = mockMvc(null, List.of(new ThrowingListener()));
+
+        MvcResult result = mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "listener-4")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("hello-body"))
+                .andReturn();
+
+        assertThat(result.getResponse().getStatus()).isEqualTo(200);
+        assertThat(result.getResponse().getContentAsString()).isEqualTo("echo:hello-body");
+        assertThat(invocations).hasValue(1);
+        assertThat(store.completed).containsKey("listener-4");
+    }
+
     private MockMvc mockMvc(Long maxBodyBytes) {
+        return mockMvc(maxBodyBytes, List.of(listener));
+    }
+
+    private MockMvc mockMvc(Long maxBodyBytes, List<IdempotencyLifecycleListener> listeners) {
         AnnotationConfigWebApplicationContext wac = new AnnotationConfigWebApplicationContext();
         wac.setServletContext(new MockServletContext());
         wac.register(WebConfig.class, EchoController.class);
@@ -139,12 +222,12 @@ class IdempotencyFilterIntegrationTest {
         RequestMappingHandlerMapping mapping = wac.getBean(RequestMappingHandlerMapping.class);
         IdempotencyConfig config = IdempotencyConfig.defaults();
         WebIdempotencyConfig webConfig = WebIdempotencyConfig.defaults();
-        IdempotencyEngine engine = new IdempotencyEngine(store, scheduler);
+        IdempotencyEngine engine = new IdempotencyEngine(store, scheduler, listeners);
         IdempotentHandlerRegistry registry = new IdempotentHandlerRegistry(mapping, config);
         registry.afterSingletonsInstantiated();
         IdempotencyFilter filter = maxBodyBytes == null
-                ? new IdempotencyFilter(engine, store, webConfig, mapping, registry)
-                : new IdempotencyFilter(engine, store, webConfig, mapping, registry, maxBodyBytes);
+                ? new IdempotencyFilter(engine, webConfig, mapping, registry)
+                : new IdempotencyFilter(engine, webConfig, mapping, registry, maxBodyBytes);
 
         return MockMvcBuilders.webAppContextSetup(wac).addFilters(filter).build();
     }
@@ -158,7 +241,52 @@ class IdempotencyFilterIntegrationTest {
         @Idempotent
         public String echo(@RequestBody String body) {
             invocations.incrementAndGet();
+            events.add("controller");
+            controllerThread.set(Thread.currentThread());
             return "echo:" + body;
+        }
+    }
+
+    private static final class RecordingListener implements IdempotencyLifecycleListener {
+
+        private final AtomicReference<Thread> acquiredThread = new AtomicReference<>();
+        private final List<IdempotencyPayload> completed = new CopyOnWriteArrayList<>();
+        private final List<IdempotencyPayload> duplicates = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void onAcquired(IdempotencyContext ctx, String leaseId) {
+            events.add("onAcquired:" + ctx.key());
+            acquiredThread.set(Thread.currentThread());
+        }
+
+        @Override
+        public void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {
+            events.add("onCompleted:" + ctx.key());
+            completed.add(payload);
+        }
+
+        @Override
+        public void onFailed(IdempotencyContext ctx, String leaseId, Throwable cause, FailurePhase phase) {
+            events.add("onFailed:" + phase);
+        }
+
+        @Override
+        public void onDuplicate(IdempotencyContext ctx, IdempotencyPayload payload) {
+            events.add("onDuplicate:" + ctx.key());
+            duplicates.add(payload);
+        }
+    }
+
+    private static final class ThrowingListener implements IdempotencyLifecycleListener {
+
+        @Override
+        public void onAcquired(IdempotencyContext ctx, String leaseId) {
+            throw new IllegalStateException("listener failed on acquire");
+        }
+
+        @Override
+        public void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {
+            throw new IllegalStateException("listener failed on completion");
         }
     }
 

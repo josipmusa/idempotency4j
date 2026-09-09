@@ -20,7 +20,6 @@ import static io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegist
 import io.github.josipmusa.idempotency.core.ExecutionResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
-import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.NoPayload;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
@@ -67,7 +66,6 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private static final long NO_LIMIT = -1;
 
     private final IdempotencyEngine engine;
-    private final IdempotencyStore store;
     private final WebIdempotencyConfig config;
     private final RequestMappingHandlerMapping handlerMapping;
     private final IdempotentHandlerRegistry registry;
@@ -77,7 +75,6 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
-            IdempotencyStore store,
             WebIdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
@@ -85,7 +82,6 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             ResponseSanitizer sanitizer,
             Clock clock) {
         this.engine = Objects.requireNonNull(engine, "engine must not be null");
-        this.store = Objects.requireNonNull(store, "store must not be null");
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
         this.registry = Objects.requireNonNull(registry, "registry must not be null");
@@ -96,32 +92,29 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
-            IdempotencyStore store,
             WebIdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             long maxBodyBytes,
             ResponseSanitizer sanitizer) {
-        this(engine, store, config, handlerMapping, registry, maxBodyBytes, sanitizer, Clock.systemUTC());
+        this(engine, config, handlerMapping, registry, maxBodyBytes, sanitizer, Clock.systemUTC());
     }
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
-            IdempotencyStore store,
             WebIdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             long maxBodyBytes) {
-        this(engine, store, config, handlerMapping, registry, maxBodyBytes, response -> response, Clock.systemUTC());
+        this(engine, config, handlerMapping, registry, maxBodyBytes, response -> response, Clock.systemUTC());
     }
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
-            IdempotencyStore store,
             WebIdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry) {
-        this(engine, store, config, handlerMapping, registry, NO_LIMIT, response -> response, Clock.systemUTC());
+        this(engine, config, handlerMapping, registry, NO_LIMIT, response -> response, Clock.systemUTC());
     }
 
     @Override
@@ -214,7 +207,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         try {
             StoredResponse sanitized = sanitizer.sanitize(captured);
             try {
-                store.complete(context.key(), leaseId, sanitized, context.ttl());
+                engine.complete(context, leaseId, sanitized, context.ttl());
             } catch (IdempotencyDurabilityException e) {
                 log.error(
                         "Stored idempotency response for key '{}', but requested durability was not confirmed; storage state is indeterminate",

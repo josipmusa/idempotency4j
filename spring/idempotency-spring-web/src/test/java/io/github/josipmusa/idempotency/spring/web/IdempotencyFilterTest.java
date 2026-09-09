@@ -18,6 +18,7 @@ package io.github.josipmusa.idempotency.spring.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -45,7 +46,6 @@ class IdempotencyFilterTest {
     private static final String LEASE_ID = "test-lease-id";
 
     private IdempotencyEngine engine;
-    private IdempotencyStore store;
     private RequestMappingHandlerMapping handlerMapping;
     private IdempotentHandlerRegistry registry;
     private IdempotencyFilter filter;
@@ -57,11 +57,10 @@ class IdempotencyFilterTest {
     @BeforeEach
     void setUp() {
         engine = mock(IdempotencyEngine.class);
-        store = mock(IdempotencyStore.class);
         handlerMapping = mock(RequestMappingHandlerMapping.class);
         IdempotencyConfig idempotencyConfig = IdempotencyConfig.defaults();
         registry = new IdempotentHandlerRegistry(handlerMapping, idempotencyConfig);
-        filter = new IdempotencyFilter(engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry);
+        filter = new IdempotencyFilter(engine, WebIdempotencyConfig.defaults(), handlerMapping, registry);
 
         request = new MockHttpServletRequest();
         response = new MockHttpServletResponse();
@@ -167,7 +166,12 @@ class IdempotencyFilterTest {
 
         filter.doFilter(request, response, filterChain);
 
-        verify(store).complete(eq("test-key"), eq(LEASE_ID), any(StoredResponse.class), any(Duration.class));
+        verify(engine)
+                .complete(
+                        argThat(context -> "test-key".equals(context.key())),
+                        eq(LEASE_ID),
+                        any(StoredResponse.class),
+                        any(Duration.class));
         assertThat(response.getContentAsString()).isEqualTo("{\"id\":\"1\"}");
         assertThat(response.getStatus()).isEqualTo(201);
     }
@@ -187,7 +191,12 @@ class IdempotencyFilterTest {
 
         filter.doFilter(request, response, filterChain);
 
-        verify(store).complete(eq("test-key"), eq(LEASE_ID), any(StoredResponse.class), eq(Duration.ofHours(2)));
+        verify(engine)
+                .complete(
+                        argThat(context -> "test-key".equals(context.key())),
+                        eq(LEASE_ID),
+                        any(StoredResponse.class),
+                        eq(Duration.ofHours(2)));
     }
 
     @Test
@@ -281,7 +290,7 @@ class IdempotencyFilterTest {
         assertThatThrownBy(() -> filter.doFilter(request, response, filterChain))
                 .isSameAs(actionException);
 
-        verify(store, never()).release(any(), any());
+        verify(engine, never()).complete(any(), any(), any(), any());
     }
 
     @Test
@@ -307,7 +316,7 @@ class IdempotencyFilterTest {
                 .when(filterChain)
                 .doFilter(any(), any());
 
-        doThrow(new RuntimeException("store unavailable")).when(store).complete(any(), any(), any(), any());
+        doThrow(new RuntimeException("store unavailable")).when(engine).complete(any(), any(), any(), any());
 
         filter.doFilter(request, response, filterChain);
 
@@ -337,7 +346,7 @@ class IdempotencyFilterTest {
                 .when(filterChain)
                 .doFilter(any(), any());
 
-        doThrow(new RuntimeException("store down")).when(store).complete(any(), any(), any(), any());
+        doThrow(new RuntimeException("store down")).when(engine).complete(any(), any(), any(), any());
 
         filter.doFilter(request, response, filterChain);
         assertThat(response.getStatus()).isEqualTo(200);
@@ -376,7 +385,7 @@ class IdempotencyFilterTest {
         request.setContent("this body is definitely longer than ten bytes".getBytes());
 
         IdempotencyFilter limitedFilter =
-                new IdempotencyFilter(engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, 10);
+                new IdempotencyFilter(engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, 10);
 
         limitedFilter.doFilter(request, response, filterChain);
 
@@ -402,7 +411,7 @@ class IdempotencyFilterTest {
         request.addHeader("Idempotency-Key", "key-123");
         request.setContent("0123456789".getBytes()); // exactly 10 bytes
         IdempotencyFilter limitedFilter =
-                new IdempotencyFilter(engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, 10);
+                new IdempotencyFilter(engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, 10);
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
                     action.run();
@@ -461,7 +470,7 @@ class IdempotencyFilterTest {
                 response.completedAt());
 
         IdempotencyFilter filterWithSanitizer = new IdempotencyFilter(
-                engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);
+                engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);
 
         doAnswer(invocation -> {
                     ThrowingRunnable action = invocation.getArgument(1);
@@ -485,7 +494,12 @@ class IdempotencyFilterTest {
         filterWithSanitizer.doFilter(request, response, filterChain);
 
         var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
-        verify(store).complete(eq("test-key"), eq(LEASE_ID), captor.capture(), any(Duration.class));
+        verify(engine)
+                .complete(
+                        argThat(context -> "test-key".equals(context.key())),
+                        eq(LEASE_ID),
+                        captor.capture(),
+                        any(Duration.class));
         assertThat(captor.getValue().headers()).doesNotContainKey("X-Secret");
     }
 
@@ -494,7 +508,7 @@ class IdempotencyFilterTest {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         IdempotencyFilter filterWithFailingSanitizer = new IdempotencyFilter(
-                engine, store, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, ignored -> {
+                engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, ignored -> {
                     throw new IllegalStateException("sanitizer failed");
                 });
         doAnswer(invocation -> {
@@ -517,7 +531,7 @@ class IdempotencyFilterTest {
 
         assertThat(response.getStatus()).isEqualTo(201);
         assertThat(response.getContentAsString()).isEqualTo("created");
-        verify(store, never()).complete(any(), any(), any(), any());
+        verify(engine, never()).complete(any(), any(), any(), any());
     }
 
     @Test
@@ -545,7 +559,12 @@ class IdempotencyFilterTest {
         filter.doFilter(request, response, filterChain);
 
         var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
-        verify(store).complete(eq("test-key"), eq(LEASE_ID), captor.capture(), any(Duration.class));
+        verify(engine)
+                .complete(
+                        argThat(context -> "test-key".equals(context.key())),
+                        eq(LEASE_ID),
+                        captor.capture(),
+                        any(Duration.class));
         assertThat(captor.getValue().headers())
                 .containsEntry("X-End-To-End", List.of("kept"))
                 .doesNotContainKeys("Connection", "Transfer-Encoding", "Content-Length");

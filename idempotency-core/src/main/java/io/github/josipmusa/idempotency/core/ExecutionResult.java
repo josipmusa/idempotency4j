@@ -31,7 +31,7 @@ public sealed interface ExecutionResult permits ExecutionResult.Executed, Execut
      * The action executed successfully. The adapter must now:
      * <ol>
      *   <li>Capture whatever the action produced (an HTTP response, or nothing)</li>
-     *   <li>Call {@link IdempotencyStore#complete} with this result's lease ID and that payload</li>
+     *   <li>Call {@link IdempotencyEngine#complete} with this result's lease ID and that payload</li>
      *   <li>Return the response to the caller</li>
      * </ol>
      */

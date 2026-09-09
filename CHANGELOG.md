@@ -31,11 +31,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `defaultTtl` and `defaultLockTimeout`. The `idempotency.key-header` property is unchanged, and
   the starter registers a `WebIdempotencyConfig` bean from it. Applications constructing
   `IdempotencyFilter` by hand pass a `WebIdempotencyConfig` where they passed `IdempotencyConfig`.
+- **Breaking.** `IdempotencyFilter` records completion through `IdempotencyEngine.complete(...)`
+  instead of calling the store itself, so HTTP requests fire the lifecycle callbacks. It no longer
+  takes an `IdempotencyStore` parameter, because it no longer touches the store; applications
+  constructing the filter by hand drop that argument.
+- `idempotency-core` now depends on `slf4j-api` so the engine can report a misbehaving lifecycle
+  listener. It remains free of framework dependencies.
 
 ### Added
 
 - `NoPayload` for recording a completed operation that has nothing to replay, so non-HTTP callers
   can use the engine without fabricating a response.
+- `IdempotencyLifecycleListener` observes the idempotent boundary: `onAcquired`, `onCompleted`,
+  `onFailed` and `onDuplicate`. Callbacks run synchronously on the calling thread in registration
+  order, so a listener can bind thread-local state that the guarded action then sees. Every
+  acquired lease gets exactly one terminal callback - `onCompleted` or `onFailed` - always
+  preceded by `onAcquired`, which is what lets a listener unbind that state reliably. Listener
+  exceptions are logged and swallowed. The Spring Boot starter wires every listener bean into the
+  engine and honours `@Order`.
+- `IdempotencyEngine.complete(context, leaseId, payload, ttl)` wraps `IdempotencyStore.complete`
+  and fires the completion callbacks around it, rethrowing store failures unchanged. Callers that
+  drive the engine directly should complete through it rather than through the store, so the
+  callbacks fire.
 
 ## [0.2.0] - 2026-08-31
 

@@ -16,27 +16,45 @@
 package io.github.josipmusa.idempotency.springboot;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
+import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
 import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 class IdempotencyAutoConfigurationTest {
 
+    private static final List<String> listenerCalls = new CopyOnWriteArrayList<>();
+
     private final WebApplicationContextRunner contextRunner = new WebApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(IdempotencyAutoConfiguration.class))
             .withBean(RequestMappingHandlerMapping.class, () -> mock(RequestMappingHandlerMapping.class));
+
+    @BeforeEach
+    void resetListenerCalls() {
+        listenerCalls.clear();
+    }
 
     @Test
     void When_NoStoreBeanPresent_Expect_EngineAndFilterNotCreated() {
@@ -181,5 +199,71 @@ class IdempotencyAutoConfigurationTest {
             assertThat(context).hasSingleBean(ResponseSanitizer.class);
             assertThat(context.getBean(ResponseSanitizer.class)).isSameAs(custom);
         });
+    }
+
+    @Test
+    void When_LifecycleListenerBeanPresent_Expect_WiredIntoEngine() {
+        contextRunner
+                .withBean(IdempotencyStore.class, IdempotencyAutoConfigurationTest::acquiringStore)
+                .withBean(IdempotencyLifecycleListener.class, () -> new NamedListener("only"))
+                .run(context -> {
+                    context.getBean(IdempotencyEngine.class).execute(anyContext(), () -> {});
+                    assertThat(listenerCalls).containsExactly("only");
+                });
+    }
+
+    @Test
+    void When_OrderedListenerBeans_Expect_EngineHonoursOrderAnnotation() {
+        contextRunner
+                .withBean(IdempotencyStore.class, IdempotencyAutoConfigurationTest::acquiringStore)
+                .withUserConfiguration(OrderedListenersConfig.class)
+                .run(context -> {
+                    context.getBean(IdempotencyEngine.class).execute(anyContext(), () -> {});
+                    assertThat(listenerCalls).containsExactly("first", "second");
+                });
+    }
+
+    @Test
+    void When_NoLifecycleListenerBean_Expect_EngineStillCreated() {
+        contextRunner
+                .withBean(IdempotencyStore.class, IdempotencyAutoConfigurationTest::acquiringStore)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(IdempotencyEngine.class);
+                    assertThat(context).doesNotHaveBean(IdempotencyLifecycleListener.class);
+                });
+    }
+
+    private static IdempotencyContext anyContext() {
+        return IdempotencyContext.withoutFingerprint("listener-key", Duration.ofHours(1), Duration.ofSeconds(5));
+    }
+
+    private static IdempotencyStore acquiringStore() {
+        IdempotencyStore store = mock(IdempotencyStore.class);
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired("test-lease-id"));
+        return store;
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class OrderedListenersConfig {
+
+        @Bean
+        @Order(2)
+        IdempotencyLifecycleListener secondListener() {
+            return new NamedListener("second");
+        }
+
+        @Bean
+        @Order(1)
+        IdempotencyLifecycleListener firstListener() {
+            return new NamedListener("first");
+        }
+    }
+
+    private record NamedListener(String name) implements IdempotencyLifecycleListener {
+
+        @Override
+        public void onAcquired(IdempotencyContext ctx, String leaseId) {
+            listenerCalls.add(name);
+        }
     }
 }
