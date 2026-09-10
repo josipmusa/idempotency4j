@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="request-outcomes-dark-title request-outcomes-dark-desc">
+      <title id="request-outcomes-dark-title">How a request resolves</title>
+      <desc id="request-outcomes-dark-desc">A request carrying an idempotency key is routed by the state the key already holds in the store: a new key runs the handler and stores its response, a completed key replays the stored response when the request body matches and is rejected with 422 when it does not, and a key still in progress past the lock timeout is refused with 503.</desc>
+      <defs>
+        <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6a95d8"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#2d3142"/>
+
+      <!-- ARROWS (drawn before nodes) -->
+      <line x1="480" y1="88" x2="480" y2="128" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <path d="M 376,172 H 152 Q 144,172 144,180 V 280" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <path d="M 480,216 V 280" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <path d="M 584,172 H 808 Q 816,172 816,180 V 400" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <path d="M 144,336 V 400" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <path d="M 392,320 H 368 Q 360,320 360,328 V 400" fill="none" stroke="#f08a59" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <path d="M 568,320 H 592 Q 600,320 600,328 V 400" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+      <!-- ARROW LABELS -->
+      <rect x="232" y="152" width="64" height="12" rx="2" fill="#2d3142"/>
+      <text x="264" y="161" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">NEW KEY</text>
+
+      <rect x="488" y="242" width="68" height="12" rx="2" fill="#2d3142"/>
+      <text x="522" y="251" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">COMPLETE</text>
+
+      <rect x="656" y="152" width="80" height="12" rx="2" fill="#2d3142"/>
+      <text x="696" y="161" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">IN PROGRESS</text>
+
+      <rect x="152" y="362" width="80" height="12" rx="2" fill="#2d3142"/>
+      <text x="192" y="371" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">STORE RESULT</text>
+
+      <rect x="316" y="358" width="36" height="12" rx="2" fill="#2d3142"/>
+      <text x="334" y="367" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">YES</text>
+
+      <rect x="608" y="358" width="32" height="12" rx="2" fill="#2d3142"/>
+      <text x="624" y="367" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">NO</text>
+
+      <!-- START -->
+      <rect x="320" y="48" width="320" height="40" rx="20" fill="#2d3142"/>
+      <rect x="320" y="48" width="320" height="40" rx="20" fill="#bfc0c0" fill-opacity="0.10" stroke="#8e98ac" stroke-width="1"/>
+      <text x="480" y="72" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Request with Idempotency-Key</text>
+
+      <!-- D1 : key state decision (focal) -->
+      <polygon points="480,128 584,172 480,216 376,172" fill="#2d3142"/>
+      <polygon points="480,128 584,172 480,216 376,172" fill="#f08a59" fill-opacity="0.10" stroke="#f08a59" stroke-width="1"/>
+      <text x="480" y="168" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Key state in store</text>
+      <text x="480" y="184" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">tryAcquire()</text>
+
+      <!-- S1 : run handler -->
+      <rect x="48" y="280" width="192" height="56" rx="6" fill="#2d3142"/>
+      <rect x="48" y="280" width="192" height="56" rx="6" fill="#393e53" stroke="#f5f5f5" stroke-width="1"/>
+      <text x="144" y="304" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Run handler</text>
+      <text x="144" y="320" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">heartbeat extends lease</text>
+
+      <!-- D2 : fingerprint decision -->
+      <polygon points="480,280 568,320 480,360 392,320" fill="#2d3142"/>
+      <polygon points="480,280 568,320 480,360 392,320" fill="#f5f5f5" fill-opacity="0.05" stroke="#bfc0c0" stroke-width="1"/>
+      <text x="480" y="316" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Same request body?</text>
+      <text x="480" y="332" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">fingerprint</text>
+
+      <!-- E1 : executed -->
+      <rect x="48" y="400" width="192" height="56" rx="20" fill="#2d3142"/>
+      <rect x="48" y="400" width="192" height="56" rx="20" fill="#bfc0c0" fill-opacity="0.10" stroke="#8e98ac" stroke-width="1"/>
+      <text x="144" y="424" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Executed</text>
+      <text x="144" y="440" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">handler status stored</text>
+
+      <!-- E2 : replayed (focal) -->
+      <rect x="264" y="400" width="192" height="56" rx="20" fill="#2d3142"/>
+      <rect x="264" y="400" width="192" height="56" rx="20" fill="#f08a59" fill-opacity="0.10" stroke="#f08a59" stroke-width="1"/>
+      <text x="360" y="424" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Replayed</text>
+      <text x="360" y="440" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Idempotent-Replayed</text>
+
+      <!-- E3 : rejected -->
+      <rect x="504" y="400" width="192" height="56" rx="20" fill="#2d3142"/>
+      <rect x="504" y="400" width="192" height="56" rx="20" fill="#bfc0c0" fill-opacity="0.10" stroke="#8e98ac" stroke-width="1"/>
+      <text x="600" y="424" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Rejected</text>
+      <text x="600" y="440" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">422 fingerprint</text>
+
+      <!-- E4 : refused -->
+      <rect x="720" y="400" width="192" height="56" rx="20" fill="#2d3142"/>
+      <rect x="720" y="400" width="192" height="56" rx="20" fill="#bfc0c0" fill-opacity="0.10" stroke="#8e98ac" stroke-width="1"/>
+      <text x="816" y="424" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Refused</text>
+      <text x="816" y="440" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">503 lock timeout</text>
+
+      <!-- LEGEND -->
+      <line x1="48" y1="488" x2="912" y2="488" stroke="#f5f5f5" stroke-opacity="0.10" stroke-width="0.8"/>
+      <text x="48" y="506" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+
+      <rect x="136" y="498" width="24" height="12" rx="6" fill="#bfc0c0" fill-opacity="0.10" stroke="#8e98ac" stroke-width="0.8"/>
+      <text x="168" y="506" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">START / OUTCOME</text>
+
+      <rect x="320" y="498" width="24" height="12" rx="2" fill="#393e53" stroke="#f5f5f5" stroke-width="0.8"/>
+      <text x="352" y="506" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">ACTION</text>
+
+      <polygon points="476,496 488,504 476,512 464,504" fill="#f5f5f5" fill-opacity="0.05" stroke="#bfc0c0" stroke-width="0.8"/>
+      <text x="496" y="506" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">DECISION</text>
+
+      <circle cx="630" cy="504" r="5" fill="#f08a59"/>
+      <text x="644" y="506" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">IDEMPOTENT REPLAY</text>
+    </svg>

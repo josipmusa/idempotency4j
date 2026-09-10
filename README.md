@@ -1,46 +1,86 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <img src="docs/logo.svg" alt="idempotency4j" height="48">
+  </picture>
+</p>
+
 # idempotency4j
 
-[![Maven Central](https://img.shields.io/maven-central/v/io.github.josipmusa/idempotency-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.josipmusa/idempotency-spring-boot-starter)
+**Idempotent HTTP endpoints for Spring Boot, with pluggable JDBC, Redis, and in-memory storage.**
+
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.josipmusa/idempotency-spring-boot-starter?label=maven%20central)](https://central.sonatype.com/artifact/io.github.josipmusa/idempotency-spring-boot-starter)
+[![CI](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml)
+[![Javadoc](https://javadoc.io/badge2/io.github.josipmusa/idempotency-core/javadoc.svg)](https://javadoc.io/doc/io.github.josipmusa/idempotency-core)
+[![Java 21+](https://img.shields.io/badge/Java-21%2B-blue)](https://adoptium.net/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-A Java idempotency library with pluggable storage backends and Spring Web / Spring Boot support.
+Clients send an `Idempotency-Key` header. The first request runs your handler and its response is
+stored; while that record is retained, a duplicate replays the stored response instead of running
+the handler again. Storage is pluggable, and the core engine has no HTTP types in it, so non-HTTP
+callers can drive it directly.
 
-Send the same request twice and, while its idempotency record is retained, completed requests replay
-the stored response instead of running the handler again.
+Your API needs this if clients retry on network failure (payment processing, order creation,
+resource provisioning) and a duplicate would cause a real problem: money charged twice, two orders
+shipped, two VMs started.
 
-## When to use this
+## What this is not
 
-Your API needs idempotency if clients can retry on network failure (payment processing, order creation, resource provisioning) and a duplicated request would cause a real problem: money charged twice, two orders shipped, or two VMs started.
+**This is not an exactly-once guarantee for arbitrary downstream side effects.** Lease fencing
+protects the idempotency record, not the third-party charge your handler made just before the
+process died. If you need that guarantee, you still need a shared transaction, a transactional
+outbox, or an idempotency key passed to the downstream service. This library makes *your endpoint*
+safe to retry; it cannot make *someone else's* endpoint safe to retry for you.
+
+Two more things it deliberately is not: a distributed lock you can borrow for general use, and a
+WebFlux library. The bundled adapter is Servlet-only.
+
+## Contents
+
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [HTTP semantics](#http-semantics)
+- [The `@Idempotent` annotation](#the-idempotent-annotation)
+- [Storage backends](#storage-backends)
+- [Configuration](#configuration)
+- [Using the engine outside HTTP](#using-the-engine-outside-http)
+- [Lifecycle callbacks](#lifecycle-callbacks)
+- [Limitations](#limitations)
+- [Security](#security)
+
+## Requirements
+
+| | Supported | Notes |
+|---|---|---|
+| Java | 21+ | Built and tested on 21 |
+| Spring Boot | 3.5.x | Built against 3.5.16 |
+| Spring MVC (Servlet) | Yes | The autoconfiguration activates only for Servlet web applications |
+| Spring WebFlux | No | Nothing registers, and no error is raised |
+| PostgreSQL | Tested on 16 | Via `idempotency-jdbc` |
+| MySQL | Tested on 8.0 | Via `idempotency-jdbc` |
+| Redis | 7+, tested on 7 | Standalone and Sentinel. Redis Cluster is not supported |
 
 ## Quick start
 
-Add the Spring Boot starter and a storage backend:
-
-Replace `VERSION` with the latest version shown in the Maven Central badge above.
+Add the Spring Boot starter and one storage backend:
 
 ```xml
 <dependency>
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency-spring-boot-starter</artifactId>
-    <version>VERSION</version>
+    <version>0.2.0</version>
 </dependency>
 
 <!-- Pick one storage backend -->
 <dependency>
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency-jdbc</artifactId>
-    <version>VERSION</version>
-</dependency>
-
-<!-- Or Redis -->
-<dependency>
-    <groupId>io.github.josipmusa</groupId>
-    <artifactId>idempotency-redis</artifactId>
-    <version>VERSION</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
-Or use the BOM to align all module versions:
+Or import the BOM and omit the versions:
 
 ```xml
 <dependencyManagement>
@@ -48,7 +88,7 @@ Or use the BOM to align all module versions:
         <dependency>
             <groupId>io.github.josipmusa</groupId>
             <artifactId>idempotency-bom</artifactId>
-            <version>VERSION</version>
+            <version>0.2.0</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
@@ -56,21 +96,28 @@ Or use the BOM to align all module versions:
 </dependencyManagement>
 ```
 
-Annotate the endpoints that need idempotency:
+Declare the store and annotate the endpoints that need idempotency:
+
+```java
+@Bean
+public IdempotencyStore idempotencyStore(DataSource dataSource) {
+    return new JdbcIdempotencyStore(dataSource);
+}
+```
 
 ```java
 @PostMapping("/payments")
 @Idempotent
 public ResponseEntity<Payment> createPayment(@RequestBody PaymentRequest request) {
-    // Subsequent identical requests normally get the stored response replayed.
+    // Duplicates get the stored response replayed.
     // The payment provider should also receive its own idempotency key.
     return ResponseEntity.ok(paymentService.charge(request));
 }
 ```
 
-Clients pass a client-generated key with each request:
+Clients pass a key they generate themselves:
 
-```
+```http
 POST /payments
 Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 Content-Type: application/json
@@ -78,7 +125,80 @@ Content-Type: application/json
 { "amount": 100, "currency": "USD" }
 ```
 
-If that key has been seen before with the same request body, the stored response is returned with `Idempotent-Replayed: true`. If the same key arrives with a different body, the request is rejected with `422 Unprocessable Entity`.
+Send it twice and the second response comes back from the store, carrying
+`Idempotent-Replayed: true`. Send the same key with a different body and it is rejected with `422`.
+
+## How it works
+
+Every request carrying a key resolves down one of four paths, decided entirely by the state that
+key already holds in the store:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/request-outcomes-dark.png">
+  <img alt="Flowchart. A request with an Idempotency-Key is routed by the key's state in the store: a new key runs the handler and stores its response, a completed key replays the stored response when the request body matches and is rejected with 422 when it does not, and a key still in progress past the lock timeout is refused with 503." src="docs/diagrams/request-outcomes.png">
+</picture>
+
+The blocking happens inside the store, not in the engine. A concurrent duplicate waits inside
+`tryAcquire` for the holder to finish and only surfaces as `503` once `lockTimeout` elapses, which
+is why a duplicate arriving mid-flight usually gets the real response rather than an error.
+
+Behind that, each record moves through a small state machine. Every acquisition carries a lease,
+and `complete`, `release`, and the heartbeat all have to present a matching lease, which is what
+fences a stale owner out after its lock has been stolen:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/record-lifecycle-dark.png">
+  <img alt="State machine. A record is created in progress when a caller acquires a lease, which a heartbeat keeps extending while the action runs and which the next caller may steal once it expires. The record then either completes with a replayable payload or fails and becomes reclaimable, and both terminal states are purged when their time to live elapses." src="docs/diagrams/record-lifecycle.png">
+</picture>
+
+The heartbeat fires at `lockTimeout / 2`, so a handler that legitimately runs longer than the lock
+timeout keeps its lease rather than having it stolen mid-flight. A handler that dies without
+releasing leaves an expired lease, which the next `tryAcquire` steals atomically.
+
+Responsibilities are split across three layers, and the boundaries are enforced by design:
+
+| Layer | Module | Owns |
+|---|---|---|
+| Engine | `idempotency-core` | Orchestration, heartbeat, release on failure. No HTTP types. Never calls `complete` |
+| Adapter | `spring/idempotency-spring-web` | Servlet capture and replay, error mapping, calling `complete` with the engine's lease |
+| Store | `providers/*` | The SPI. All blocking, waiting, and stale-lock stealing happens inside `tryAcquire` |
+
+## HTTP semantics
+
+### What gets stored
+
+The filter stores whatever your handler returns, **including 4xx and 5xx responses**, as long as
+the handler returns normally. A handler that returns `500` has that `500` replayed to every
+duplicate for the full TTL.
+
+A handler that *throws* is different: the engine releases the lock, the record is marked `FAILED`,
+and the next request with that key reclaims it and runs the handler again.
+
+If you want a failed request to be retriable, throw. If you return an error status, you are
+telling the library that error is the final answer for that key.
+
+### Status codes the filter can return
+
+These come from the filter itself, before or instead of your handler. Each carries a
+`{"error": "..."}` JSON body.
+
+| Status | When |
+|---|---|
+| `413 Payload Too Large` | Request body exceeds `idempotency.max-body-bytes` |
+| `422 Unprocessable Entity` | Key header missing or blank while `required = true` |
+| `422 Unprocessable Entity` | Key longer than 255 characters |
+| `422 Unprocessable Entity` | Key reused with a different request body |
+| `503 Service Unavailable` | Another request still holds the key after `lockTimeout` |
+
+### Response headers on a replay
+
+| Header | Value |
+|---|---|
+| `Idempotent-Replayed` | `true` |
+| `Cache-Control` | `no-store` |
+
+The stored status code and headers are replayed as they were captured. A key completed by a
+non-HTTP caller has no response to replay, so an HTTP duplicate for that key gets `204 No Content`.
 
 ## The `@Idempotent` annotation
 
@@ -90,31 +210,27 @@ If that key has been seen before with the same request body, the stored response
 )
 ```
 
-### Behavior when `required = false`
+With `required = false`, a request that carries a key gets full idempotency enforcement and one
+that does not passes straight through. Use it on endpoints where idempotency is opt-in: clients
+that care send a key, clients that do not are not rejected.
 
-| Key header present | Behavior |
-|--------------------|----------|
-| Yes                | Full idempotency enforcement |
-| No                 | Request passes through unmodified, no idempotency enforced |
-
-Use `required = false` on endpoints where idempotency is optional. Clients that care send a key;
-clients that do not are not rejected.
+Per-endpoint values override the global defaults in [Configuration](#configuration).
 
 ## Storage backends
 
 | Module | Use when |
-|--------|----------|
-| `idempotency-jdbc` | You have a relational database. Supports MySQL and PostgreSQL. Schema is initialized automatically. |
-| `idempotency-redis` | You have Redis. Standalone and Sentinel topologies; Redis Cluster is not supported. |
-| `idempotency-inmemory` | Single-instance deployments, local development, and tests. Not suitable for horizontally-scaled environments. |
+|---|---|
+| `idempotency-jdbc` | You have a relational database. PostgreSQL and MySQL. Schema initialized automatically |
+| `idempotency-redis` | You have Redis. Standalone and Sentinel topologies |
+| `idempotency-inmemory` | Single-instance deployments, local development, and tests. Not for horizontally-scaled environments |
 
-The Spring Boot starter wires the engine and HTTP filter around the `IdempotencyStore` bean you
+The starter wires the engine and the HTTP filter around whichever `IdempotencyStore` bean you
 provide.
 
-### JDBC
+<details>
+<summary><b>JDBC configuration</b></summary>
 
-Provide a `DataSource` and construct the JDBC store. By default, the store creates and manages its
-schema:
+Provide a `DataSource`. By default the store creates and manages its own schema:
 
 ```java
 @Bean
@@ -123,8 +239,9 @@ public IdempotencyStore idempotencyStore(DataSource dataSource) {
 }
 ```
 
-To manage the schema with Flyway, Liquibase, or another tool, initialize it from the bundled MySQL
-or PostgreSQL schema and disable automatic initialization:
+To manage the schema with Flyway, Liquibase, or another tool, initialize it from the bundled
+`idempotency-schema-postgresql.sql` or `idempotency-schema-mysql.sql` and turn off automatic
+initialization:
 
 ```java
 @Bean
@@ -133,11 +250,14 @@ public IdempotencyStore idempotencyStore(DataSource dataSource) {
 }
 ```
 
-### Redis
+</details>
 
-The Redis store uses [Lettuce](https://lettuce.io/). Open its connection with
-`RedisIdempotencyStore.CODEC` so response bodies remain binary-safe. The application owns the
-client and connection, which is why the beans declare their shutdown methods:
+<details>
+<summary><b>Redis configuration</b></summary>
+
+The Redis store uses [Lettuce](https://lettuce.io/). Open the connection with
+`RedisIdempotencyStore.CODEC` so response bodies stay binary-safe. The application owns the client
+and the connection, which is why the beans declare their shutdown methods:
 
 ```java
 @Bean(destroyMethod = "shutdown")
@@ -160,9 +280,17 @@ public IdempotencyStore idempotencyStore(StatefulRedisConnection<String, byte[]>
 }
 ```
 
-Use Redis 7 or newer. Choose an application-specific key prefix and configure Redis persistence
-with `maxmemory-policy noeviction`. One thread-safe connection can serve the store. Standalone and
-Sentinel deployments are supported; Redis Cluster is not.
+Use Redis 7 or newer. Choose an application-specific key prefix, and configure the server with
+`maxmemory-policy noeviction` so records are not evicted out from under the store. One thread-safe
+connection can serve the store.
+
+</details>
+
+### Adding a backend
+
+`IdempotencyStoreContract` in `idempotency-test` is the single source of truth for store behavior.
+Implement the SPI, extend the contract, implement `store()`, and pass all of it. Behavior changes
+belong in the contract first, so every backend is held to them.
 
 ## Configuration
 
@@ -170,22 +298,20 @@ All properties are prefixed with `idempotency`:
 
 ```yaml
 idempotency:
-  key-header: Idempotency-Key     # Header name carrying the key. Default: Idempotency-Key
+  key-header: Idempotency-Key     # Header carrying the key. Default: Idempotency-Key
   default-ttl: PT24H              # Default TTL for stored responses. Default: 24h
   default-lock-timeout: PT10S     # Default lock timeout. Default: 10s
-  max-body-bytes: 1048576         # Max request body size to fingerprint in bytes. Default: 1 MiB
-  filter-order: 0                 # Order of the idempotency filter in the filter chain. Default: 0
+  max-body-bytes: 1048576         # Max request body size to fingerprint, in bytes. Default: 1 MiB
+  filter-order: 0                 # Order of the filter in the chain. Default: 0
   purge:
-    enabled: true                 # Whether to register the purge scheduler. Default: true
-    cron: "0 0 * * * *"          # Cron expression for purging expired records. Default: hourly
+    enabled: true                 # Register the purge scheduler. Default: true
+    cron: "0 0 * * * *"           # Cron for purging expired records. Default: hourly
 ```
-
-Per-endpoint values in `@Idempotent` override these defaults.
 
 ## Using the engine outside HTTP
 
 `idempotency-core` has no HTTP types in it. Drive the engine directly from a message listener, an
-event handler, or anything else that needs a key to run at most once - the annotation, the filter
+event handler, or anything else that needs a key to run at most once. The annotation, the filter,
 and `StoredResponse` are the Spring adapter's business, not the engine's.
 
 A caller with no request body to hash builds a context without a fingerprint, and completes with
@@ -203,7 +329,7 @@ switch (result) {
     case ExecutionResult.Executed executed ->
             engine.complete(context, executed.leaseId(), NoPayload.at(Instant.now()), context.ttl());
     case ExecutionResult.Duplicate ignored -> {
-        // already handled under this key - nothing to do
+        // already handled under this key, nothing to do
     }
 }
 ```
@@ -267,51 +393,44 @@ Outside Spring, pass the listeners to the engine directly:
 IdempotencyEngine engine = new IdempotencyEngine(store, scheduler, List.of(auditListener));
 ```
 
-## Framework support
+## Limitations
 
-The bundled *adapter* supports **Spring MVC (Servlet-based)** applications only. The engine itself
-is transport-neutral - see [Using the engine outside HTTP](#using-the-engine-outside-http).
+**No WebFlux or reactive support.** The filter is built on `OncePerRequestFilter` (Servlet API). A
+reactive `WebFilter` adapter is a candidate for a future release.
 
-| Runtime | Status |
-|---------|--------|
-| Spring MVC (Servlet) | Supported |
-| Spring WebFlux (Reactive) | Not supported |
+**No messaging adapter.** Non-HTTP callers drive `IdempotencyEngine` directly; there is no
+ready-made listener integration yet.
 
-The autoconfiguration activates only when a Servlet-based Spring Web application is detected (`@ConditionalOnWebApplication(type = SERVLET)`). In a WebFlux application it does nothing: no error is raised, and the filter does not register.
+**One global key namespace.** Keys live in a single namespace within the store, with no built-in
+per-tenant or per-user isolation. Two callers using the same key value share idempotency state. In
+multi-tenant environments, prefix keys at the application level (for example `userId:clientKey`).
 
-## Known limitations
+**Redis Cluster is not supported.** The provider takes Lettuce's non-cluster
+`StatefulRedisConnection`, and its bounded SCAN purge is not node-aware. Standalone and Sentinel
+master-replica connections work.
 
-**No WebFlux/reactive support.** The filter is built on `OncePerRequestFilter` (Servlet API). A reactive `WebFilter`-based adapter is a candidate for a future release.
+**Downstream side effects.** See [What this is not](#what-this-is-not).
 
-**No messaging adapter.** Non-HTTP callers drive `IdempotencyEngine` directly; there is no ready-made message-listener integration yet.
+## Security
 
-**Shared idempotency key namespace.** Keys are stored in a single global namespace within the backing store. There is no built-in per-tenant or per-user isolation. Two callers using the same key value share idempotency state. For multi-tenant environments, prefix keys with a tenant or user identifier at the application level (e.g. `userId:clientKey`).
-
-**Arbitrary downstream effects are not an exactly-once guarantee.** Lease fencing protects the
-idempotency record, but it cannot roll back an external side effect completed before a process
-failure. Use a shared transaction, a transactional outbox, or a downstream idempotency key when
-that guarantee is required.
-
-**Redis Cluster is not supported.** The provider accepts Lettuce's non-cluster `StatefulRedisConnection`, and its bounded SCAN purge is not node-aware. Standalone and Sentinel master-replica connections are supported.
-
-## Security considerations
-
-The store persists full HTTP response bodies. Depending on your endpoints this may include PII, tokens, or financial data.
+The store persists full HTTP response bodies. Depending on your endpoints, that may include PII,
+tokens, or financial data.
 
 - Enable encryption at rest on the backing database.
-- Use TLS and authentication/ACLs for Redis; restrict the ACL to the configured key prefix.
-- Configure Redis with `maxmemory-policy noeviction` and monitor memory headroom.
-- Use short TTL values to limit data retention.
-- Configure `idempotency.purge.cron` to remove expired records promptly.
-- Audit which endpoints are annotated `@Idempotent`, what their responses contain, and their maximum response size.
+- Use TLS and ACLs for Redis, and restrict the ACL to the configured key prefix.
+- Keep TTL values short to limit retention, and let `idempotency.purge.cron` remove expired records
+  promptly.
+- Audit which endpoints are annotated `@Idempotent`, what their responses contain, and how large
+  those responses can get.
 
-To strip or redact sensitive fields before storage, register a `ResponseSanitizer` bean (`io.github.josipmusa.idempotency.spring.web.ResponseSanitizer`). The default implementation is a no-op pass-through:
+To strip or redact sensitive fields before storage, register a `ResponseSanitizer` bean
+(`io.github.josipmusa.idempotency.spring.web.ResponseSanitizer`). The default is a no-op
+pass-through:
 
 ```java
 @Bean
 public ResponseSanitizer responseSanitizer() {
     return response -> {
-        // Remove sensitive headers, redact body, etc.
         Map<String, List<String>> headers = new HashMap<>(response.headers());
         headers.remove("Set-Cookie");
         return new StoredResponse(response.statusCode(), headers, response.body(), response.completedAt());
@@ -319,7 +438,15 @@ public ResponseSanitizer responseSanitizer() {
 }
 ```
 
-For vulnerability reporting, see [SECURITY.md](SECURITY.md).
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Project
+
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md)
+- [API documentation](https://javadoc.io/doc/io.github.josipmusa/idempotency-core)
 
 ## License
 
