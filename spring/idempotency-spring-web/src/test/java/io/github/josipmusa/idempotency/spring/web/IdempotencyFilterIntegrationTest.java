@@ -345,10 +345,14 @@ class IdempotencyFilterIntegrationTest {
         }
 
         @Override
-        public void release(IdempotencyIdentity identity, String leaseId) {}
+        public void release(IdempotencyIdentity identity, String leaseId) {
+            // Not needed
+        }
 
         @Override
-        public void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension) {}
+        public void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension) {
+            // Not needed
+        }
 
         @Override
         public int purgeExpired() {

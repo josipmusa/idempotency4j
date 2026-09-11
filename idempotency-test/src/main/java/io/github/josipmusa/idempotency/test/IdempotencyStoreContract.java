@@ -34,13 +34,20 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+// Test methods follow the project's When_Context_Expect_Result convention. This class is a
+// JUnit base class that ships as a published artifact, so it lives in main sources and static
+// analysis applies its production naming rule to it.
+@SuppressWarnings("java:S100")
 public abstract class IdempotencyStoreContract {
 
     // 64-character fingerprint constants (SHA-256 hex length) used across test fixtures
@@ -57,6 +64,24 @@ public abstract class IdempotencyStoreContract {
 
     private final ThreadLocal<Map<IdempotencyIdentity, String>> activeLeases =
             ThreadLocal.withInitial(java.util.HashMap::new);
+
+    @AfterEach
+    void clearActiveLeases() {
+        activeLeases.remove();
+    }
+
+    /**
+     * Lets real time pass.
+     *
+     * <p>A store contract has two reasons to need this and no condition it could await on
+     * instead. One is a deadline the store owns - a row's {@code expires_at}, a Redis TTL, a
+     * lock expiry - which only wall-clock time moves past. The other is holding a lock long
+     * enough for another thread to reach the call it is supposed to block in.
+     */
+    @SuppressWarnings("java:S2925") // letting real time pass is the whole point of this helper
+    protected static void sleepFor(Duration duration) throws InterruptedException {
+        Thread.sleep(duration.toMillis());
+    }
 
     protected AcquireResult acquire(IdempotencyStore store, IdempotencyContext context) {
         AcquireResult result = store.tryAcquire(context);
@@ -170,7 +195,7 @@ public abstract class IdempotencyStoreContract {
         acquire(s, contextFor(key));
         complete(s, key, sampleResponse(), Duration.ofMillis(1));
 
-        Thread.sleep(10);
+        sleepFor(Duration.ofMillis(10));
 
         AcquireResult result = acquire(s, contextFor(key));
 
@@ -185,7 +210,7 @@ public abstract class IdempotencyStoreContract {
         acquire(s, contextFor(key, Duration.ofMillis(100)));
         // Simulate crashed caller — do not complete or release
 
-        Thread.sleep(150);
+        sleepFor(Duration.ofMillis(150));
 
         AcquireResult result = acquire(s, contextFor(key));
 
@@ -201,7 +226,7 @@ public abstract class IdempotencyStoreContract {
         // Acquire with a 100ms lock
         acquire(s, contextFor(key, sharedTimeout));
         // Simulate crashed caller — never complete or release
-        Thread.sleep(150); // past lockExpiresAt
+        sleepFor(Duration.ofMillis(150)); // past lockExpiresAt
 
         // Second caller uses the SAME timeout — must still steal the stale lock
         AcquireResult result = acquire(s, contextFor(key, sharedTimeout));
@@ -219,7 +244,7 @@ public abstract class IdempotencyStoreContract {
                 new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofMillis(30), FINGERPRINT_A);
         var first = (AcquireResult.Acquired) s.tryAcquire(firstContext);
 
-        Thread.sleep(80);
+        sleepFor(Duration.ofMillis(80));
 
         var secondContext =
                 new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_B);
@@ -244,13 +269,13 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_InFlightKey_Expect_BlocksAndReturnsDuplicateAfterCompletion() throws Exception {
+    void When_InFlightKey_Expect_BlocksAndReturnsDuplicateAfterCompletion()
+            throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "inflight-key";
         StoredResponse response = sampleResponse();
 
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             long[] thread1CompleteTime = new long[1];
             long[] thread2ResultTime = new long[1];
             CountDownLatch lockAcquired = new CountDownLatch(1);
@@ -258,16 +283,14 @@ public abstract class IdempotencyStoreContract {
             Future<?> thread1 = executor.submit(() -> {
                 acquire(s, contextFor(key));
                 lockAcquired.countDown();
-                try {
-                    Thread.sleep(300);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
+                // Hold the lock long enough for thread 2 to reach tryAcquire and block in it
+                sleepFor(Duration.ofMillis(300));
                 complete(s, key, response, Duration.ofHours(1));
                 thread1CompleteTime[0] = System.nanoTime();
+                return null;
             });
 
-            lockAcquired.await(5, TimeUnit.SECONDS);
+            assertThat(lockAcquired.await(5, TimeUnit.SECONDS)).isTrue();
 
             Future<AcquireResult> thread2 = executor.submit(() -> {
                 AcquireResult result = acquire(s, contextFor(key));
@@ -284,59 +307,59 @@ public abstract class IdempotencyStoreContract {
             assertThat(storedResponseOf(duplicate).headers()).containsEntry("X-Request-Id", List.of("abc-123"));
             assertThat(storedResponseOf(duplicate).body()).isEqualTo("hello".getBytes());
             assertThat(thread2ResultTime[0]).isGreaterThan(thread1CompleteTime[0]);
-        } finally {
-            executor.shutdownNow();
         }
     }
 
     @Test
-    void When_InFlightKeyLockTimeoutExceeded_Expect_ReturnsLockTimeout() throws Exception {
+    void When_InFlightKeyLockTimeoutExceeded_Expect_ReturnsLockTimeout()
+            throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "timeout-key";
 
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
-            CountDownLatch lockAcquired = new CountDownLatch(1);
-            // Thread 1 acquires and never completes
-            Future<?> thread1 = executor.submit(() -> {
-                acquire(s, contextFor(key, Duration.ofSeconds(30)));
-                lockAcquired.countDown();
-                // Never complete or release — simulate infinite hang
-                try {
-                    Thread.sleep(5000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+        CountDownLatch lockAcquired = new CountDownLatch(1);
+        CountDownLatch releaseHolder = new CountDownLatch(1);
 
-            lockAcquired.await(5, TimeUnit.SECONDS);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            try {
+                // Thread 1 acquires and never completes
+                Future<?> thread1 = executor.submit(() -> {
+                    acquire(s, contextFor(key, Duration.ofSeconds(30)));
+                    lockAcquired.countDown();
+                    // Never complete or release — simulate a hang that outlasts the test
+                    return releaseHolder.await(30, TimeUnit.SECONDS);
+                });
 
-            long start = System.nanoTime();
-            Future<AcquireResult> thread2 = executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(200))));
+                assertThat(lockAcquired.await(5, TimeUnit.SECONDS)).isTrue();
 
-            AcquireResult result = thread2.get(5, TimeUnit.SECONDS);
-            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                long start = System.nanoTime();
+                Future<AcquireResult> thread2 =
+                        executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(200))));
 
-            assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
-            assertThat(elapsed).isBetween(200L, 600L);
-        } finally {
-            executor.shutdownNow();
+                AcquireResult result = thread2.get(5, TimeUnit.SECONDS);
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+                assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+                assertThat(elapsed).isBetween(200L, 600L);
+                thread1.cancel(true);
+            } finally {
+                releaseHolder.countDown();
+            }
         }
     }
 
     @Test
-    void When_ConcurrentRequests_Expect_OnlyOneAcquires() throws Exception {
+    void When_ConcurrentRequests_Expect_OnlyOneAcquires()
+            throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "concurrent-key";
         StoredResponse response = sampleResponse();
         int threadCount = 20;
 
-        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         CountDownLatch readyLatch = new CountDownLatch(threadCount);
         CountDownLatch startLatch = new CountDownLatch(1);
         List<AcquireResult> results = Collections.synchronizedList(new ArrayList<>());
 
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(threadCount)) {
             List<Future<?>> futures = new ArrayList<>();
 
             for (int i = 0; i < threadCount; i++) {
@@ -357,7 +380,7 @@ public abstract class IdempotencyStoreContract {
                 }));
             }
 
-            readyLatch.await(5, TimeUnit.SECONDS);
+            assertThat(readyLatch.await(5, TimeUnit.SECONDS)).isTrue();
             startLatch.countDown();
 
             for (Future<?> future : futures) {
@@ -372,26 +395,24 @@ public abstract class IdempotencyStoreContract {
                     .count();
 
             assertThat(acquiredCount).isEqualTo(1);
-            assertThat(duplicateCount).isEqualTo(threadCount - 1);
+            assertThat(duplicateCount).isEqualTo((long) threadCount - 1);
 
             results.stream()
                     .filter(r -> r instanceof AcquireResult.Duplicate)
-                    .map(r -> storedResponseOf(r))
+                    .map(IdempotencyStoreContract::storedResponseOf)
                     .forEach(r -> {
                         assertThat(r.statusCode()).isEqualTo(200);
                         assertThat(r.body()).isEqualTo("hello".getBytes());
                     });
-        } finally {
-            executor.shutdownNow();
         }
     }
 
     @Test
-    void When_DifferentKeys_Expect_AcquireIndependently() throws Exception {
+    void When_DifferentKeys_Expect_AcquireIndependently()
+            throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
 
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<AcquireResult> futureA = executor.submit(() -> acquire(s, contextFor("key-a")));
             Future<AcquireResult> futureB = executor.submit(() -> acquire(s, contextFor("key-b")));
 
@@ -400,8 +421,6 @@ public abstract class IdempotencyStoreContract {
 
             assertThat(resultA).isInstanceOf(AcquireResult.Acquired.class);
             assertThat(resultB).isInstanceOf(AcquireResult.Acquired.class);
-        } finally {
-            executor.shutdownNow();
         }
     }
 
@@ -432,7 +451,8 @@ public abstract class IdempotencyStoreContract {
     // --- extendLock contract ---
 
     @Test
-    void When_ExtendLockInProgressKey_Expect_LockNotStolen() throws Exception {
+    void When_ExtendLockInProgressKey_Expect_LockNotStolen()
+            throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "extend-key";
 
@@ -443,19 +463,16 @@ public abstract class IdempotencyStoreContract {
         extendLock(s, key, Duration.ofMillis(500));
 
         // Wait past the original 100ms lock expiry
-        Thread.sleep(150);
+        sleepFor(Duration.ofMillis(150));
 
         // Lock should still be valid — second caller should NOT steal it
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        try {
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
             Future<AcquireResult> future = executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(100))));
             AcquireResult result = future.get(5, TimeUnit.SECONDS);
 
             assertThat(result)
                     .as("Extended lock should not be stealable before new expiry")
                     .isInstanceOf(AcquireResult.LockTimeout.class);
-        } finally {
-            executor.shutdownNow();
         }
     }
 
@@ -570,7 +587,7 @@ public abstract class IdempotencyStoreContract {
         complete(s, key, firstResponse, Duration.ofMillis(1));
 
         // Wait for TTL to expire
-        Thread.sleep(10);
+        sleepFor(Duration.ofMillis(10));
 
         // Second generation: re-acquire → complete with different response
         AcquireResult second = acquire(s, contextFor(key));
@@ -615,7 +632,8 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_FailedKeyUnderContention_Expect_TimeoutRespected() throws Exception {
+    void When_FailedKeyUnderContention_Expect_TimeoutRespected()
+            throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "contended-failed-key";
         int chaosThreadCount = 20;
@@ -626,33 +644,37 @@ public abstract class IdempotencyStoreContract {
         acquire(s, contextFor(key, Duration.ofSeconds(10)));
         release(s, key);
 
-        ExecutorService executor = Executors.newFixedThreadPool(chaosThreadCount + 1);
-        try {
-            // Chaos threads continuously steal and release the key, creating hot contention
-            for (int i = 0; i < chaosThreadCount; i++) {
-                executor.submit(() -> {
-                    chaosReady.countDown();
-                    while (!stop.get()) {
-                        AcquireResult r = acquire(s, contextFor(key, Duration.ofSeconds(10)));
-                        if (r instanceof AcquireResult.Acquired) {
-                            release(s, key);
+        try (ExecutorService executor = Executors.newFixedThreadPool(chaosThreadCount + 1)) {
+            // The inner finally is load-bearing: close() awaits termination, and the chaos
+            // loops below only exit once stop is set. Setting it in an outer finally would
+            // run after close() had already started waiting, and the test would hang.
+            try {
+                // Chaos threads continuously steal and release the key, creating hot contention
+                for (int i = 0; i < chaosThreadCount; i++) {
+                    executor.submit(() -> {
+                        chaosReady.countDown();
+                        while (!stop.get()) {
+                            AcquireResult r = acquire(s, contextFor(key, Duration.ofSeconds(10)));
+                            if (r instanceof AcquireResult.Acquired) {
+                                release(s, key);
+                            }
                         }
-                    }
-                });
+                    });
+                }
+                assertThat(chaosReady.await(5, TimeUnit.SECONDS)).isTrue();
+
+                // Victim thread with short lockTimeout — must return within bounded time
+                Future<AcquireResult> victim =
+                        executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(200))));
+
+                // Without the fix, the victim can loop indefinitely under contention.
+                // victim.get(5s) will throw TimeoutException, failing the test.
+                AcquireResult result = victim.get(5, TimeUnit.SECONDS);
+
+                assertThat(result).isInstanceOfAny(AcquireResult.Acquired.class, AcquireResult.LockTimeout.class);
+            } finally {
+                stop.set(true);
             }
-            chaosReady.await(5, TimeUnit.SECONDS);
-
-            // Victim thread with short lockTimeout — must return within bounded time
-            Future<AcquireResult> victim = executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(200))));
-
-            // Without the fix, the victim can loop indefinitely under contention.
-            // victim.get(5s) will throw TimeoutException, failing the test.
-            AcquireResult result = victim.get(5, TimeUnit.SECONDS);
-
-            assertThat(result).isInstanceOfAny(AcquireResult.Acquired.class, AcquireResult.LockTimeout.class);
-        } finally {
-            stop.set(true);
-            executor.shutdownNow();
         }
     }
 
@@ -677,7 +699,7 @@ public abstract class IdempotencyStoreContract {
         // Both TTL and lockTimeout are short so the IN_PROGRESS entry is eligible for purge
         var ctx = contextFor("purge-expired-1", Duration.ofMillis(10), Duration.ofMillis(2));
         acquire(s, ctx);
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
         assertThat(acquire(s, ctx)).isInstanceOf(AcquireResult.Acquired.class);
     }
@@ -703,7 +725,7 @@ public abstract class IdempotencyStoreContract {
                 ctx.key(),
                 new StoredResponse(200, Map.of(), "body".getBytes(), Instant.now()),
                 Duration.ofMillis(1));
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
         assertThat(acquire(s, ctx)).isInstanceOf(AcquireResult.Acquired.class);
     }
@@ -714,7 +736,7 @@ public abstract class IdempotencyStoreContract {
         // Lock expires quickly (2ms), but TTL is long (10 min)
         var ctx = contextFor("purge-stale-inprogress-1", Duration.ofMinutes(10), Duration.ofMillis(2));
         acquire(s, ctx);
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
         int purged = s.purgeExpired();
         // The entry TTL has not expired, so purge should keep it (even though lock expired).
         // A correct purge must NOT remove an IN_PROGRESS entry whose TTL is still valid.
@@ -729,7 +751,7 @@ public abstract class IdempotencyStoreContract {
         // Both lockTimeout and TTL are short — entry is fully expired and safe to purge
         var ctx = contextFor("purge-stale-both-1", Duration.ofMillis(2), Duration.ofMillis(2));
         acquire(s, ctx);
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
         assertThat(acquire(s, ctx)).isInstanceOf(AcquireResult.Acquired.class);
     }
@@ -881,7 +903,7 @@ public abstract class IdempotencyStoreContract {
         acquire(s, contextFor(key, lockTimeout));
 
         // Wait for the lock to expire, then release
-        Thread.sleep(lockTimeout.toMillis() + 100);
+        sleepFor(lockTimeout.plusMillis(100));
         release(s, key);
 
         // Purge immediately — the FAILED record should NOT be eligible yet.

@@ -214,6 +214,9 @@ public final class IdempotencyEngine {
             try {
                 store.extendLock(context.identity(), leaseId, context.lockTimeout());
             } catch (Exception ignored) {
+                // Best-effort: this final extension only buys the adapter time to call
+                // complete(). The lease is still valid, and complete() fences on it anyway,
+                // so a failure here must not turn a successful action into a failed one.
             }
             return ExecutionResult.executed(leaseId);
         } catch (Exception e) {

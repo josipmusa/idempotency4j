@@ -17,8 +17,8 @@ package io.github.josipmusa.idempotency.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
@@ -30,9 +30,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -66,6 +68,21 @@ class IdempotencyEngineTest {
 
     private IdempotencyContext defaultContext(String key) {
         return new IdempotencyContext(SCOPE, key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+    }
+
+    private long extendLockCalls() {
+        return mockingDetails(store).getInvocations().stream()
+                .filter(i -> "extendLock".equals(i.getMethod().getName()))
+                .count();
+    }
+
+    /**
+     * Blocks until the scheduler has run everything due within {@code delay}. The scheduler is
+     * single-threaded and ordered by due time, so once this returns no heartbeat that was due
+     * earlier can still be pending or in flight.
+     */
+    private void drainScheduler(Duration delay) throws Exception {
+        scheduler.schedule(() -> {}, delay.toMillis(), TimeUnit.MILLISECONDS).get(5, TimeUnit.SECONDS);
     }
 
     private StoredResponse anyStoredResponse() {
@@ -110,12 +127,9 @@ class IdempotencyEngineTest {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         String key = "fail-key";
 
-        try {
-            engine.execute(defaultContext(key), () -> {
-                throw new RuntimeException("boom");
-            });
-        } catch (Exception ignored) {
-        }
+        catchThrowable(() -> engine.execute(defaultContext(key), () -> {
+            throw new RuntimeException("boom");
+        }));
 
         verify(store, times(1)).release(identity(key), LEASE_ID);
     }
@@ -124,12 +138,9 @@ class IdempotencyEngineTest {
     void When_ActionThrows_Expect_CompleteNeverCalled() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        try {
-            engine.execute(defaultContext("fail-key"), () -> {
-                throw new RuntimeException("boom");
-            });
-        } catch (Exception ignored) {
-        }
+        catchThrowable(() -> engine.execute(defaultContext("fail-key"), () -> {
+            throw new RuntimeException("boom");
+        }));
 
         verify(store, never()).complete(any(), any(), any(), any());
     }
@@ -162,10 +173,21 @@ class IdempotencyEngineTest {
         IdempotencyContext context =
                 new IdempotencyContext(SCOPE, "hb-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        CountDownLatch beats = new CountDownLatch(1);
+        doAnswer(invocation -> {
+                    beats.countDown();
+                    return null;
+                })
+                .when(store)
+                .extendLock(any(), any(), any());
 
-        engine.execute(context, () -> Thread.sleep(300));
+        // The action outlives the first heartbeat rather than a fixed sleep, so the test is
+        // deterministic regardless of how slow the machine running it is.
+        engine.execute(
+                context, () -> assertThat(beats.await(5, TimeUnit.SECONDS)).isTrue());
+        drainScheduler(Duration.ZERO);
 
-        verify(store, atLeastOnce()).extendLock(eq(identity("hb-key")), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+        verify(store, atLeastOnce()).extendLock(identity("hb-key"), LEASE_ID, Duration.ofMillis(100));
     }
 
     @Test
@@ -176,21 +198,14 @@ class IdempotencyEngineTest {
 
         engine.execute(context, () -> {});
 
-        // Wait briefly to let any in-flight heartbeat fire
-        Thread.sleep(50);
-        int countAfterExecute = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        // Let any in-flight heartbeat finish, then take the count
+        drainScheduler(Duration.ZERO);
+        long countAfterExecute = extendLockCalls();
 
-        // Wait 2x the heartbeat interval (50ms interval for 100ms lockTimeout)
-        Thread.sleep(100);
-        int countAfterWait = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        // Give the scheduler 4x the heartbeat interval (50ms for a 100ms lockTimeout) to fire again
+        drainScheduler(Duration.ofMillis(200));
 
-        assertThat(countAfterWait).isEqualTo(countAfterExecute);
+        assertThat(extendLockCalls()).isEqualTo(countAfterExecute);
     }
 
     @Test
@@ -199,26 +214,16 @@ class IdempotencyEngineTest {
                 SCOPE, "hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        try {
-            engine.execute(context, () -> {
-                throw new RuntimeException("fail");
-            });
-        } catch (Exception ignored) {
-        }
+        catchThrowable(() -> engine.execute(context, () -> {
+            throw new RuntimeException("fail");
+        }));
 
-        Thread.sleep(50);
-        int countAfterExecute = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        drainScheduler(Duration.ZERO);
+        long countAfterExecute = extendLockCalls();
 
-        Thread.sleep(100);
-        int countAfterWait = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        drainScheduler(Duration.ofMillis(200));
 
-        assertThat(countAfterWait).isEqualTo(countAfterExecute);
+        assertThat(extendLockCalls()).isEqualTo(countAfterExecute);
     }
 
     @Test
@@ -242,7 +247,7 @@ class IdempotencyEngineTest {
 
         engine.execute(context, () -> {});
 
-        verify(store).tryAcquire(eq(context));
+        verify(store).tryAcquire(context);
     }
 
     // --- Checked exception propagation ---
@@ -293,12 +298,20 @@ class IdempotencyEngineTest {
         IdempotencyContext context = new IdempotencyContext(
                 SCOPE, "hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
-        doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any(), any());
+        CountDownLatch beats = new CountDownLatch(2);
+        doAnswer(invocation -> {
+                    beats.countDown();
+                    throw new IdempotencyStoreException("connection lost");
+                })
+                .when(store)
+                .extendLock(any(), any(), any());
 
-        engine.execute(context, () -> Thread.sleep(300));
+        engine.execute(
+                context, () -> assertThat(beats.await(5, TimeUnit.SECONDS)).isTrue());
+        drainScheduler(Duration.ZERO);
 
         // Heartbeat should have been called multiple times despite throwing each time
-        verify(store, atLeast(2)).extendLock(eq(identity("hb-error-key")), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+        verify(store, atLeast(2)).extendLock(identity("hb-error-key"), LEASE_ID, Duration.ofMillis(100));
     }
 
     @Test

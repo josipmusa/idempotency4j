@@ -90,7 +90,8 @@ class IdempotentHandlerRegistryTest {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        Method mockedMethod = mock(Method.class);
+        when(handlerMethod.getMethod()).thenReturn(mockedMethod);
 
         registry.afterSingletonsInstantiated();
 

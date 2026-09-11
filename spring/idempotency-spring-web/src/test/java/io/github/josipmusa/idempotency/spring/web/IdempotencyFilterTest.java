@@ -73,7 +73,8 @@ class IdempotencyFilterTest {
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
         when(handlerMapping.getHandler(request)).thenReturn(chain);
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        Method mockedMethod = mock(Method.class);
+        when(handlerMethod.getMethod()).thenReturn(mockedMethod);
 
         filter.doFilter(request, response, filterChain);
 
@@ -87,7 +88,8 @@ class IdempotencyFilterTest {
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
         when(handlerMapping.getHandler(request)).thenReturn(chain);
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        Method mockedMethod = mock(Method.class);
+        when(handlerMethod.getMethod()).thenReturn(mockedMethod);
         request.addHeader("Idempotency-Key", "test-key");
 
         filter.doFilter(request, response, filterChain);
@@ -464,13 +466,13 @@ class IdempotencyFilterTest {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
 
-        ResponseSanitizer sanitizer = response -> new StoredResponse(
-                response.statusCode(),
-                response.headers().entrySet().stream()
+        ResponseSanitizer sanitizer = storedResponse -> new StoredResponse(
+                storedResponse.statusCode(),
+                storedResponse.headers().entrySet().stream()
                         .filter(e -> !e.getKey().equalsIgnoreCase("X-Secret"))
                         .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue)),
-                response.body(),
-                response.completedAt());
+                storedResponse.body(),
+                storedResponse.completedAt());
 
         IdempotencyFilter filterWithSanitizer = new IdempotencyFilter(
                 engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);

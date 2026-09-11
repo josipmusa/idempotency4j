@@ -16,6 +16,7 @@
 package io.github.josipmusa.idempotency.core;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -31,6 +32,10 @@ import java.util.stream.Collectors;
  *
  * <p>Headers and body are defensively copied on construction to prevent
  * mutation after storage.
+ *
+ * <p>{@code equals}, {@code hashCode} and {@code toString} compare and render the
+ * body by content rather than by array identity, so two responses carrying the same
+ * bytes are equal.
  *
  * @param statusCode  the HTTP status code (e.g. 200, 201, 409)
  * @param headers     HTTP response headers — deep-copied so inner lists are immutable
@@ -53,5 +58,25 @@ public record StoredResponse(int statusCode, Map<String, List<String>> headers, 
     @Override
     public byte[] body() {
         return body.clone();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof StoredResponse other
+                && statusCode == other.statusCode
+                && headers.equals(other.headers)
+                && Arrays.equals(body, other.body)
+                && completedAt.equals(other.completedAt);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(statusCode, headers, Arrays.hashCode(body), completedAt);
+    }
+
+    @Override
+    public String toString() {
+        return "StoredResponse[statusCode=" + statusCode + ", headers=" + headers + ", body=" + body.length
+                + " bytes, completedAt=" + completedAt + "]";
     }
 }

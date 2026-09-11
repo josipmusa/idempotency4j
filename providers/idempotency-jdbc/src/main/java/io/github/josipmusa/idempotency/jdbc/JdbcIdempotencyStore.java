@@ -654,6 +654,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try {
             conn.rollback();
         } catch (SQLException ignored) {
+            // Called while unwinding a failure that is already being reported. A broken
+            // connection cannot be rolled back and will be discarded by the pool anyway,
+            // so there is nothing this could usefully do or report.
         }
     }
 
@@ -661,6 +664,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try {
             conn.setAutoCommit(true);
         } catch (SQLException ignored) {
+            // Restoring the borrowed connection's default on the way out. If it is already
+            // broken the pool discards it, and masking the caller's real failure with this
+            // one would only lose information.
         }
     }
 

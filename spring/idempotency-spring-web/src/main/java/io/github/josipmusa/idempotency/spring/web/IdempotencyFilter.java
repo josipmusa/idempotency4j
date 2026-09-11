@@ -17,12 +17,7 @@ package io.github.josipmusa.idempotency.spring.web;
 
 import static io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry.*;
 
-import io.github.josipmusa.idempotency.core.ExecutionResult;
-import io.github.josipmusa.idempotency.core.IdempotencyContext;
-import io.github.josipmusa.idempotency.core.IdempotencyEngine;
-import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
-import io.github.josipmusa.idempotency.core.NoPayload;
-import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.*;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
@@ -186,9 +181,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         }
 
         switch (result) {
-            case ExecutionResult.Executed executed -> storeAndFlush(context, executed.leaseId(), wrappedResponse);
-            case ExecutionResult.Duplicate duplicate -> {
-                switch (duplicate.payload()) {
+            case ExecutionResult.Executed(String leaseId) -> storeAndFlush(context, leaseId, wrappedResponse);
+            case ExecutionResult.Duplicate(IdempotencyPayload payload) -> {
+                switch (payload) {
                     case StoredResponse stored -> HttpIdempotencyMapper.replay(stored, response);
                     // Only a non-HTTP caller stores NoPayload under a key, so this cannot arise
                     // from a record this filter created. Answer 204 rather than fail the request.

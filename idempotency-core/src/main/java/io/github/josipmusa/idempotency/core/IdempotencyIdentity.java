@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.io.Serializable;
 import java.util.Objects;
 
 /**
@@ -27,13 +28,15 @@ import java.util.Objects;
  *
  * <p>Stores key their records by the whole identity and never by the key alone.
  *
+ * <p>Serializable so that exceptions carrying an identity stay serializable.
+ *
  * @param scope names the unit of work, for example {@code PaymentController.create}.
  *              Non-blank, at most {@value #MAX_SCOPE_LENGTH} characters.
  * @param key   names the occurrence within that scope, typically a client-supplied
  *              header value or a message identifier. Non-blank, at most
  *              {@value #MAX_KEY_LENGTH} characters.
  */
-public record IdempotencyIdentity(String scope, String key) {
+public record IdempotencyIdentity(String scope, String key) implements Serializable {
 
     /** Longest scope a store is required to hold. */
     public static final int MAX_SCOPE_LENGTH = 128;
