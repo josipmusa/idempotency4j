@@ -63,10 +63,12 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
 
             Method method = handlerMethod.getMethod();
             Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl(), handlerMethod);
-            Duration lockTimeout =
-                    parseDuration(annotation.lockTimeout(), "lockTimeout", config.defaultLockTimeout(), handlerMethod);
+            Duration lease = parseDuration(annotation.lease(), "lease", config.defaultLeaseDuration(), handlerMethod);
+            Duration waitTimeout =
+                    parseDuration(annotation.waitTimeout(), "waitTimeout", config.defaultWaitTimeout(), handlerMethod);
             String scope = scopeOf(handlerMethod);
-            builtAnnotationCache.put(method, new ResolvedIdempotent(annotation.required(), ttl, lockTimeout, scope));
+            builtAnnotationCache.put(
+                    method, new ResolvedIdempotent(annotation.required(), ttl, lease, waitTimeout, scope));
         });
         this.cache = Map.copyOf(builtAnnotationCache);
     }
@@ -103,10 +105,12 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
     }
 
     /**
-     * @param required    whether a request without a key is rejected
-     * @param ttl         how long the completed response is kept
-     * @param lockTimeout how long a concurrent duplicate waits for the in-flight request
-     * @param scope       the handler's idempotency scope, {@code <simple class name>.<method name>}
+     * @param required whether a request without a key is rejected
+     * @param ttl      how long the completed response is kept
+     * @param lease    how long this request's acquisition is protected before it can be stolen
+     * @param waitTimeout how long a concurrent duplicate blocks for the in-flight request
+     * @param scope    the handler's idempotency scope, {@code <simple class name>.<method name>}
      */
-    public record ResolvedIdempotent(boolean required, Duration ttl, Duration lockTimeout, String scope) {}
+    public record ResolvedIdempotent(
+            boolean required, Duration ttl, Duration lease, Duration waitTimeout, String scope) {}
 }

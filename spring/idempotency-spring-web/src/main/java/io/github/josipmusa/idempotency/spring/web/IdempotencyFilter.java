@@ -60,7 +60,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
     private static final String ERROR_MISSING_KEY = "Idempotency-Key header is required";
     private static final String ERROR_KEY_TOO_LONG = "Idempotency-Key must not exceed 255 characters";
-    private static final String ERROR_LOCK_TIMEOUT = "Request with this key is already being processed";
+    private static final String ERROR_IN_FLIGHT = "Request with this key is already being processed";
     private static final String ERROR_FINGERPRINT_MISMATCH = "Idempotency-Key reused with a different request body";
     private static final String ERROR_BODY_TOO_LARGE = "Request body exceeds maximum allowed size";
     private static final long NO_LIMIT = -1;
@@ -156,12 +156,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         }
         String fingerprint = RequestFingerprint.of(wrappedRequest.body());
 
-        IdempotencyContext context = new IdempotencyContext(
-                resolvedIdempotent.scope(),
-                key,
-                resolvedIdempotent.ttl(),
-                resolvedIdempotent.lockTimeout(),
-                fingerprint);
+        IdempotencyContext context = IdempotencyContext.builder(resolvedIdempotent.scope(), key)
+                .ttl(resolvedIdempotent.ttl())
+                .leaseDuration(resolvedIdempotent.lease())
+                .waitTimeout(resolvedIdempotent.waitTimeout())
+                .fingerprint(fingerprint)
+                .build();
 
         ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
         ExecutionResult result;
@@ -171,8 +171,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             HttpIdempotencyMapper.writeJsonError(response, 422, ERROR_FINGERPRINT_MISMATCH);
             return;
         } catch (IdempotencyLockTimeoutException e) {
-            HttpIdempotencyMapper.writeJsonError(
-                    response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, ERROR_LOCK_TIMEOUT);
+            HttpIdempotencyMapper.writeJsonError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, ERROR_IN_FLIGHT);
             return;
         } catch (ServletException | IOException | RuntimeException e) {
             throw e;

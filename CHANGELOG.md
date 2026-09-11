@@ -9,13 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** `lockTimeout` is split into two independent durations. `leaseDuration` is how long
+  an acquisition is protected before another caller may steal it (default 30s, heartbeat at half
+  of it); `waitTimeout` is how long `tryAcquire` blocks for someone else's in-flight record before
+  giving up (default 10s). A zero wait is valid and means "do not block", which is what lets a
+  message listener decline instead of parking a consumer thread - impossible when one value meant
+  both. `IdempotencyConfig.defaultLockTimeout` becomes `defaultLeaseDuration` and
+  `defaultWaitTimeout`; the starter properties `idempotency.default-lock-timeout` become
+  `idempotency.default-lease` and `idempotency.default-wait`; the `@Idempotent` attribute
+  `lockTimeout` becomes `lease` and `waitTimeout` (the latter cannot be called `wait` - an
+  annotation element by that name clashes with `Object.wait()`).
+- **Breaking.** `IdempotencyContext` is no longer a record. It is built through
+  `IdempotencyContext.builder(scope, key)` or `builder(identity)`, with `ttl`, `leaseDuration`,
+  `waitTimeout` and `fingerprint` defaulted; the public constructors and
+  `IdempotencyContext.withoutFingerprint(...)` are gone. Accessors are unchanged apart from
+  `lockTimeout()`, which is replaced by `leaseDuration()` and `waitTimeout()`.
+- **Breaking.** `AcquireResult.LockTimeout(identity)` becomes `AcquireResult.InFlight(retryAfter)`.
+  `retryAfter` is the holder's remaining lease at the moment the store gave up, floored at zero, so
+  a caller can say how long to wait before retrying. The engine still maps it to
+  `IdempotencyLockTimeoutException`, which a later change replaces with an outcome.
+- **Breaking.** The JDBC schema renames `lock_expires_at` to `lease_expires_at` and drops
+  `locked_at` and `lock_timeout_ms`. The Redis hash renames `lockExpiresAt` to `leaseExpiresAt` and
+  drops `lockTimeoutMs`. There is no migration; recreate the table and discard existing records.
+- **Breaking.** `release` no longer rewrites `expires_at`. A FAILED record keeps the TTL it was
+  created with instead of being re-dated from the lease, so a purge cannot drop it before the retry
+  arrives. FAILED records therefore live for the full TTL rather than one lease.
+
 - **Breaking.** A record is identified by a scope and a key together, never by the key alone. The
   new `IdempotencyIdentity(scope, key)` record in core is what every store dedupes on;
-  `IdempotencyContext` holds an `IdempotencyIdentity` component (`scope()` and `key()` delegate
-  to it, and a `(scope, key, ...)` convenience constructor remains), and
-  `IdempotencyContext.withoutFingerprint(scope, key, ttl, lockTimeout)` takes the scope first.
+  `IdempotencyContext` holds an `IdempotencyIdentity` (`scope()` and `key()` delegate to it) and
+  is built through `IdempotencyContext.builder(scope, key)`.
   `IdempotencyStore.complete`, `release` and `extendLock` take an `IdempotencyIdentity` where they
-  took a `String key`; `AcquireResult.LockTimeout`, `IdempotencyLockTimeoutException` and
+  took a `String key`; `IdempotencyLockTimeoutException` and
   `IdempotencyFingerprintMismatchException` carry the identity (`getIdentity()` replaces
   `getKey()`). `IdempotencyContext.MAX_KEY_LENGTH` moved to `IdempotencyIdentity`, which also
   defines `MAX_SCOPE_LENGTH` (128). The same message id delivered to two consumers, or the same
@@ -33,9 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking.** `idempotency-core` no longer models HTTP. The engine, the store SPI and the
   context are transport-neutral, so a message listener or an event handler can drive them the
   same way the Servlet filter does.
-- **Breaking.** `IdempotencyContext.requestFingerprint` is now optional. Build a context without
-  one via `IdempotencyContext.withoutFingerprint(key, ttl, lockTimeout)`; `fingerprint()` returns
-  it as an `Optional`. A blank string is still rejected - `null` is how a caller says "none".
+- **Breaking.** `IdempotencyContext.requestFingerprint` is now optional. Leave `fingerprint(..)`
+  off the builder to build a context without one; `fingerprint()` returns it as an `Optional`. A blank string is still rejected - `null` is how a caller says "none".
   Two acquisitions mismatch only when both carry a fingerprint and the two differ; a fingerprint
   present on just one side proceeds normally, because a caller that does not fingerprint its
   payload cannot contradict one that does.
@@ -49,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `io.github.josipmusa.idempotency.spring.web`. It only ever sanitized HTTP responses.
 - **Breaking.** `IdempotencyConfig.keyHeader` moved to the new
   `io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig`; core config keeps
-  `defaultTtl` and `defaultLockTimeout`. The `idempotency.key-header` property is unchanged, and
+  the duration defaults. The `idempotency.key-header` property is unchanged, and
   the starter registers a `WebIdempotencyConfig` bean from it. Applications constructing
   `IdempotencyFilter` by hand pass a `WebIdempotencyConfig` where they passed `IdempotencyConfig`.
 - **Breaking.** `IdempotencyFilter` records completion through `IdempotencyEngine.complete(...)`

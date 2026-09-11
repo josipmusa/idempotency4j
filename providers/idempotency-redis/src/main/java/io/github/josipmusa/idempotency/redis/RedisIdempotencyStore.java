@@ -104,7 +104,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
 
     /**
-     * KEYS: record. ARGV: lock timeout, TTL, grace, fingerprint, lease, owner, format.
+     * KEYS: record. ARGV: lease duration, TTL, grace, fingerprint, lease id, owner, format.
      *
      * <p>The fingerprint argument is the empty string when the caller supplied none, and is
      * stored as such. An absent fingerprint on either side never mismatches.
@@ -138,27 +138,26 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                             redis.call('HGET', rec, 'completedAt') or ''}
                 end
             elseif status == 'IN_PROGRESS' then
-                local lockExpiresAt = tonumber(redis.call('HGET', rec, 'lockExpiresAt'))
-                if not lockExpiresAt then return {'CORRUPT', 'lockExpiresAt'} end
-                if lockExpiresAt > now then return {'BUSY'} end
+                local leaseExpiresAt = tonumber(redis.call('HGET', rec, 'leaseExpiresAt'))
+                if not leaseExpiresAt then return {'CORRUPT', 'leaseExpiresAt'} end
+                if leaseExpiresAt > now then return {'BUSY', string.format('%.0f', leaseExpiresAt - now)} end
             elseif status ~= nil and status ~= 'FAILED' then
                 return {'CORRUPT', 'status'}
             end
 
-            local lockTimeout = tonumber(ARGV[1])
+            local leaseDuration = tonumber(ARGV[1])
             local ttl = tonumber(ARGV[2])
             local grace = tonumber(ARGV[3])
-            local lockExpiresAt = now + lockTimeout
+            local leaseExpiresAt = now + leaseDuration
             local expiresAt = now + ttl
-            local physicalTtl = math.max(lockTimeout, ttl) + grace
+            local physicalTtl = math.max(leaseDuration, ttl) + grace
             redis.call('DEL', rec)
             redis.call('HSET', rec,
                 'owner', ARGV[6],
                 'formatVersion', ARGV[7],
                 'status', 'IN_PROGRESS',
-                'lockExpiresAt', string.format('%.0f', lockExpiresAt),
+                'leaseExpiresAt', string.format('%.0f', leaseExpiresAt),
                 'expiresAt', string.format('%.0f', expiresAt),
-                'lockTimeoutMs', ARGV[1],
                 'fingerprint', ARGV[4],
                 'leaseId', ARGV[5])
             redis.call('PEXPIRE', rec, physicalTtl)
@@ -192,7 +191,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 'headers', ARGV[5],
                 'body', ARGV[6],
                 'completedAt', ARGV[7])
-            redis.call('HDEL', rec, 'lockExpiresAt', 'leaseId', 'lockTimeoutMs')
+            redis.call('HDEL', rec, 'leaseExpiresAt', 'leaseId')
             redis.call('PEXPIRE', rec, physicalTtl)
             return {'OK'}
             """);
@@ -207,19 +206,21 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             local status = redis.call('HGET', rec, 'status')
             if status ~= 'IN_PROGRESS' then return {'CONFLICT', status or 'missing'} end
             if redis.call('HGET', rec, 'leaseId') ~= ARGV[1] then return {'STALE'} end
-            local lockTimeout = tonumber(redis.call('HGET', rec, 'lockTimeoutMs'))
-            if not lockTimeout then return {'CORRUPT', 'lockTimeoutMs'} end
+            local expiresAt = tonumber(redis.call('HGET', rec, 'expiresAt'))
+            if not expiresAt then return {'CORRUPT', 'expiresAt'} end
 
             local clock = redis.call('TIME')
             local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
-            redis.call('HSET', rec, 'status', 'FAILED', 'expiresAt', string.format('%.0f', now + lockTimeout))
-            redis.call('HDEL', rec, 'lockExpiresAt', 'leaseId', 'lockTimeoutMs', 'code', 'headers', 'body', 'completedAt')
-            redis.call('PEXPIRE', rec, lockTimeout + tonumber(ARGV[2]))
+            -- expiresAt is carried over untouched: a FAILED record is re-acquirable at once,
+            -- and its original TTL is what keeps a purge from dropping it before a retry.
+            redis.call('HSET', rec, 'status', 'FAILED')
+            redis.call('HDEL', rec, 'leaseExpiresAt', 'leaseId', 'code', 'headers', 'body', 'completedAt')
+            redis.call('PEXPIRE', rec, math.max(1, expiresAt - now + tonumber(ARGV[2])))
             return {'OK'}
             """);
 
     /** KEYS: record. ARGV: lease, extension, grace, owner, format. */
-    private static final LuaScript EXTEND_LOCK = LuaScript.of("""
+    private static final LuaScript EXTEND_LEASE = LuaScript.of("""
             local rec = KEYS[1]
             local kind = redis.call('TYPE', rec).ok
             if kind == 'none' then return {'NOOP'} end
@@ -232,10 +233,10 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             if not expiresAt then return {'CORRUPT', 'expiresAt'} end
             local clock = redis.call('TIME')
             local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
-            local newLockExpiresAt = now + tonumber(ARGV[2])
-            local purgeableAt = math.max(expiresAt, newLockExpiresAt)
+            local newLeaseExpiresAt = now + tonumber(ARGV[2])
+            local purgeableAt = math.max(expiresAt, newLeaseExpiresAt)
             local physicalTtl = math.max(1, purgeableAt - now + tonumber(ARGV[3]))
-            redis.call('HSET', rec, 'lockExpiresAt', string.format('%.0f', newLockExpiresAt))
+            redis.call('HSET', rec, 'leaseExpiresAt', string.format('%.0f', newLeaseExpiresAt))
             if redis.call('PTTL', rec) < physicalTtl then redis.call('PEXPIRE', rec, physicalTtl) end
             return {'OK'}
             """);
@@ -254,9 +255,9 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                     local expiresAt = tonumber(redis.call('HGET', rec, 'expiresAt'))
                     local purgeableAt = expiresAt
                     if status == 'IN_PROGRESS' then
-                        local lockExpiresAt = tonumber(redis.call('HGET', rec, 'lockExpiresAt'))
-                        if lockExpiresAt and (not purgeableAt or lockExpiresAt > purgeableAt) then
-                            purgeableAt = lockExpiresAt
+                        local leaseExpiresAt = tonumber(redis.call('HGET', rec, 'leaseExpiresAt'))
+                        if leaseExpiresAt and (not purgeableAt or leaseExpiresAt > purgeableAt) then
+                            purgeableAt = leaseExpiresAt
                         end
                     end
                     if (status == 'COMPLETE' or status == 'FAILED' or status == 'IN_PROGRESS')
@@ -308,32 +309,49 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     public AcquireResult tryAcquire(IdempotencyContext context) {
         Objects.requireNonNull(context, "context must not be null");
         long startedAtNanos = System.nanoTime();
-        long timeoutNanos = context.lockTimeout().toNanos();
+        long waitNanos = context.waitTimeout().toNanos();
         String leaseId = UUID.randomUUID().toString();
-        IdempotencyIdentity identity = context.identity();
         int busyAttempts = 0;
         boolean firstAttempt = true;
+        // Remaining lease of the holder as of the last BUSY reply, reported as retryAfter
+        // when the wait budget runs out. Zero until the first BUSY tells us otherwise.
+        Duration remainingLease = Duration.ZERO;
 
         while (true) {
-            if (!firstAttempt && elapsedNanos(startedAtNanos) >= timeoutNanos) {
-                return AcquireResult.lockTimeout(identity);
+            if (!firstAttempt && elapsedNanos(startedAtNanos) >= waitNanos) {
+                return AcquireResult.inFlight(remainingLease);
             }
             firstAttempt = false;
-            AcquireResult result = attemptAcquire(context, leaseId);
-            if (result != null) {
-                return result;
+            BusyOr attempt = attemptAcquire(context, leaseId);
+            if (attempt.result() != null) {
+                return attempt.result();
             }
+            remainingLease = attempt.remainingLease();
 
-            long remainingNanos = timeoutNanos - elapsedNanos(startedAtNanos);
+            long remainingNanos = waitNanos - elapsedNanos(startedAtNanos);
             if (remainingNanos <= 0) {
-                return AcquireResult.lockTimeout(identity);
+                return AcquireResult.inFlight(remainingLease);
             }
             try {
                 TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, jitteredBackoffNanos(busyAttempts++)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return AcquireResult.lockTimeout(identity);
+                return AcquireResult.inFlight(remainingLease);
             }
+        }
+    }
+
+    /**
+     * One {@code ACQUIRE} attempt: either a resolved {@link AcquireResult}, or a BUSY reply
+     * carrying how long the current holder's lease still has to run.
+     */
+    private record BusyOr(AcquireResult result, Duration remainingLease) {
+        static BusyOr resolved(AcquireResult result) {
+            return new BusyOr(result, Duration.ZERO);
+        }
+
+        static BusyOr busy(Duration remainingLease) {
+            return new BusyOr(null, remainingLease);
         }
     }
 
@@ -394,7 +412,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         Objects.requireNonNull(identity, "identity must not be null");
         requireMillisecondDuration(extension, "extension");
         List<Object> reply = eval(
-                EXTEND_LOCK,
+                EXTEND_LEASE,
                 "extend lock for " + identity,
                 keysFor(identity),
                 arg(leaseId),
@@ -405,7 +423,9 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         String outcome = outcome(reply, identity, "extend lock");
         switch (outcome) {
             case "OK" -> awaitReplication("extend lock for " + identity);
-            case "NOOP" -> {}
+            case "NOOP" -> {
+                // noop
+            }
             case "FOREIGN" -> throw foreignRecord(identity);
             case "CORRUPT" -> throw corruptRecord(identity, reply);
             default -> throw unexpectedOutcome(outcome, identity, "extend lock");
@@ -444,13 +464,13 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    private AcquireResult attemptAcquire(IdempotencyContext context, String leaseId) {
+    private BusyOr attemptAcquire(IdempotencyContext context, String leaseId) {
         IdempotencyIdentity identity = context.identity();
         List<Object> reply = eval(
                 ACQUIRE,
                 "acquire " + identity,
                 keysFor(identity),
-                arg(context.lockTimeout().toMillis()),
+                arg(context.leaseDuration().toMillis()),
                 arg(context.ttl().toMillis()),
                 arg(graceMs),
                 arg(context.fingerprint().orElse("")),
@@ -462,12 +482,13 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         return switch (outcome) {
             case "ACQUIRED" -> {
                 awaitReplication("acquire " + identity);
-                yield AcquireResult.acquired(leaseId);
+                yield BusyOr.resolved(AcquireResult.acquired(leaseId));
             }
-            case "BUSY" -> null;
+            case "BUSY" -> BusyOr.busy(Duration.ofMillis(Long.parseLong(token(reply, 1, "acquire " + identity))));
             case "MISMATCH" ->
-                AcquireResult.fingerprintMismatch(token(reply, 1, "acquire " + identity), context.requestFingerprint());
-            case "DUPLICATE" -> AcquireResult.duplicate(readPayload(reply, identity));
+                BusyOr.resolved(AcquireResult.fingerprintMismatch(
+                        token(reply, 1, "acquire " + identity), context.requestFingerprint()));
+            case "DUPLICATE" -> BusyOr.resolved(AcquireResult.duplicate(readPayload(reply, identity)));
             case "FOREIGN" -> throw foreignRecord(identity);
             case "CORRUPT" -> throw corruptRecord(identity, reply);
             default -> throw unexpectedOutcome(outcome, identity, "acquire");
@@ -502,7 +523,9 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     private void requireOk(List<Object> reply, IdempotencyIdentity identity, String operation) {
         String result = outcome(reply, identity, operation);
         switch (result) {
-            case "OK" -> {}
+            case "OK" -> {
+                // do nothing
+            }
             case "MISSING" ->
                 throw new IdempotencyLeaseLostException(
                         "Cannot " + operation + " " + identity + ": no entry exists or it expired");

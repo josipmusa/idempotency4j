@@ -27,92 +27,125 @@ import java.util.regex.Pattern;
  * {@link IdempotencyConfig} defaults with per-operation values. Passed to
  * {@link IdempotencyEngine#execute} and from there to the store.
  *
- * <p>Every field except {@code requestFingerprint} is required. The context must
- * be fully resolved before it reaches the engine.
+ * <p>Instances are created through {@link #builder(String, String)} or
+ * {@link #builder(IdempotencyIdentity)}. Only the identity is mandatory; every other
+ * value has a default, and {@code fingerprint} may be left unset.
  *
- * @param identity    what the store dedupes on: the scope naming the unit of work (a
- *                    handler method, a listener, a job) together with the idempotency
- *                    key, typically from an HTTP header (e.g. {@code Idempotency-Key})
- *                    or a message identifier. Two operations with the same identity
- *                    are duplicates; the same key under two scopes is two operations.
- *                    See {@link IdempotencyIdentity} for the limits.
- * @param ttl         how long a completed payload is kept before the key
- *                    can be reused. Determines the deduplication window.
- * @param lockTimeout how long a second caller will wait for an in-flight
- *                    operation to complete before giving up with
- *                    {@link AcquireResult.LockTimeout}. Also used as the
- *                    initial lock expiration — if the holder crashes without
- *                    completing or releasing, the lock becomes stealable
- *                    after this duration.
- * @param requestFingerprint a hash of the request payload (e.g. SHA-256 hex), or
- *                           {@code null} when the caller has no payload to
- *                           fingerprint. Used to detect when the same idempotency
- *                           key is reused with a different payload. Must be a hex
- *                           string of at least 16 characters when present; a blank
- *                           string is rejected — use {@code null} to say "none".
+ * <pre>{@code
+ * IdempotencyContext context = IdempotencyContext.builder("PaymentController.create", "key-42")
+ *         .ttl(Duration.ofHours(24))
+ *         .leaseDuration(Duration.ofSeconds(30))
+ *         .waitTimeout(Duration.ZERO)
+ *         .fingerprint(sha256Hex)
+ *         .build();
+ * }</pre>
+ *
+ * <h2>The two durations</h2>
+ * <p>{@code leaseDuration} and {@code waitTimeout} answer different questions and are set
+ * independently:
+ * <ul>
+ *   <li>{@code leaseDuration} — how long <em>this</em> acquisition is protected. If the
+ *       holder crashes without completing or releasing, the record becomes stealable once
+ *       the lease expires. The engine's heartbeat extends it at half the lease.</li>
+ *   <li>{@code waitTimeout} — how long {@link IdempotencyStore#tryAcquire} blocks waiting
+ *       for <em>someone else's</em> in-flight operation before giving up with
+ *       {@link AcquireResult.InFlight}. {@link Duration#ZERO} is valid and means "do not
+ *       block", which is what a message listener wants so it declines instead of parking
+ *       a consumer thread.</li>
+ * </ul>
  */
-public record IdempotencyContext(
-        IdempotencyIdentity identity, Duration ttl, Duration lockTimeout, String requestFingerprint) {
+public final class IdempotencyContext {
 
-    private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(2);
+    private static final Duration MIN_LEASE_DURATION = Duration.ofMillis(2);
     private static final int MIN_FINGERPRINT_LENGTH = 16;
     private static final Pattern HEX_PATTERN = Pattern.compile("[0-9a-fA-F]+");
 
-    public IdempotencyContext {
-        Objects.requireNonNull(identity, "identity must not be null");
-        Objects.requireNonNull(ttl, "ttl must not be null");
-        Objects.requireNonNull(lockTimeout, "lockTimeout must not be null");
+    private final IdempotencyIdentity identity;
+    private final Duration ttl;
+    private final Duration leaseDuration;
+    private final Duration waitTimeout;
+    private final String requestFingerprint;
 
-        if (ttl.compareTo(Duration.ofMillis(1)) < 0) {
-            throw new IllegalArgumentException("ttl must be at least 1ms");
-        }
-        if (lockTimeout.compareTo(MIN_LOCK_TIMEOUT) < 0) {
-            throw new IllegalArgumentException("lockTimeout must be at least 2ms");
-        }
-        if (requestFingerprint != null) {
-            if (requestFingerprint.isBlank()) {
-                throw new IllegalArgumentException(
-                        "requestFingerprint must not be blank; use null to indicate no fingerprint");
-            }
-            if (requestFingerprint.length() < MIN_FINGERPRINT_LENGTH) {
-                throw new IllegalArgumentException("requestFingerprint must be at least " + MIN_FINGERPRINT_LENGTH
-                        + " characters, got: " + requestFingerprint.length());
-            }
-            if (!HEX_PATTERN.matcher(requestFingerprint).matches()) {
-                throw new IllegalArgumentException(
-                        "requestFingerprint must be a hex string, got: " + requestFingerprint);
-            }
-        }
+    private IdempotencyContext(Builder builder) {
+        this.identity = builder.identity;
+        this.ttl = builder.ttl;
+        this.leaseDuration = builder.leaseDuration;
+        this.waitTimeout = builder.waitTimeout;
+        this.requestFingerprint = builder.requestFingerprint;
     }
 
     /**
-     * Creates a context from a scope and key that have not yet been combined into an
-     * {@link IdempotencyIdentity}. Equivalent to the canonical constructor with
-     * {@code new IdempotencyIdentity(scope, key)}.
+     * Starts a builder for the given identity.
      *
-     * @param scope       the unit of work, see {@link IdempotencyIdentity}
-     * @param key         the idempotency key
-     * @param ttl         how long a completed payload is kept
-     * @param lockTimeout how long a second caller waits for an in-flight operation
-     * @param requestFingerprint the request fingerprint, or {@code null} for none
+     * @param identity what the store dedupes on, see {@link IdempotencyIdentity}
+     * @return a builder carrying the defaults of {@link IdempotencyConfig#defaults()}
      */
-    public IdempotencyContext(String scope, String key, Duration ttl, Duration lockTimeout, String requestFingerprint) {
-        this(new IdempotencyIdentity(scope, key), ttl, lockTimeout, requestFingerprint);
+    public static Builder builder(IdempotencyIdentity identity) {
+        return new Builder(identity);
     }
 
     /**
-     * Creates a context for a caller that has no request payload to fingerprint —
-     * a message listener or an event handler, for example, where the identity alone
-     * identifies the operation.
+     * Starts a builder for a scope and key that have not yet been combined into an
+     * {@link IdempotencyIdentity}.
      *
-     * @param scope       the unit of work, see {@link IdempotencyIdentity}
-     * @param key         the idempotency key
-     * @param ttl         how long a completed payload is kept
-     * @param lockTimeout how long a second caller waits for an in-flight operation
-     * @return a context whose {@code requestFingerprint} is {@code null}
+     * @param scope the unit of work, see {@link IdempotencyIdentity}
+     * @param key   the idempotency key
+     * @return a builder carrying the defaults of {@link IdempotencyConfig#defaults()}
      */
-    public static IdempotencyContext withoutFingerprint(String scope, String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(scope, key, ttl, lockTimeout, null);
+    public static Builder builder(String scope, String key) {
+        return new Builder(new IdempotencyIdentity(scope, key));
+    }
+
+    /**
+     * Returns what the store dedupes on: the scope naming the unit of work (a handler
+     * method, a listener, a job) together with the idempotency key, typically from an
+     * HTTP header (e.g. {@code Idempotency-Key}) or a message identifier. Two operations
+     * with the same identity are duplicates; the same key under two scopes is two
+     * operations.
+     *
+     * @return the identity
+     */
+    public IdempotencyIdentity identity() {
+        return identity;
+    }
+
+    /**
+     * Returns how long a completed payload is kept before the key can be reused. This
+     * determines the deduplication window.
+     *
+     * @return the time-to-live of a completed record
+     */
+    public Duration ttl() {
+        return ttl;
+    }
+
+    /**
+     * Returns how long this acquisition is protected before another caller may steal it.
+     *
+     * @return the lease duration
+     */
+    public Duration leaseDuration() {
+        return leaseDuration;
+    }
+
+    /**
+     * Returns how long {@link IdempotencyStore#tryAcquire} blocks for an in-flight record
+     * before returning {@link AcquireResult.InFlight}. {@link Duration#ZERO} means the
+     * store returns immediately.
+     *
+     * @return the wait timeout
+     */
+    public Duration waitTimeout() {
+        return waitTimeout;
+    }
+
+    /**
+     * Returns the raw request fingerprint, or {@code null} when the caller supplied none.
+     *
+     * @return the fingerprint, or {@code null}
+     */
+    public String requestFingerprint() {
+        return requestFingerprint;
     }
 
     /**
@@ -140,5 +173,126 @@ public record IdempotencyContext(
      */
     public Optional<String> fingerprint() {
         return Optional.ofNullable(requestFingerprint);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof IdempotencyContext other)) {
+            return false;
+        }
+        return identity.equals(other.identity)
+                && ttl.equals(other.ttl)
+                && leaseDuration.equals(other.leaseDuration)
+                && waitTimeout.equals(other.waitTimeout)
+                && Objects.equals(requestFingerprint, other.requestFingerprint);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(identity, ttl, leaseDuration, waitTimeout, requestFingerprint);
+    }
+
+    @Override
+    public String toString() {
+        return "IdempotencyContext{identity=" + identity + ", ttl=" + ttl + ", leaseDuration=" + leaseDuration
+                + ", waitTimeout=" + waitTimeout + ", requestFingerprint=" + requestFingerprint + "}";
+    }
+
+    /** Builds {@link IdempotencyContext} instances. */
+    public static final class Builder {
+
+        private final IdempotencyIdentity identity;
+        private Duration ttl = Duration.ofHours(24);
+        private Duration leaseDuration = Duration.ofSeconds(30);
+        private Duration waitTimeout = Duration.ofSeconds(10);
+        private String requestFingerprint;
+
+        private Builder(IdempotencyIdentity identity) {
+            this.identity = Objects.requireNonNull(identity, "identity must not be null");
+        }
+
+        /**
+         * Sets how long the completed payload is kept before the key can be reused.
+         *
+         * @param ttl must be at least 1 ms
+         * @return this builder
+         */
+        public Builder ttl(Duration ttl) {
+            this.ttl = Objects.requireNonNull(ttl, "ttl must not be null");
+            return this;
+        }
+
+        /**
+         * Sets how long this acquisition is protected before it can be stolen.
+         *
+         * @param leaseDuration must be at least 2 ms — the heartbeat fires at half of it
+         * @return this builder
+         */
+        public Builder leaseDuration(Duration leaseDuration) {
+            this.leaseDuration = Objects.requireNonNull(leaseDuration, "leaseDuration must not be null");
+            return this;
+        }
+
+        /**
+         * Sets how long {@code tryAcquire} blocks for someone else's in-flight record.
+         *
+         * @param waitTimeout must not be negative; {@link Duration#ZERO} means do not block
+         * @return this builder
+         */
+        public Builder waitTimeout(Duration waitTimeout) {
+            this.waitTimeout = Objects.requireNonNull(waitTimeout, "waitTimeout must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the request fingerprint used to detect a key reused with a different payload.
+         *
+         * @param fingerprint a hex string of at least 16 characters, or {@code null} for none.
+         *                    A blank string is rejected — use {@code null} to say "none".
+         * @return this builder
+         */
+        public Builder fingerprint(String fingerprint) {
+            this.requestFingerprint = fingerprint;
+            return this;
+        }
+
+        /**
+         * Constructs the context.
+         *
+         * @return a new immutable context
+         * @throws IllegalArgumentException if any value fails validation
+         */
+        public IdempotencyContext build() {
+            if (ttl.compareTo(Duration.ofMillis(1)) < 0) {
+                throw new IllegalArgumentException("ttl must be at least 1ms");
+            }
+            if (leaseDuration.compareTo(MIN_LEASE_DURATION) < 0) {
+                throw new IllegalArgumentException("leaseDuration must be at least 2ms");
+            }
+            if (waitTimeout.isNegative()) {
+                throw new IllegalArgumentException("waitTimeout must not be negative");
+            }
+            if (requestFingerprint != null) {
+                validateFingerprint(requestFingerprint);
+            }
+            return new IdempotencyContext(this);
+        }
+
+        private static void validateFingerprint(String fingerprint) {
+            if (fingerprint.isBlank()) {
+                throw new IllegalArgumentException(
+                        "requestFingerprint must not be blank; use null to indicate no fingerprint");
+            }
+            if (fingerprint.length() < MIN_FINGERPRINT_LENGTH) {
+                throw new IllegalArgumentException("requestFingerprint must be at least " + MIN_FINGERPRINT_LENGTH
+                        + " characters, got: " + fingerprint.length());
+            }
+            if (!HEX_PATTERN.matcher(fingerprint).matches()) {
+                throw new IllegalArgumentException("requestFingerprint must be a hex string, got: " + fingerprint);
+            }
+        }
     }
 }

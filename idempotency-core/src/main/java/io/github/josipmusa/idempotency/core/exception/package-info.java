@@ -21,7 +21,7 @@
  *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyForeignRecordException} -
  *       a configured namespace contains data owned by another application.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException} -
- *       thrown when a caller's {@code lockTimeout} expires while waiting for an
+ *       thrown when a caller's {@code waitTimeout} elapses while waiting for an
  *       in-flight request to complete.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException} -
  *       thrown when the same idempotency key is reused with a different request body;

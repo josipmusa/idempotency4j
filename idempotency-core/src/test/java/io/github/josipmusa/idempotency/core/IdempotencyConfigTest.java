@@ -24,11 +24,12 @@ import org.junit.jupiter.api.Test;
 class IdempotencyConfigTest {
 
     @Test
-    void When_DefaultsUsed_Expect_TwentyFourHourTtlAndTenSecondLockTimeout() {
+    void When_DefaultsUsed_Expect_TwentyFourHourTtlThirtySecondLeaseAndTenSecondWait() {
         IdempotencyConfig config = IdempotencyConfig.defaults();
 
         assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(24));
-        assertThat(config.defaultLockTimeout()).isEqualTo(Duration.ofSeconds(10));
+        assertThat(config.defaultLeaseDuration()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(config.defaultWaitTimeout()).isEqualTo(Duration.ofSeconds(10));
     }
 
     @Test
@@ -58,11 +59,28 @@ class IdempotencyConfigTest {
     }
 
     @Test
-    void When_LockTimeoutBelowMinimum_Expect_ThrowsIllegalArgumentException() {
+    void When_LeaseDurationBelowMinimum_Expect_ThrowsIllegalArgumentException() {
         assertThatThrownBy(() -> IdempotencyConfig.builder()
-                        .defaultLockTimeout(Duration.ofMillis(1))
+                        .defaultLeaseDuration(Duration.ofMillis(1))
                         .build())
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("defaultLockTimeout must be at least 2ms");
+                .hasMessageContaining("defaultLeaseDuration must be at least 2ms");
+    }
+
+    @Test
+    void When_WaitTimeoutZero_Expect_Accepted() {
+        IdempotencyConfig config =
+                IdempotencyConfig.builder().defaultWaitTimeout(Duration.ZERO).build();
+
+        assertThat(config.defaultWaitTimeout()).isZero();
+    }
+
+    @Test
+    void When_WaitTimeoutNegative_Expect_ThrowsIllegalArgumentException() {
+        assertThatThrownBy(() -> IdempotencyConfig.builder()
+                        .defaultWaitTimeout(Duration.ofMillis(-1))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("defaultWaitTimeout must not be negative");
     }
 }

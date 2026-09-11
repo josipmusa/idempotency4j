@@ -111,7 +111,8 @@ class IdempotencyAutoConfigurationTest {
         contextRunner.run(context -> {
             IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
             assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(24));
-            assertThat(config.defaultLockTimeout()).isEqualTo(Duration.ofSeconds(10));
+            assertThat(config.defaultLeaseDuration()).isEqualTo(Duration.ofSeconds(30));
+            assertThat(config.defaultWaitTimeout()).isEqualTo(Duration.ofSeconds(10));
             assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader()).isEqualTo("Idempotency-Key");
         });
     }
@@ -122,11 +123,13 @@ class IdempotencyAutoConfigurationTest {
                 .withPropertyValues(
                         "idempotency.key-header=X-Request-Id",
                         "idempotency.default-ttl=PT2H",
-                        "idempotency.default-lock-timeout=PT30S")
+                        "idempotency.default-lease=PT5M",
+                        "idempotency.default-wait=PT0S")
                 .run(context -> {
                     IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
                     assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(2));
-                    assertThat(config.defaultLockTimeout()).isEqualTo(Duration.ofSeconds(30));
+                    assertThat(config.defaultLeaseDuration()).isEqualTo(Duration.ofMinutes(5));
+                    assertThat(config.defaultWaitTimeout()).isZero();
                     assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader())
                             .isEqualTo("X-Request-Id");
                 });
@@ -234,8 +237,10 @@ class IdempotencyAutoConfigurationTest {
     }
 
     private static IdempotencyContext anyContext() {
-        return IdempotencyContext.withoutFingerprint(
-                "ListenerScope.handle", "listener-key", Duration.ofHours(1), Duration.ofSeconds(5));
+        return IdempotencyContext.builder("ListenerScope.handle", "listener-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .build();
     }
 
     private static IdempotencyStore acquiringStore() {

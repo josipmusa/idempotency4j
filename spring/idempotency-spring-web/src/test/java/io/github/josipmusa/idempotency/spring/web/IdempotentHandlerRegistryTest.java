@@ -52,25 +52,47 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
-    void When_InvalidLockTimeout_Expect_ThrowsIllegalStateException() {
+    void When_InvalidLease_Expect_ThrowsIllegalStateException() {
         setupHandler(AnnotationHelper.annotation(true, "", "10s"));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("@Idempotent(lockTimeout = \"10s\")")
+                .hasMessageContaining("@Idempotent(lease = \"10s\")")
+                .hasMessageContaining("PT");
+    }
+
+    @Test
+    void When_InvalidWaitTimeout_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.annotation(true, "", "", "3s"));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(waitTimeout = \"3s\")")
                 .hasMessageContaining("PT");
     }
 
     @Test
     void When_ValidAnnotation_Expect_ResolvesCorrectDurations() {
-        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "PT2H", "PT30S"));
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "PT2H", "PT30S", "PT0S"));
         registry.afterSingletonsInstantiated();
 
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
 
         assertThat(resolved).isNotNull();
         assertThat(resolved.ttl()).isEqualTo(Duration.ofHours(2));
-        assertThat(resolved.lockTimeout()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(resolved.lease()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(resolved.waitTimeout()).isZero();
+    }
+
+    @Test
+    void When_LeaseAndWaitDiffer_Expect_BothResolvedIndependently() {
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "", "PT5M", "PT2S"));
+        registry.afterSingletonsInstantiated();
+
+        ResolvedIdempotent resolved = registry.resolve(handlerMethod);
+
+        assertThat(resolved.lease()).isEqualTo(Duration.ofMinutes(5));
+        assertThat(resolved.waitTimeout()).isEqualTo(Duration.ofSeconds(2));
     }
 
     @Test
@@ -81,8 +103,9 @@ class IdempotentHandlerRegistryTest {
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
 
         assertThat(resolved.ttl()).isEqualTo(IdempotencyConfig.defaults().defaultTtl());
-        assertThat(resolved.lockTimeout())
-                .isEqualTo(IdempotencyConfig.defaults().defaultLockTimeout());
+        assertThat(resolved.lease()).isEqualTo(IdempotencyConfig.defaults().defaultLeaseDuration());
+        assertThat(resolved.waitTimeout())
+                .isEqualTo(IdempotencyConfig.defaults().defaultWaitTimeout());
     }
 
     @Test

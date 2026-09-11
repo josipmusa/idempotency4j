@@ -52,17 +52,14 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     /**
-     * {@code lockTimeout} is stored so that FAILED entries can be expired after the original lock
-     * duration rather than the full TTL — FAILED keys are immediately re-acquirable and are
-     * typically retried within seconds, so holding them for the full TTL would waste memory.
-     * {@code lockTimeout} is {@code null} for COMPLETE entries where it is not needed.
+     * {@code leaseExpiresAt} is when this acquisition stops being protected: once it passes,
+     * any caller may steal the entry. It is {@code null} for entries nobody holds.
      */
     private record Entry(
             Status status,
             IdempotencyPayload payload,
-            Instant lockExpiresAt,
+            Instant leaseExpiresAt,
             Instant expiresAt,
-            Duration lockTimeout,
             String requestFingerprint,
             String leaseId) {}
 
@@ -89,16 +86,12 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
         long startedAtNanos = System.nanoTime();
-        long timeoutNanos = context.lockTimeout().toNanos();
+        long waitNanos = context.waitTimeout().toNanos();
         String leaseId = UUID.randomUUID().toString();
         IdempotencyIdentity identity = context.identity();
         boolean firstAttempt = true;
 
         while (true) {
-            if (!firstAttempt && System.nanoTime() - startedAtNanos >= timeoutNanos) {
-                return AcquireResult.lockTimeout(identity);
-            }
-            firstAttempt = false;
             Instant now = clock.instant();
 
             // Evict expired COMPLETE entry for this identity so a fresh insert can follow
@@ -112,9 +105,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             Entry newEntry = new Entry(
                     Status.IN_PROGRESS,
                     null,
-                    now.plus(context.lockTimeout()),
+                    now.plus(context.leaseDuration()),
                     now.plus(context.ttl()),
-                    context.lockTimeout(),
                     context.requestFingerprint(),
                     leaseId);
 
@@ -132,30 +124,41 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                 return AcquireResult.duplicate(existing.payload());
             }
 
-            // FAILED or stale IN_PROGRESS — attempt to claim the lock atomically.
-            // A stale lock (lockExpiresAt in the past) is claimable by any caller, regardless of
-            // the caller's lockTimeout. This matches JDBC behavior.
+            // FAILED or expired lease — attempt to claim the entry atomically.
+            // An expired lease is claimable by any caller, regardless of that caller's
+            // own leaseDuration or waitTimeout. This matches JDBC behavior.
             if (existing.status() == Status.FAILED
-                    || (existing.lockExpiresAt() != null
-                            && existing.lockExpiresAt().isBefore(now))) {
+                    || (existing.leaseExpiresAt() != null
+                            && existing.leaseExpiresAt().isBefore(now))) {
                 if (store.replace(identity, existing, newEntry)) {
                     return AcquireResult.acquired(leaseId);
                 }
                 continue; // lost the race — re-inspect on next iteration
             }
 
-            // Active IN_PROGRESS — wait before retrying
-            long remainingNanos = timeoutNanos - (System.nanoTime() - startedAtNanos);
-            if (remainingNanos <= 0) {
-                return AcquireResult.lockTimeout(identity);
+            // Active IN_PROGRESS — give up if the caller has no wait budget left.
+            // A zero wait never sleeps: the first look is also the last.
+            long remainingWaitNanos = firstAttempt ? waitNanos : waitNanos - (System.nanoTime() - startedAtNanos);
+            firstAttempt = false;
+            if (remainingWaitNanos <= 0) {
+                return AcquireResult.inFlight(remainingLease(existing, now));
             }
             try {
-                TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, TimeUnit.MILLISECONDS.toNanos(pollIntervalMs)));
+                TimeUnit.NANOSECONDS.sleep(Math.min(remainingWaitNanos, TimeUnit.MILLISECONDS.toNanos(pollIntervalMs)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return AcquireResult.lockTimeout(identity);
+                return AcquireResult.inFlight(remainingLease(existing, clock.instant()));
             }
         }
+    }
+
+    /** How much of the holder's lease is left, floored at zero. */
+    private static Duration remainingLease(Entry holder, Instant now) {
+        if (holder.leaseExpiresAt() == null) {
+            return Duration.ZERO;
+        }
+        Duration remaining = Duration.between(now, holder.leaseExpiresAt());
+        return remaining.isNegative() ? Duration.ZERO : remaining;
     }
 
     @Override
@@ -173,13 +176,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             }
             requireLease(existing, leaseId, identity, "complete");
             return new Entry(
-                    Status.COMPLETE,
-                    payload,
-                    null,
-                    clock.instant().plus(ttl),
-                    null,
-                    existing.requestFingerprint(),
-                    null);
+                    Status.COMPLETE, payload, null, clock.instant().plus(ttl), existing.requestFingerprint(), null);
         });
     }
 
@@ -196,17 +193,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                         "Cannot release " + identity + ": entry is " + existing.status() + ", expected IN_PROGRESS");
             }
             requireLease(existing, leaseId, identity, "release");
-            // Expire after lockTimeout rather than full TTL — FAILED entries are immediately
-            // re-acquirable, so keeping them for the full TTL would unnecessarily retain memory.
-            Instant failedExpiry = clock.instant().plus(existing.lockTimeout());
-            return new Entry(
-                    Status.FAILED,
-                    null,
-                    null,
-                    failedExpiry,
-                    existing.lockTimeout(),
-                    existing.requestFingerprint(),
-                    null);
+            // expiresAt is carried over untouched: a FAILED entry is re-acquirable at once,
+            // and its original TTL is what keeps a purge from dropping it before a retry.
+            return new Entry(Status.FAILED, null, null, existing.expiresAt(), existing.requestFingerprint(), null);
         });
     }
 
@@ -222,7 +211,6 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     null,
                     clock.instant().plus(extension),
                     entry.expiresAt(),
-                    entry.lockTimeout(),
                     entry.requestFingerprint(),
                     entry.leaseId());
         });
@@ -255,9 +243,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
      *   <li>{@code COMPLETE} and {@code FAILED} — removed when
      *       {@code expiresAt} is in the past</li>
      *   <li>{@code IN_PROGRESS} — removed only when <em>both</em>
-     *       {@code lockExpiresAt} and {@code expiresAt} are in the past.
-     *       Entries whose lock has expired but whose TTL has not are
-     *       intentionally kept — they remain eligible for lock stealing
+     *       {@code leaseExpiresAt} and {@code expiresAt} are in the past.
+     *       Entries whose lease has expired but whose TTL has not are
+     *       intentionally kept — they remain eligible for stealing
      *       by the next {@link #tryAcquire} caller.</li>
      * </ul>
      *
@@ -294,8 +282,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             case COMPLETE, FAILED ->
                 entry.expiresAt() != null && entry.expiresAt().isBefore(now);
             case IN_PROGRESS ->
-                entry.lockExpiresAt() != null
-                        && entry.lockExpiresAt().isBefore(now)
+                entry.leaseExpiresAt() != null
+                        && entry.leaseExpiresAt().isBefore(now)
                         && entry.expiresAt() != null
                         && entry.expiresAt().isBefore(now);
         };

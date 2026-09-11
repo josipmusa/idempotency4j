@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -26,7 +27,7 @@ import java.util.Objects;
  * switch (store.tryAcquire(context)) {
  *     case AcquireResult.Acquired a   -> // run the action
  *     case AcquireResult.Duplicate d  -> // replay d.payload()
- *     case AcquireResult.LockTimeout t -> // timeout, reject request
+ *     case AcquireResult.InFlight f  -> // still running, reject and retry after f.retryAfter()
  *     case AcquireResult.FingerprintMismatch fm -> // reject: key reused with different body
  * }
  * }</pre>
@@ -34,7 +35,7 @@ import java.util.Objects;
 public sealed interface AcquireResult
         permits AcquireResult.Acquired,
                 AcquireResult.Duplicate,
-                AcquireResult.LockTimeout,
+                AcquireResult.InFlight,
                 AcquireResult.FingerprintMismatch {
 
     /**
@@ -64,12 +65,20 @@ public sealed interface AcquireResult
 
     /**
      * Identity is in-flight (held by another caller) and this caller's
-     * {@code lockTimeout} expired while waiting. The action was not
+     * {@code waitTimeout} elapsed without the holder finishing. The action was not
      * executed. The caller should return an appropriate error (e.g. 409 or 503).
+     *
+     * <p>{@code retryAfter} is how much of the holder's lease was left when the store
+     * gave up — an upper bound on how long the identity can stay in-flight before it
+     * becomes stealable. It is never negative; a store that cannot tell reports
+     * {@link Duration#ZERO}.
      */
-    record LockTimeout(IdempotencyIdentity identity) implements AcquireResult {
-        public LockTimeout {
-            Objects.requireNonNull(identity, "identity must not be null");
+    record InFlight(Duration retryAfter) implements AcquireResult {
+        public InFlight {
+            Objects.requireNonNull(retryAfter, "retryAfter must not be null");
+            if (retryAfter.isNegative()) {
+                throw new IllegalArgumentException("retryAfter must not be negative, got: " + retryAfter);
+            }
         }
     }
 
@@ -91,8 +100,8 @@ public sealed interface AcquireResult
         return new Duplicate(payload);
     }
 
-    static AcquireResult lockTimeout(IdempotencyIdentity identity) {
-        return new LockTimeout(identity);
+    static AcquireResult inFlight(Duration retryAfter) {
+        return new InFlight(retryAfter);
     }
 
     static AcquireResult fingerprintMismatch(String storedFingerprint, String receivedFingerprint) {
