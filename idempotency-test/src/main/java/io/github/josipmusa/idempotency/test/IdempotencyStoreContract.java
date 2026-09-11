@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.test;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -22,10 +23,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
-import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.NoPayload;
-import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.Payload;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Duration;
 import java.time.Instant;
@@ -57,6 +56,9 @@ public abstract class IdempotencyStoreContract {
 
     /** The scope every fixture uses unless a test is specifically about scope isolation. */
     protected static final String SCOPE_DEFAULT = "ContractScope.action";
+
+    /** The payload type every fixture uses; a store must round-trip it verbatim. */
+    protected static final String PAYLOAD_TYPE = "test/sample";
 
     protected static final String SCOPE_OTHER = "OtherScope.action";
 
@@ -91,12 +93,11 @@ public abstract class IdempotencyStoreContract {
         return result;
     }
 
-    protected void complete(IdempotencyStore store, String key, IdempotencyPayload payload, Duration ttl) {
+    protected void complete(IdempotencyStore store, String key, Payload payload, Duration ttl) {
         complete(store, identity(key), payload, ttl);
     }
 
-    protected void complete(
-            IdempotencyStore store, IdempotencyIdentity identity, IdempotencyPayload payload, Duration ttl) {
+    protected void complete(IdempotencyStore store, IdempotencyIdentity identity, Payload payload, Duration ttl) {
         store.complete(identity, activeLease(identity), payload, ttl);
     }
 
@@ -174,8 +175,14 @@ public abstract class IdempotencyStoreContract {
                 .build();
     }
 
-    private StoredResponse sampleResponse() {
-        return new StoredResponse(200, Map.of("X-Request-Id", List.of("abc-123")), "hello".getBytes(), Instant.now());
+    /** The fixture payload: a non-empty body plus attributes, so both round-trip together. */
+    protected static Payload samplePayload() {
+        return new Payload(PAYLOAD_TYPE, "hello".getBytes(UTF_8), Map.of("status", "200", "requestId", "abc-123"));
+    }
+
+    /** A payload distinguished only by its body, for tests that care which generation was stored. */
+    protected static Payload payloadWithBody(String body) {
+        return new Payload(PAYLOAD_TYPE, body.getBytes(UTF_8), Map.of());
     }
 
     @Test
@@ -186,21 +193,18 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_CompletedKey_Expect_ReturnsDuplicateWithCorrectResponse() {
+    void When_CompletedKey_Expect_ReturnsDuplicateWithCorrectPayload() {
         IdempotencyStore s = store();
         String key = "complete-key";
-        StoredResponse response = sampleResponse();
+        Payload payload = samplePayload();
 
         acquire(s, contextFor(key));
-        complete(s, key, response, Duration.ofHours(1));
+        complete(s, key, payload, Duration.ofHours(1));
 
         AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        StoredResponse replayed = storedResponseOf(result);
-        assertThat(replayed.statusCode()).isEqualTo(200);
-        assertThat(replayed.headers()).containsEntry("X-Request-Id", List.of("abc-123"));
-        assertThat(replayed.body()).isEqualTo("hello".getBytes());
+        assertThat(payloadOf(result)).isEqualTo(payload);
     }
 
     @Test
@@ -222,7 +226,7 @@ public abstract class IdempotencyStoreContract {
         String key = "expired-key";
 
         acquire(s, contextFor(key));
-        complete(s, key, sampleResponse(), Duration.ofMillis(1));
+        complete(s, key, samplePayload(), Duration.ofMillis(1));
 
         sleepFor(Duration.ofMillis(10));
 
@@ -286,9 +290,9 @@ public abstract class IdempotencyStoreContract {
                 .fingerprint(FINGERPRINT_B)
                 .build();
         var second = (AcquireResult.Acquired) s.tryAcquire(secondContext);
-        StoredResponse staleResponse = new StoredResponse(200, Map.of(), "stale".getBytes(), Instant.now());
+        Payload stalePayload = payloadWithBody("stale");
 
-        assertThatThrownBy(() -> s.complete(identity(key), first.leaseId(), staleResponse, Duration.ofHours(1)))
+        assertThatThrownBy(() -> s.complete(identity(key), first.leaseId(), stalePayload, Duration.ofHours(1)))
                 .isInstanceOf(IdempotencyLeaseLostException.class)
                 .hasMessageContaining("lease");
         assertThatThrownBy(() -> s.release(identity(key), first.leaseId()))
@@ -297,12 +301,12 @@ public abstract class IdempotencyStoreContract {
         assertThatCode(() -> s.extendLock(identity(key), first.leaseId(), Duration.ofHours(1)))
                 .doesNotThrowAnyException();
 
-        StoredResponse currentResponse = new StoredResponse(201, Map.of(), "current".getBytes(), Instant.now());
-        s.complete(identity(key), second.leaseId(), currentResponse, Duration.ofHours(1));
+        Payload currentPayload = payloadWithBody("current");
+        s.complete(identity(key), second.leaseId(), currentPayload, Duration.ofHours(1));
 
         AcquireResult replay = s.tryAcquire(secondContext);
         assertThat(replay).isInstanceOf(AcquireResult.Duplicate.class);
-        assertThat(storedResponseOf(replay).body()).isEqualTo("current".getBytes());
+        assertThat(payloadOf(replay).body()).isEqualTo("current".getBytes(UTF_8));
     }
 
     @Test
@@ -310,7 +314,7 @@ public abstract class IdempotencyStoreContract {
             throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "inflight-key";
-        StoredResponse response = sampleResponse();
+        Payload payload = samplePayload();
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             long[] thread1CompleteTime = new long[1];
@@ -322,7 +326,7 @@ public abstract class IdempotencyStoreContract {
                 lockAcquired.countDown();
                 // Hold the lock long enough for thread 2 to reach tryAcquire and block in it
                 sleepFor(Duration.ofMillis(300));
-                complete(s, key, response, Duration.ofHours(1));
+                complete(s, key, payload, Duration.ofHours(1));
                 thread1CompleteTime[0] = System.nanoTime();
                 return null;
             });
@@ -339,10 +343,7 @@ public abstract class IdempotencyStoreContract {
             AcquireResult result = thread2.get(5, TimeUnit.SECONDS);
 
             assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-            AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
-            assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(200);
-            assertThat(storedResponseOf(duplicate).headers()).containsEntry("X-Request-Id", List.of("abc-123"));
-            assertThat(storedResponseOf(duplicate).body()).isEqualTo("hello".getBytes());
+            assertThat(payloadOf(result)).isEqualTo(payload);
             assertThat(thread2ResultTime[0]).isGreaterThan(thread1CompleteTime[0]);
         }
     }
@@ -389,7 +390,7 @@ public abstract class IdempotencyStoreContract {
             throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "concurrent-key";
-        StoredResponse response = sampleResponse();
+        Payload payload = samplePayload();
         int threadCount = 20;
 
         CountDownLatch readyLatch = new CountDownLatch(threadCount);
@@ -411,7 +412,7 @@ public abstract class IdempotencyStoreContract {
 
                     AcquireResult result = acquire(s, contextFor(key));
                     if (result instanceof AcquireResult.Acquired) {
-                        complete(s, key, response, Duration.ofHours(1));
+                        complete(s, key, payload, Duration.ofHours(1));
                     }
                     results.add(result);
                 }));
@@ -436,11 +437,8 @@ public abstract class IdempotencyStoreContract {
 
             results.stream()
                     .filter(r -> r instanceof AcquireResult.Duplicate)
-                    .map(IdempotencyStoreContract::storedResponseOf)
-                    .forEach(r -> {
-                        assertThat(r.statusCode()).isEqualTo(200);
-                        assertThat(r.body()).isEqualTo("hello".getBytes());
-                    });
+                    .map(IdempotencyStoreContract::payloadOf)
+                    .forEach(r -> assertThat(r).isEqualTo(payload));
         }
     }
 
@@ -465,7 +463,7 @@ public abstract class IdempotencyStoreContract {
     void When_ReleaseAllowsRetry_Expect_ActionCanSucceedOnSecondAttempt() {
         IdempotencyStore s = store();
         String key = "retry-key";
-        StoredResponse response = sampleResponse();
+        Payload payload = samplePayload();
 
         // First attempt — acquire and fail
         AcquireResult first = acquire(s, contextFor(key));
@@ -475,14 +473,12 @@ public abstract class IdempotencyStoreContract {
         // Second attempt — acquire and succeed
         AcquireResult second = acquire(s, contextFor(key));
         assertThat(second).isInstanceOf(AcquireResult.Acquired.class);
-        complete(s, key, response, Duration.ofHours(1));
+        complete(s, key, payload, Duration.ofHours(1));
 
         // Third attempt — should be duplicate
         AcquireResult third = acquire(s, contextFor(key));
         assertThat(third).isInstanceOf(AcquireResult.Duplicate.class);
-        AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
-        assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(200);
-        assertThat(storedResponseOf(duplicate).body()).isEqualTo("hello".getBytes());
+        assertThat(payloadOf(third)).isEqualTo(payload);
     }
 
     // --- extendLock contract ---
@@ -525,10 +521,9 @@ public abstract class IdempotencyStoreContract {
     void When_ExtendLockCompletedKey_Expect_SilentlyIgnored() {
         IdempotencyStore s = store();
         String key = "completed-extend-key";
-        StoredResponse response = sampleResponse();
 
         acquire(s, contextFor(key));
-        complete(s, key, response, Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
         // Must not throw — heartbeat may fire after completion
         extendLock(s, key, Duration.ofSeconds(10));
@@ -544,17 +539,16 @@ public abstract class IdempotencyStoreContract {
     void When_CompletedKeyWithinTtl_Expect_ReturnsDuplicate() {
         IdempotencyStore s = store();
         String key = "ttl-durable-key";
-        StoredResponse response = sampleResponse();
+        Payload payload = samplePayload();
 
         acquire(s, contextFor(key));
-        complete(s, key, response, Duration.ofHours(1));
+        complete(s, key, payload, Duration.ofHours(1));
 
         // Immediately re-acquire — must still be Duplicate
         AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) result;
-        assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(200);
+        assertThat(payloadOf(result)).isEqualTo(payload);
     }
 
     // --- Error contracts ---
@@ -563,7 +557,7 @@ public abstract class IdempotencyStoreContract {
     void When_CompleteOnNonExistentKey_Expect_ThrowsStoreException() {
         IdempotencyStore s = store();
 
-        assertThatThrownBy(() -> complete(s, "ghost-key", sampleResponse(), Duration.ofHours(1)))
+        assertThatThrownBy(() -> complete(s, "ghost-key", samplePayload(), Duration.ofHours(1)))
                 .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
@@ -575,7 +569,7 @@ public abstract class IdempotencyStoreContract {
         acquire(s, contextFor(key));
         release(s, key);
 
-        assertThatThrownBy(() -> complete(s, key, sampleResponse(), Duration.ofHours(1)))
+        assertThatThrownBy(() -> complete(s, key, samplePayload(), Duration.ofHours(1)))
                 .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
@@ -592,9 +586,9 @@ public abstract class IdempotencyStoreContract {
         String key = "double-complete-key";
 
         acquire(s, contextFor(key));
-        complete(s, key, sampleResponse(), Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
-        assertThatThrownBy(() -> complete(s, key, sampleResponse(), Duration.ofHours(1)))
+        assertThatThrownBy(() -> complete(s, key, samplePayload(), Duration.ofHours(1)))
                 .isInstanceOf(IdempotencyLeaseLostException.class);
     }
 
@@ -604,7 +598,7 @@ public abstract class IdempotencyStoreContract {
         String key = "release-completed-key";
 
         acquire(s, contextFor(key));
-        complete(s, key, sampleResponse(), Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
         assertThatThrownBy(() -> release(s, key)).isInstanceOf(IdempotencyLeaseLostException.class);
     }
@@ -620,8 +614,7 @@ public abstract class IdempotencyStoreContract {
         AcquireResult first = acquire(s, contextFor(key));
         assertThat(first).isInstanceOf(AcquireResult.Acquired.class);
 
-        StoredResponse firstResponse = new StoredResponse(200, Map.of(), "first".getBytes(), Instant.now());
-        complete(s, key, firstResponse, Duration.ofMillis(1));
+        complete(s, key, payloadWithBody("first"), Duration.ofMillis(1));
 
         // Wait for TTL to expire
         sleepFor(Duration.ofMillis(10));
@@ -632,15 +625,12 @@ public abstract class IdempotencyStoreContract {
                 .as("Key should be acquirable again after TTL expires")
                 .isInstanceOf(AcquireResult.Acquired.class);
 
-        StoredResponse secondResponse = new StoredResponse(201, Map.of(), "second".getBytes(), Instant.now());
-        complete(s, key, secondResponse, Duration.ofHours(1));
+        complete(s, key, payloadWithBody("second"), Duration.ofHours(1));
 
-        // Verify the new response is stored, not the old one
+        // Verify the new payload is stored, not the old one
         AcquireResult third = acquire(s, contextFor(key));
         assertThat(third).isInstanceOf(AcquireResult.Duplicate.class);
-        AcquireResult.Duplicate duplicate = (AcquireResult.Duplicate) third;
-        assertThat(storedResponseOf(duplicate).statusCode()).isEqualTo(201);
-        assertThat(storedResponseOf(duplicate).body()).isEqualTo("second".getBytes());
+        assertThat(payloadOf(third).body()).isEqualTo("second".getBytes(UTF_8));
     }
 
     // --- Additional edge-case contracts ---
@@ -811,7 +801,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         var ctx = contextWithTtl("purge-keep-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
         acquire(s, ctx);
-        complete(s, ctx.key(), sampleResponse(), ctx.ttl());
+        complete(s, ctx.key(), samplePayload(), ctx.ttl());
         s.purgeExpired();
         var result = acquire(s, ctx);
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
@@ -822,11 +812,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         var ctx = contextWithTtl("purge-completed-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
         acquire(s, ctx);
-        complete(
-                s,
-                ctx.key(),
-                new StoredResponse(200, Map.of(), "body".getBytes(), Instant.now()),
-                Duration.ofMillis(1));
+        complete(s, ctx.key(), payloadWithBody("body"), Duration.ofMillis(1));
         sleepFor(Duration.ofMillis(50));
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
         assertThat(acquire(s, ctx)).isInstanceOf(AcquireResult.Acquired.class);
@@ -891,7 +877,7 @@ public abstract class IdempotencyStoreContract {
         String key = "completed-in-one-scope";
 
         acquire(s, contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5)));
-        complete(s, new IdempotencyIdentity(SCOPE_DEFAULT, key), sampleResponse(), Duration.ofHours(1));
+        complete(s, new IdempotencyIdentity(SCOPE_DEFAULT, key), samplePayload(), Duration.ofHours(1));
 
         AcquireResult sameScope = acquire(s, contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5)));
         AcquireResult otherScope = acquire(s, contextFor(SCOPE_OTHER, key, Duration.ofMillis(50)));
@@ -930,7 +916,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         var context = contextFor("fp-same", FINGERPRINT_A);
         acquire(s, context);
-        complete(s, "fp-same", sampleResponse(), Duration.ofHours(1));
+        complete(s, "fp-same", samplePayload(), Duration.ofHours(1));
 
         var result = acquire(s, context);
 
@@ -942,7 +928,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         var original = contextFor("fp-diff", FINGERPRINT_A);
         acquire(s, original);
-        complete(s, "fp-diff", sampleResponse(), Duration.ofHours(1));
+        complete(s, "fp-diff", samplePayload(), Duration.ofHours(1));
 
         var reused = contextFor("fp-diff", FINGERPRINT_B);
         var result = acquire(s, reused);
@@ -977,7 +963,7 @@ public abstract class IdempotencyStoreContract {
 
         // Second attempt steals with FINGERPRINT_B and completes
         acquire(s, contextFor(key, FINGERPRINT_B));
-        complete(s, key, sampleResponse(), Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
         // Third request with original FINGERPRINT_A must be rejected as a mismatch —
         // the stored fingerprint is now B, not A
@@ -1023,7 +1009,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "fp-absent-absent";
         acquire(s, contextWithoutFingerprint(key));
-        complete(s, key, sampleResponse(), Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
         var result = acquire(s, contextWithoutFingerprint(key));
 
@@ -1035,7 +1021,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "fp-absent-present";
         acquire(s, contextWithoutFingerprint(key));
-        complete(s, key, sampleResponse(), Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
         var result = acquire(s, contextFor(key, FINGERPRINT_A));
 
@@ -1049,7 +1035,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "fp-present-absent";
         acquire(s, contextFor(key, FINGERPRINT_A));
-        complete(s, key, sampleResponse(), Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
         var result = acquire(s, contextWithoutFingerprint(key));
 
@@ -1063,7 +1049,7 @@ public abstract class IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "fp-present-different";
         acquire(s, contextFor(key, FINGERPRINT_A));
-        complete(s, key, sampleResponse(), Duration.ofHours(1));
+        complete(s, key, samplePayload(), Duration.ofHours(1));
 
         var result = acquire(s, contextFor(key, FINGERPRINT_B));
 
@@ -1091,38 +1077,53 @@ public abstract class IdempotencyStoreContract {
     // ── Payload tests ──────────────────────────────────────────────────
 
     @Test
-    void When_CompletedWithNoPayload_Expect_DuplicateReturnsNoPayloadWithStoredCompletedAt() {
+    void When_CompleteWithAttributes_Expect_DuplicateReturnsSameAttributes() {
         IdempotencyStore s = store();
-        String key = "payload-none";
-        Instant completedAt = Instant.now().minusSeconds(7);
+        String key = "payload-attributes";
+        Payload payload = new Payload(
+                "messaging/published", new byte[0], Map.of("publicationId", "pub-42", "topic", "orders", "empty", ""));
 
         acquire(s, contextFor(key));
-        complete(s, key, NoPayload.at(completedAt), Duration.ofHours(1));
+        complete(s, key, payload, Duration.ofHours(1));
 
         var result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        var payload = ((AcquireResult.Duplicate) result).payload();
-        assertThat(payload).isInstanceOf(NoPayload.class);
-        assertThat(payload.completedAt().toEpochMilli()).isEqualTo(completedAt.toEpochMilli());
+        assertThat(payloadOf(result).type()).isEqualTo("messaging/published");
+        assertThat(payloadOf(result).attributes())
+                .as("attributes are correlation data and must come back verbatim")
+                .containsExactlyInAnyOrderEntriesOf(Map.of("publicationId", "pub-42", "topic", "orders", "empty", ""));
     }
 
     @Test
-    void When_CompletedWithNoPayloadAndNoFingerprint_Expect_RoundTrips() {
+    void When_CompleteWithNonePayload_Expect_DuplicateReturnsNone() {
+        IdempotencyStore s = store();
+        String key = "payload-none";
+
+        acquire(s, contextFor(key));
+        complete(s, key, Payload.none(), Duration.ofHours(1));
+
+        var result = acquire(s, contextFor(key));
+
+        assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
+        assertThat(payloadOf(result)).isEqualTo(Payload.none());
+    }
+
+    @Test
+    void When_CompleteWithNonePayloadAndNoFingerprint_Expect_RoundTrips() {
         IdempotencyStore s = store();
         String key = "payload-none-no-fp";
-        Instant completedAt = Instant.now();
 
         acquire(s, contextWithoutFingerprint(key));
-        complete(s, key, NoPayload.at(completedAt), Duration.ofHours(1));
+        complete(s, key, Payload.none(), Duration.ofHours(1));
 
         var result = acquire(s, contextWithoutFingerprint(key));
 
-        assertThat(((AcquireResult.Duplicate) result).payload()).isInstanceOf(NoPayload.class);
+        assertThat(payloadOf(result)).isEqualTo(Payload.none());
     }
 
     @Test
-    void When_NoPayloadRecordIsReleased_Expect_KeyIsReacquirable() {
+    void When_NonePayloadRecordIsReleased_Expect_KeyIsReacquirable() {
         IdempotencyStore s = store();
         String key = "payload-none-release";
 
@@ -1133,24 +1134,58 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_ResponseWithEmptyBodyCompleted_Expect_StillReadBackAsStoredResponse() {
+    void When_Complete_Expect_DuplicateCompletedAtWithinTolerance() {
         IdempotencyStore s = store();
-        String key = "payload-empty-body";
-        var response = new StoredResponse(204, Map.of(), new byte[0], Instant.now());
+        String key = "payload-completed-at";
 
         acquire(s, contextFor(key));
-        complete(s, key, response, Duration.ofHours(1));
+        Instant before = Instant.now();
+        complete(s, key, samplePayload(), Duration.ofHours(1));
+        Instant after = Instant.now();
 
-        var payload = ((AcquireResult.Duplicate) acquire(s, contextFor(key))).payload();
+        var result = acquire(s, contextFor(key));
 
-        assertThat(payload).isInstanceOf(StoredResponse.class);
-        assertThat(((StoredResponse) payload).statusCode()).isEqualTo(204);
-        assertThat(((StoredResponse) payload).body()).isEmpty();
+        assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
+        Instant completedAt = ((AcquireResult.Duplicate) result).completedAt();
+        // The store stamps completion from its own clock, which may be a database server's.
+        // A generous window still proves it recorded the moment rather than an arbitrary value.
+        assertThat(completedAt)
+                .as("completedAt is when the store recorded the completion")
+                .isBetween(before.minusSeconds(5), after.plusSeconds(5));
     }
 
-    protected static StoredResponse storedResponseOf(AcquireResult result) {
-        var payload = ((AcquireResult.Duplicate) result).payload();
-        assertThat(payload).isInstanceOf(StoredResponse.class);
-        return (StoredResponse) payload;
+    @Test
+    void When_PayloadBodyEmpty_Expect_RoundTripsAsEmptyNotNone() {
+        IdempotencyStore s = store();
+        String key = "payload-empty-body";
+        Payload payload = new Payload(PAYLOAD_TYPE, new byte[0], Map.of("status", "204"));
+
+        acquire(s, contextFor(key));
+        complete(s, key, payload, Duration.ofHours(1));
+
+        var result = acquire(s, contextFor(key));
+
+        assertThat(payloadOf(result)).isEqualTo(payload);
+        assertThat(payloadOf(result).type()).isNotEqualTo(Payload.TYPE_NONE);
+    }
+
+    @Test
+    void When_PayloadBodyLarge_Expect_RoundTripIntact() {
+        IdempotencyStore s = store();
+        String key = "payload-large-body";
+        byte[] body = new byte[1024 * 1024];
+        new java.util.Random(42).nextBytes(body);
+        Payload payload = new Payload(PAYLOAD_TYPE, body, Map.of());
+
+        acquire(s, contextFor(key));
+        complete(s, key, payload, Duration.ofHours(1));
+
+        var result = acquire(s, contextFor(key));
+
+        assertThat(payloadOf(result).body()).isEqualTo(body);
+    }
+
+    protected static Payload payloadOf(AcquireResult result) {
+        return ((AcquireResult.Duplicate) result).payload();
     }
 }

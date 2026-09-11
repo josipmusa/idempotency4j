@@ -41,7 +41,7 @@ Three layers with strict responsibility boundaries (documented in `IdempotencyEn
 
 Record state machine (in `IdempotencyStore` Javadoc), per identity: new -> IN_PROGRESS -> COMPLETE, or IN_PROGRESS -> FAILED on error (reclaimable by the next `tryAcquire`). Expired IN_PROGRESS leases are stolen atomically. Every acquisition has a lease; complete, release, and heartbeat mutations must match it to fence stale owners. `release` leaves `expires_at` alone - a FAILED record is reclaimable at once, and its original TTL is what keeps a purge from dropping it before the retry arrives. Stores key by the full identity: JDBC's primary key is `(scope, idempotency_key)`, Redis uses `<prefix>rec:<scope>:<key>`, in-memory maps by `IdempotencyIdentity`.
 
-Completion stores an `IdempotencyPayload`: a `StoredResponse` for HTTP, or `NoPayload` when there is nothing to replay. The request fingerprint is optional; two acquisitions mismatch only when both carry one and they differ.
+Completion stores a `Payload(type, body, attributes)` - a transport-neutral envelope core never interprets, with `Payload.none()` for a caller with nothing to replay. A `PayloadCodec<T>` translates an adapter's own result type to and from it: `StoredResponseCodec` in `idempotency-spring-web` stores an HTTP response as type `http/response` with status and headers in `attributes`, and applies the `ResponseSanitizer` inside `encode`. `attributes` is flat `Map<String, String>`, returned verbatim on a duplicate, and is where a non-HTTP caller puts correlation data such as outgoing publication ids. When a record completed is the store's to determine, not the caller's: it stamps `completedAt` and reports it on `AcquireResult.Duplicate` alongside the payload. The request fingerprint is optional; two acquisitions mismatch only when both carry one and they differ.
 
 `IdempotencyLifecycleListener` observers fire synchronously on the calling thread, in registration order, and cannot affect store state, the return value, or a propagated exception. The load-bearing invariant is one terminal callback (`onCompleted` XOR `onFailed`) per acquired lease, always preceded by `onAcquired` - consumers unbind thread-local state there, so any new engine path that acquires a lease must fire the pair or fire neither.
 
@@ -51,7 +51,7 @@ Enforced by design, not tooling - do not violate them:
 
 - `idempotency-core`: zero framework dependencies.
 - `providers/*`: depend on core only, no Spring.
-- `spring/idempotency-spring-web`: core + Spring Web.
+- `spring/idempotency-spring-web`: core + Spring Web, plus Jackson for the header map `StoredResponseCodec` carries in a payload attribute.
 - `spring/idempotency-spring-boot-starter`: spring-web module + providers, autoconfiguration only.
 
 ### The store contract

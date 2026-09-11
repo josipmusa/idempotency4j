@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** The stored value is a transport-neutral `Payload(String type, byte[] body,
+  Map<String, String> attributes)` in core, with `Payload.none()` for a caller with nothing to
+  replay and a `PayloadCodec<T>` (`encode`/`decode`, plus `PayloadCodec.none()`) for translating an
+  adapter's own result type. `IdempotencyPayload` and `NoPayload` are deleted, and `StoredResponse`
+  moves out of core to `io.github.josipmusa.idempotency.spring.web` alongside the new
+  `StoredResponseCodec`, which stores an HTTP response under type `http/response` with the status
+  and headers as attributes and the body as the payload body, and runs the configured
+  `ResponseSanitizer` inside `encode`. `attributes` is returned verbatim on a duplicate, which is
+  where a non-HTTP caller keeps correlation data such as the ids of the messages it published.
+- **Breaking.** When a record completed is now the store's to determine, not the caller's.
+  `StoredResponse` loses its `completedAt` component, and the instant travels alongside the payload
+  instead: `AcquireResult.Duplicate(payload, completedAt)`, `ExecutionResult.Duplicate(payload,
+  completedAt)` and `IdempotencyLifecycleListener.onDuplicate(ctx, payload, completedAt)`.
+  `IdempotencyStore.complete` and `onCompleted` take a `Payload`. `IdempotencyFilter` no longer
+  accepts a `Clock`, which had no remaining purpose.
+- **Breaking.** The JDBC schema replaces `response_code`, `response_headers` and `response_body`
+  with `payload_type`, `payload` and `attributes` (JSON), and renames `request_fingerprint` to
+  `fingerprint VARCHAR(128)`. The Redis hash replaces `code`, `headers` and `body` with
+  `payload_type`, `payload` and `attributes`, and its format version moves to `2` so a record
+  written under the previous layout fails closed rather than being misread. There is no migration;
+  recreate the table and discard existing records.
+
+### Fixed
+
+- The JDBC store reads and writes every timestamp as UTC and takes the database clock from
+  `UTC_TIMESTAMP` (MySQL) or `CURRENT_TIMESTAMP AT TIME ZONE 'UTC'` (PostgreSQL). Previously the
+  driver was free to read a server-local `CURRENT_TIMESTAMP` in its own zone, which on MySQL shifted
+  every timestamp by the JVM's offset. That was invisible while timestamps were only ever compared
+  against other columns written the same way, but `completed_at` now leaves the store as an instant
+  a caller sees.
+
 - **Breaking.** `lockTimeout` is split into two independent durations. `leaseDuration` is how long
   an acquisition is protected before another caller may steal it (default 30s, heartbeat at half
   of it); `waitTimeout` is how long `tryAcquire` blocks for someone else's in-flight record before

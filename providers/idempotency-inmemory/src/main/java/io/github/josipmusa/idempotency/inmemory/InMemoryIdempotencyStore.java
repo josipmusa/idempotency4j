@@ -18,8 +18,8 @@ package io.github.josipmusa.idempotency.inmemory;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
-import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
+import io.github.josipmusa.idempotency.core.Payload;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import java.time.Clock;
 import java.time.Duration;
@@ -57,7 +57,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
      */
     private record Entry(
             Status status,
-            IdempotencyPayload payload,
+            Payload payload,
+            Instant completedAt,
             Instant leaseExpiresAt,
             Instant expiresAt,
             String requestFingerprint,
@@ -105,6 +106,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             Entry newEntry = new Entry(
                     Status.IN_PROGRESS,
                     null,
+                    null,
                     now.plus(context.leaseDuration()),
                     now.plus(context.ttl()),
                     context.requestFingerprint(),
@@ -121,7 +123,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     return AcquireResult.fingerprintMismatch(
                             existing.requestFingerprint(), context.requestFingerprint());
                 }
-                return AcquireResult.duplicate(existing.payload());
+                return AcquireResult.duplicate(existing.payload(), existing.completedAt());
             }
 
             // FAILED or expired lease — attempt to claim the entry atomically.
@@ -162,7 +164,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl) {
+    public void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
         Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
         store.compute(identity, (id, existing) -> {
@@ -175,8 +177,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                         "Cannot complete " + identity + ": entry is " + existing.status() + ", expected IN_PROGRESS");
             }
             requireLease(existing, leaseId, identity, "complete");
-            return new Entry(
-                    Status.COMPLETE, payload, null, clock.instant().plus(ttl), existing.requestFingerprint(), null);
+            Instant now = clock.instant();
+            return new Entry(Status.COMPLETE, payload, now, null, now.plus(ttl), existing.requestFingerprint(), null);
         });
     }
 
@@ -195,7 +197,8 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             requireLease(existing, leaseId, identity, "release");
             // expiresAt is carried over untouched: a FAILED entry is re-acquirable at once,
             // and its original TTL is what keeps a purge from dropping it before a retry.
-            return new Entry(Status.FAILED, null, null, existing.expiresAt(), existing.requestFingerprint(), null);
+            return new Entry(
+                    Status.FAILED, null, null, null, existing.expiresAt(), existing.requestFingerprint(), null);
         });
     }
 
@@ -208,6 +211,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             }
             return new Entry(
                     Status.IN_PROGRESS,
+                    null,
                     null,
                     clock.instant().plus(extension),
                     entry.expiresAt(),

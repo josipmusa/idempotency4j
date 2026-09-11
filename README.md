@@ -323,8 +323,9 @@ event handler, or anything else that needs a key to run at most once. The annota
 and `StoredResponse` are the Spring adapter's business, not the engine's.
 
 A caller with no request body to hash builds a context without a fingerprint, and completes with
-`NoPayload` because there is nothing for a duplicate to replay. The first argument is the scope:
-name the unit of work, so two listeners handling the same event id each get their own record.
+`Payload.none()` because there is nothing for a duplicate to replay. The first argument is the
+scope: name the unit of work, so two listeners handling the same event id each get their own
+record.
 
 ```java
 IdempotencyEngine engine = new IdempotencyEngine(store, scheduler);
@@ -339,7 +340,7 @@ ExecutionResult result = engine.execute(context, () -> handler.handle(event));
 
 switch (result) {
     case ExecutionResult.Executed executed ->
-            engine.complete(context, executed.leaseId(), NoPayload.at(Instant.now()), context.ttl());
+            engine.complete(context, executed.leaseId(), Payload.none(), context.ttl());
     case ExecutionResult.Duplicate ignored -> {
         // already handled under this key, nothing to do
     }
@@ -348,9 +349,26 @@ switch (result) {
 
 As in the HTTP flow, the engine acquires the lock and runs the action with a heartbeat, but calling
 `complete` is the caller's job: only the caller knows what, if anything, is worth storing for a
-duplicate. Add `.fingerprint(sha256Hex)` to the builder when the
-payload is worth guarding against key reuse, and a `StoredResponse` to `complete` when a duplicate
-should get a real result back.
+duplicate. Add `.fingerprint(sha256Hex)` to the builder when the payload is worth guarding against
+key reuse.
+
+When a duplicate should get a real result back, store a `Payload` instead of `Payload.none()`: a
+`type` saying how to read the bytes, the bytes themselves, and flat string `attributes` the store
+returns verbatim. That last part is what a messaging adapter uses to carry correlation data - the
+ids of the messages the first execution published, say - so a duplicate can reference them instead
+of publishing again.
+
+```java
+Payload payload = new Payload(
+        "shipment/handled",
+        objectMapper.writeValueAsBytes(outcome),
+        Map.of("publicationId", publication.id()));
+
+engine.complete(context, executed.leaseId(), payload, context.ttl());
+```
+
+Wrap the encoding in a `PayloadCodec<T>` when more than one call site stores the same shape; that
+is what `StoredResponseCodec` is for HTTP responses.
 
 Complete through `engine.complete(...)` rather than `store.complete(...)`: it does the same store
 call but also fires the [lifecycle callbacks](#lifecycle-callbacks).
@@ -370,7 +388,7 @@ public IdempotencyLifecycleListener auditListener(AuditService audit) {
         }
 
         @Override
-        public void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {
+        public void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {
             audit.end(ctx.key());
         }
 
@@ -446,7 +464,7 @@ public ResponseSanitizer responseSanitizer() {
     return response -> {
         Map<String, List<String>> headers = new HashMap<>(response.headers());
         headers.remove("Set-Cookie");
-        return new StoredResponse(response.statusCode(), headers, response.body(), response.completedAt());
+        return new StoredResponse(response.statusCode(), headers, response.body());
     };
 }
 ```

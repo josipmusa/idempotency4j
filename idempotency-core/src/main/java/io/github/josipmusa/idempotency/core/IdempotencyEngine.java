@@ -19,6 +19,7 @@ import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener.Failure
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
@@ -131,9 +132,9 @@ public final class IdempotencyEngine {
         Objects.requireNonNull(action, "action must not be null");
         return switch (store.tryAcquire(context)) {
             case AcquireResult.Acquired(String leaseId) -> runWithHeartbeat(context, leaseId, action);
-            case AcquireResult.Duplicate(IdempotencyPayload payload) -> {
-                notify("onDuplicate", context, listener -> listener.onDuplicate(context, payload));
-                yield ExecutionResult.duplicate(payload);
+            case AcquireResult.Duplicate(Payload payload, Instant completedAt) -> {
+                notify("onDuplicate", context, listener -> listener.onDuplicate(context, payload, completedAt));
+                yield ExecutionResult.duplicate(payload, completedAt);
             }
             case AcquireResult.InFlight ignored ->
                 throw new IdempotencyLockTimeoutException(context.identity(), context.waitTimeout());
@@ -167,7 +168,7 @@ public final class IdempotencyEngine {
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException
      *         if the mutation was accepted but requested durability could not be confirmed
      */
-    public void complete(IdempotencyContext context, String leaseId, IdempotencyPayload payload, Duration ttl) {
+    public void complete(IdempotencyContext context, String leaseId, Payload payload, Duration ttl) {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(leaseId, "leaseId must not be null");
         Objects.requireNonNull(payload, "payload must not be null");

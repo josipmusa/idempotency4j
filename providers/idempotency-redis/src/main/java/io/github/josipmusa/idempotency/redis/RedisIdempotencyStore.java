@@ -20,10 +20,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
-import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.NoPayload;
-import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.Payload;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyForeignRecordException;
@@ -96,12 +94,17 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     public static final RedisCodec<String, byte[]> CODEC = RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE);
 
     static final String RECORD_OWNER = "idempotency4j";
-    static final String FORMAT_VERSION = "1";
+
+    /**
+     * Bumped to 2 when the payload fields became {@code payload_type}, {@code payload} and
+     * {@code attributes}. A record written under the previous layout fails closed as corrupt
+     * rather than being read back as a payload it cannot express.
+     */
+    static final String FORMAT_VERSION = "2";
 
     private static final long MAX_POLL_INTERVAL_MS = 1_000;
-    private static final byte[] EMPTY = new byte[0];
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
+    private static final TypeReference<Map<String, String>> ATTRIBUTES_TYPE = new TypeReference<>() {};
 
     /**
      * KEYS: record. ARGV: lease duration, TTL, grace, fingerprint, lease id, owner, format.
@@ -131,11 +134,14 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                     if storedFingerprint ~= '' and ARGV[4] ~= '' and storedFingerprint ~= ARGV[4] then
                         return {'MISMATCH', storedFingerprint}
                     end
+                    local payloadType = redis.call('HGET', rec, 'payload_type')
+                    local completedAt = redis.call('HGET', rec, 'completedAt')
+                    if not payloadType or not completedAt then return {'CORRUPT', 'payload fields'} end
                     return {'DUPLICATE',
-                            redis.call('HGET', rec, 'code') or '',
-                            redis.call('HGET', rec, 'headers') or '',
-                            redis.call('HGET', rec, 'body') or '',
-                            redis.call('HGET', rec, 'completedAt') or ''}
+                            payloadType,
+                            redis.call('HGET', rec, 'payload') or '',
+                            redis.call('HGET', rec, 'attributes') or '',
+                            completedAt}
                 end
             elseif status == 'IN_PROGRESS' then
                 local leaseExpiresAt = tonumber(redis.call('HGET', rec, 'leaseExpiresAt'))
@@ -165,17 +171,18 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             """);
 
     /**
-     * KEYS: record. ARGV: lease, TTL, grace, code, headers, body, completed, owner, format.
+     * KEYS: record. ARGV: lease, TTL, grace, payload type, payload, attributes, owner, format.
      *
-     * <p>The code argument is the empty string for a record completed with no payload to
-     * replay; {@code headers} and {@code body} are empty alongside it.
+     * <p>The completion instant is the script's own {@code TIME}, not an argument: when a
+     * record completed is the store's to decide, and Redis's clock is the one every other
+     * expiry decision here is made against.
      */
     private static final LuaScript COMPLETE = LuaScript.of("""
             local rec = KEYS[1]
             local kind = redis.call('TYPE', rec).ok
             if kind == 'none' then return {'MISSING'} end
-            if kind ~= 'hash' or redis.call('HGET', rec, 'owner') ~= ARGV[8] then return {'FOREIGN'} end
-            if redis.call('HGET', rec, 'formatVersion') ~= ARGV[9] then return {'CORRUPT', 'formatVersion'} end
+            if kind ~= 'hash' or redis.call('HGET', rec, 'owner') ~= ARGV[7] then return {'FOREIGN'} end
+            if redis.call('HGET', rec, 'formatVersion') ~= ARGV[8] then return {'CORRUPT', 'formatVersion'} end
             local status = redis.call('HGET', rec, 'status')
             if status ~= 'IN_PROGRESS' then return {'CONFLICT', status or 'missing'} end
             if redis.call('HGET', rec, 'leaseId') ~= ARGV[1] then return {'STALE'} end
@@ -187,10 +194,10 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             redis.call('HSET', rec,
                 'status', 'COMPLETE',
                 'expiresAt', string.format('%.0f', now + ttl),
-                'code', ARGV[4],
-                'headers', ARGV[5],
-                'body', ARGV[6],
-                'completedAt', ARGV[7])
+                'payload_type', ARGV[4],
+                'payload', ARGV[5],
+                'attributes', ARGV[6],
+                'completedAt', string.format('%.0f', now))
             redis.call('HDEL', rec, 'leaseExpiresAt', 'leaseId')
             redis.call('PEXPIRE', rec, physicalTtl)
             return {'OK'}
@@ -214,7 +221,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             -- expiresAt is carried over untouched: a FAILED record is re-acquirable at once,
             -- and its original TTL is what keeps a purge from dropping it before a retry.
             redis.call('HSET', rec, 'status', 'FAILED')
-            redis.call('HDEL', rec, 'leaseExpiresAt', 'leaseId', 'code', 'headers', 'body', 'completedAt')
+            redis.call('HDEL', rec, 'leaseExpiresAt', 'leaseId', 'payload_type', 'payload', 'attributes', 'completedAt')
             redis.call('PEXPIRE', rec, math.max(1, expiresAt - now + tonumber(ARGV[2])))
             return {'OK'}
             """);
@@ -356,25 +363,10 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl) {
+    public void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
         Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
         requireMillisecondDuration(ttl, "ttl");
-        byte[] code;
-        byte[] headers;
-        byte[] body;
-        switch (payload) {
-            case StoredResponse response -> {
-                code = arg(response.statusCode());
-                headers = headersToJson(response.headers());
-                body = response.body();
-            }
-            case NoPayload ignored -> {
-                code = EMPTY;
-                headers = EMPTY;
-                body = EMPTY;
-            }
-        }
         List<Object> reply = eval(
                 COMPLETE,
                 "complete " + identity,
@@ -382,10 +374,9 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 arg(leaseId),
                 arg(ttl.toMillis()),
                 arg(graceMs),
-                code,
-                headers,
-                body,
-                arg(payload.completedAt().toEpochMilli()),
+                arg(payload.type()),
+                payload.body(),
+                attributesToJson(payload.attributes()),
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
         requireOk(reply, identity, "complete");
@@ -488,35 +479,26 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             case "MISMATCH" ->
                 BusyOr.resolved(AcquireResult.fingerprintMismatch(
                         token(reply, 1, "acquire " + identity), context.requestFingerprint()));
-            case "DUPLICATE" -> BusyOr.resolved(AcquireResult.duplicate(readPayload(reply, identity)));
+            case "DUPLICATE" -> BusyOr.resolved(readDuplicate(reply, identity));
             case "FOREIGN" -> throw foreignRecord(identity);
             case "CORRUPT" -> throw corruptRecord(identity, reply);
             default -> throw unexpectedOutcome(outcome, identity, "acquire");
         };
     }
 
-    /**
-     * Materializes the payload carried by a {@code DUPLICATE} reply.
-     *
-     * <p>An empty {@code code} field means the record was completed by a caller with nothing
-     * to replay, and reads back as {@link NoPayload}.
-     */
-    private IdempotencyPayload readPayload(List<Object> reply, IdempotencyIdentity identity) {
+    /** Materializes the {@link AcquireResult.Duplicate} carried by a {@code DUPLICATE} reply. */
+    private AcquireResult readDuplicate(List<Object> reply, IdempotencyIdentity identity) {
         try {
-            String code = token(reply, 1, "read response");
-            Instant completedAt = Instant.ofEpochMilli(Long.parseLong(token(reply, 4, "read response")));
-            if (code.isEmpty()) {
-                return NoPayload.at(completedAt);
-            }
-            int statusCode = Integer.parseInt(code);
-            Map<String, List<String>> headers = jsonToHeaders(bytes(reply, 2, "read response"));
-            byte[] body = bytes(reply, 3, "read response");
-            return new StoredResponse(statusCode, headers, body, completedAt);
+            String type = token(reply, 1, "read payload");
+            byte[] body = bytes(reply, 2, "read payload");
+            Map<String, String> attributes = jsonToAttributes(bytes(reply, 3, "read payload"));
+            Instant completedAt = Instant.ofEpochMilli(Long.parseLong(token(reply, 4, "read payload")));
+            return AcquireResult.duplicate(new Payload(type, body, attributes), completedAt);
         } catch (IdempotencyCorruptRecordException e) {
             throw e;
         } catch (RuntimeException e) {
             throw new IdempotencyCorruptRecordException(
-                    "Stored Redis response for " + identity + " is malformed and cannot be replayed", e);
+                    "Stored Redis payload for " + identity + " is malformed and cannot be replayed", e);
         }
     }
 
@@ -662,22 +644,22 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    static byte[] headersToJson(Map<String, List<String>> headers) {
+    static byte[] attributesToJson(Map<String, String> attributes) {
         try {
-            return OBJECT_MAPPER.writeValueAsBytes(headers);
+            return OBJECT_MAPPER.writeValueAsBytes(attributes);
         } catch (IOException e) {
-            throw new IdempotencyStoreException("Failed to serialize response headers to JSON", e);
+            throw new IdempotencyStoreException("Failed to serialize payload attributes to JSON", e);
         }
     }
 
-    static Map<String, List<String>> jsonToHeaders(byte[] json) {
+    static Map<String, String> jsonToAttributes(byte[] json) {
         if (json == null || json.length == 0) {
             return Map.of();
         }
         try {
-            return OBJECT_MAPPER.readValue(json, HEADERS_TYPE);
+            return OBJECT_MAPPER.readValue(json, ATTRIBUTES_TYPE);
         } catch (IOException e) {
-            throw new IdempotencyCorruptRecordException("Stored Redis response headers are malformed", e);
+            throw new IdempotencyCorruptRecordException("Stored Redis payload attributes are malformed", e);
         }
     }
 }

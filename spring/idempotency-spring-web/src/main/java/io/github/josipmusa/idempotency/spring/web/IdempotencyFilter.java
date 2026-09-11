@@ -27,7 +27,6 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.time.Clock;
 import java.time.Instant;
 import java.util.Objects;
 import org.slf4j.Logger;
@@ -70,25 +69,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private final RequestMappingHandlerMapping handlerMapping;
     private final IdempotentHandlerRegistry registry;
     private final long maxBodyBytes;
-    private final ResponseSanitizer sanitizer;
-    private final Clock clock;
-
-    public IdempotencyFilter(
-            IdempotencyEngine engine,
-            WebIdempotencyConfig config,
-            RequestMappingHandlerMapping handlerMapping,
-            IdempotentHandlerRegistry registry,
-            long maxBodyBytes,
-            ResponseSanitizer sanitizer,
-            Clock clock) {
-        this.engine = Objects.requireNonNull(engine, "engine must not be null");
-        this.config = Objects.requireNonNull(config, "config must not be null");
-        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
-        this.registry = Objects.requireNonNull(registry, "registry must not be null");
-        this.maxBodyBytes = maxBodyBytes;
-        this.sanitizer = Objects.requireNonNull(sanitizer, "sanitizer must not be null");
-        this.clock = Objects.requireNonNull(clock, "clock must not be null");
-    }
+    private final StoredResponseCodec codec;
 
     public IdempotencyFilter(
             IdempotencyEngine engine,
@@ -97,7 +78,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             IdempotentHandlerRegistry registry,
             long maxBodyBytes,
             ResponseSanitizer sanitizer) {
-        this(engine, config, handlerMapping, registry, maxBodyBytes, sanitizer, Clock.systemUTC());
+        this.engine = Objects.requireNonNull(engine, "engine must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
+        this.registry = Objects.requireNonNull(registry, "registry must not be null");
+        this.maxBodyBytes = maxBodyBytes;
+        this.codec = new StoredResponseCodec(Objects.requireNonNull(sanitizer, "sanitizer must not be null"));
     }
 
     public IdempotencyFilter(
@@ -106,7 +92,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             long maxBodyBytes) {
-        this(engine, config, handlerMapping, registry, maxBodyBytes, response -> response, Clock.systemUTC());
+        this(engine, config, handlerMapping, registry, maxBodyBytes, response -> response);
     }
 
     public IdempotencyFilter(
@@ -114,7 +100,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             WebIdempotencyConfig config,
             RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry) {
-        this(engine, config, handlerMapping, registry, NO_LIMIT, response -> response, Clock.systemUTC());
+        this(engine, config, handlerMapping, registry, NO_LIMIT, response -> response);
     }
 
     @Override
@@ -181,20 +167,29 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
         switch (result) {
             case ExecutionResult.Executed(String leaseId) -> storeAndFlush(context, leaseId, wrappedResponse);
-            case ExecutionResult.Duplicate(IdempotencyPayload payload) -> {
-                switch (payload) {
-                    case StoredResponse stored -> HttpIdempotencyMapper.replay(stored, response);
-                    // Only a non-HTTP caller stores NoPayload under a key, so this cannot arise
-                    // from a record this filter created. Answer 204 rather than fail the request.
-                    case NoPayload ignored -> {
-                        log.warn(
-                                "Idempotency record {} was completed by a non-HTTP caller with no response to replay; answering 204",
-                                context.identity());
-                        HttpIdempotencyMapper.replayEmpty(response);
-                    }
-                }
-            }
+            case ExecutionResult.Duplicate(Payload payload, Instant ignoredCompletedAt) ->
+                replay(context, payload, response);
         }
+    }
+
+    /**
+     * Replays a stored payload to a duplicate caller.
+     *
+     * <p>A payload of any other type was stored under this identity by a non-HTTP caller, so
+     * it cannot have come from a record this filter created and there is no response in it to
+     * send. Answering 204 still honours the idempotency guarantee - the action does not run
+     * a second time - which is better than failing a request the caller cannot fix.
+     */
+    private void replay(IdempotencyContext context, Payload payload, HttpServletResponse response) throws IOException {
+        if (!StoredResponseCodec.TYPE.equals(payload.type())) {
+            log.warn(
+                    "Idempotency record {} holds a '{}' payload with no HTTP response to replay; answering 204",
+                    context.identity(),
+                    payload.type());
+            HttpIdempotencyMapper.replayEmpty(response);
+            return;
+        }
+        HttpIdempotencyMapper.replay(codec.decode(payload), response);
     }
 
     /**
@@ -206,11 +201,11 @@ public class IdempotencyFilter extends OncePerRequestFilter {
      */
     private void storeAndFlush(IdempotencyContext context, String leaseId, ContentCachingResponseWrapper wrapped)
             throws IOException {
-        StoredResponse captured = HttpIdempotencyMapper.capture(wrapped, Instant.now(clock));
+        StoredResponse captured = HttpIdempotencyMapper.capture(wrapped);
         try {
-            StoredResponse sanitized = sanitizer.sanitize(captured);
+            Payload payload = codec.encode(captured);
             try {
-                engine.complete(context, leaseId, sanitized, context.ttl());
+                engine.complete(context, leaseId, payload, context.ttl());
             } catch (IdempotencyDurabilityException e) {
                 log.error(
                         "Stored idempotency response for {}, but requested durability was not confirmed; storage state is indeterminate",
@@ -228,7 +223,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                         e);
             }
         } catch (Exception e) {
-            log.error("Failed to sanitize idempotency response for {}; response was not stored", context.identity(), e);
+            log.error("Failed to encode idempotency response for {}; response was not stored", context.identity(), e);
         } finally {
             wrapped.copyBodyToResponse();
         }

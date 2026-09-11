@@ -172,7 +172,7 @@ class IdempotencyFilterTest {
                 .complete(
                         argThat(context -> "test-key".equals(context.key())),
                         eq(LEASE_ID),
-                        any(StoredResponse.class),
+                        any(Payload.class),
                         any(Duration.class));
         assertThat(response.getContentAsString()).isEqualTo("{\"id\":\"1\"}");
         assertThat(response.getStatus()).isEqualTo(201);
@@ -197,7 +197,7 @@ class IdempotencyFilterTest {
                 .complete(
                         argThat(context -> "test-key".equals(context.key())),
                         eq(LEASE_ID),
-                        any(StoredResponse.class),
+                        any(Payload.class),
                         eq(Duration.ofHours(2)));
     }
 
@@ -205,8 +205,7 @@ class IdempotencyFilterTest {
     void When_DuplicateResult_Expect_StoredResponseReplayed() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        StoredResponse stored = storedResponse();
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(stored));
+        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
 
         filter.doFilter(request, response, filterChain);
 
@@ -218,7 +217,7 @@ class IdempotencyFilterTest {
     void When_DuplicateResult_Expect_ReplayedHeaderSet() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse()));
+        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
 
         filter.doFilter(request, response, filterChain);
 
@@ -230,9 +229,8 @@ class IdempotencyFilterTest {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         byte[] body = "hello".getBytes();
-        StoredResponse stored =
-                new StoredResponse(200, Map.of("Content-Type", List.of("application/json")), body, Instant.now());
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(stored));
+        StoredResponse stored = new StoredResponse(200, Map.of("Content-Type", List.of("application/json")), body);
+        when(engine.execute(any(), any())).thenReturn(duplicateOf(stored));
 
         filter.doFilter(request, response, filterChain);
 
@@ -253,9 +251,8 @@ class IdempotencyFilterTest {
                         "Keep-Alive", List.of("timeout=5"),
                         "X-Hop", List.of("not-end-to-end"),
                         "X-End-To-End", List.of("kept")),
-                body,
-                Instant.now());
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(stored));
+                body);
+        when(engine.execute(any(), any())).thenReturn(duplicateOf(stored));
 
         filter.doFilter(request, response, filterChain);
 
@@ -402,7 +399,7 @@ class IdempotencyFilterTest {
     void When_DuplicateResult_Expect_CacheControlNoStoreSet() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse()));
+        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
 
         filter.doFilter(request, response, filterChain);
 
@@ -452,8 +449,8 @@ class IdempotencyFilterTest {
         request.setContent("{\"amount\":100}".getBytes());
 
         StoredResponse storedResponse = new StoredResponse(
-                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes(), Instant.now());
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse));
+                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes());
+        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse));
 
         filter.doFilter(request, response, filterChain);
 
@@ -471,8 +468,7 @@ class IdempotencyFilterTest {
                 storedResponse.headers().entrySet().stream()
                         .filter(e -> !e.getKey().equalsIgnoreCase("X-Secret"))
                         .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue)),
-                storedResponse.body(),
-                storedResponse.completedAt());
+                storedResponse.body());
 
         IdempotencyFilter filterWithSanitizer = new IdempotencyFilter(
                 engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);
@@ -498,14 +494,14 @@ class IdempotencyFilterTest {
 
         filterWithSanitizer.doFilter(request, response, filterChain);
 
-        var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
+        var captor = org.mockito.ArgumentCaptor.forClass(Payload.class);
         verify(engine)
                 .complete(
                         argThat(context -> "test-key".equals(context.key())),
                         eq(LEASE_ID),
                         captor.capture(),
                         any(Duration.class));
-        assertThat(captor.getValue().headers()).doesNotContainKey("X-Secret");
+        assertThat(storedBy(captor).headers()).doesNotContainKey("X-Secret");
     }
 
     @Test
@@ -563,14 +559,14 @@ class IdempotencyFilterTest {
 
         filter.doFilter(request, response, filterChain);
 
-        var captor = org.mockito.ArgumentCaptor.forClass(StoredResponse.class);
+        var captor = org.mockito.ArgumentCaptor.forClass(Payload.class);
         verify(engine)
                 .complete(
                         argThat(context -> "test-key".equals(context.key())),
                         eq(LEASE_ID),
                         captor.capture(),
                         any(Duration.class));
-        assertThat(captor.getValue().headers())
+        assertThat(storedBy(captor).headers())
                 .containsEntry("X-End-To-End", List.of("kept"))
                 .doesNotContainKeys("Connection", "Transfer-Encoding", "Content-Length");
     }
@@ -579,7 +575,7 @@ class IdempotencyFilterTest {
     void When_AnnotatedHandler_Expect_ScopeIsHandlerClassAndMethod() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse()));
+        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
 
         filter.doFilter(request, response, filterChain);
 
@@ -607,10 +603,10 @@ class IdempotencyFilterTest {
     static class PaymentController {}
 
     @Test
-    void When_DuplicateCarriesNoPayload_Expect_NoContentMarkedAsReplayed() throws Exception {
+    void When_DuplicateCarriesNonHttpPayload_Expect_NoContentMarkedAsReplayed() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(NoPayload.at(Instant.now())));
+        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(Payload.none(), Instant.now()));
 
         filter.doFilter(request, response, filterChain);
 
@@ -622,6 +618,16 @@ class IdempotencyFilterTest {
 
     private StoredResponse storedResponse() {
         return new StoredResponse(
-                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"1\"}".getBytes(), Instant.now());
+                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"1\"}".getBytes());
+    }
+
+    /** What the engine hands back for a duplicate whose record holds this response. */
+    private static ExecutionResult duplicateOf(StoredResponse stored) {
+        return ExecutionResult.duplicate(new StoredResponseCodec().encode(stored), Instant.now());
+    }
+
+    /** The response the filter actually stored, decoded back out of the captured payload. */
+    private static StoredResponse storedBy(org.mockito.ArgumentCaptor<Payload> captor) {
+        return new StoredResponseCodec().decode(captor.getValue());
     }
 }
