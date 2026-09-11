@@ -72,7 +72,12 @@ class IdempotencyEngineListenerTest {
     }
 
     private IdempotencyContext defaultContext(String key) {
-        return new IdempotencyContext(SCOPE, key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+        return IdempotencyContext.builder(SCOPE, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .fingerprint("a".repeat(64))
+                .build();
     }
 
     private StoredResponse anyStoredResponse() {
@@ -173,8 +178,10 @@ class IdempotencyEngineListenerTest {
 
     @Test
     void When_DuplicateWithNoPayload_Expect_NoPayloadForwarded() throws Exception {
-        IdempotencyContext context = IdempotencyContext.withoutFingerprint(
-                SCOPE, "duplicate-no-payload", Duration.ofHours(1), Duration.ofSeconds(5));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "duplicate-no-payload")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .build();
         NoPayload stored = NoPayload.at(Instant.now());
         when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored));
 
@@ -197,8 +204,8 @@ class IdempotencyEngineListenerTest {
     }
 
     @Test
-    void When_LockTimeout_Expect_NoCallbacks() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout(identity("timeout-key")));
+    void When_InFlight_Expect_NoCallbacks() {
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.inFlight(Duration.ofSeconds(3)));
 
         assertThatThrownBy(() -> engine.execute(defaultContext("timeout-key"), () -> {}))
                 .isNotNull();

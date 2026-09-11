@@ -74,64 +74,62 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             + "WHERE scope = ? AND idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
 
     private static final String INSERT = "INSERT INTO idempotency_records "
-            + "(scope, idempotency_key, status, locked_at, lock_expires_at, expires_at, request_fingerprint, lease_id, lock_timeout_ms) "
-            + "VALUES (?, ?, 'IN_PROGRESS', ?, ?, ?, ?, ?, ?)";
+            + "(scope, idempotency_key, status, lease_expires_at, expires_at, request_fingerprint, lease_id) "
+            + "VALUES (?, ?, 'IN_PROGRESS', ?, ?, ?, ?)";
 
     private static final String SELECT_FOR_UPDATE =
-            "SELECT status, lock_expires_at, response_code, response_headers, response_body, completed_at, request_fingerprint "
+            "SELECT status, lease_expires_at, response_code, response_headers, response_body, completed_at, request_fingerprint "
                     + "FROM idempotency_records WHERE scope = ? AND idempotency_key = ? FOR UPDATE";
 
     private static final String SELECT_STATUS_AND_LEASE =
             "SELECT status, lease_id FROM idempotency_records WHERE scope = ? AND idempotency_key = ?";
 
-    private static final String STEAL_LOCK =
-            "UPDATE idempotency_records SET status = 'IN_PROGRESS', locked_at = ?, lock_expires_at = ?, "
-                    + "request_fingerprint = ?, lease_id = ?, lock_timeout_ms = ?, "
+    private static final String STEAL_LEASE =
+            "UPDATE idempotency_records SET status = 'IN_PROGRESS', lease_expires_at = ?, "
+                    + "request_fingerprint = ?, lease_id = ?, "
                     + "response_code = NULL, response_headers = NULL, response_body = NULL, completed_at = NULL "
                     + "WHERE scope = ? AND idempotency_key = ? "
-                    + "AND (status = 'FAILED' OR (status = 'IN_PROGRESS' AND lock_expires_at < ?))";
+                    + "AND (status = 'FAILED' OR (status = 'IN_PROGRESS' AND lease_expires_at < ?))";
 
     private static final String COMPLETE =
             "UPDATE idempotency_records SET status = 'COMPLETE', response_code = ?, response_headers = ?, "
-                    + "response_body = ?, completed_at = ?, lock_expires_at = NULL, lease_id = NULL, expires_at = ? "
+                    + "response_body = ?, completed_at = ?, lease_expires_at = NULL, lease_id = NULL, expires_at = ? "
                     + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
-    private static final String RELEASE =
-            "UPDATE idempotency_records SET status = 'FAILED', expires_at = ?, locked_at = NULL, lock_expires_at = NULL, "
-                    + "lease_id = NULL, response_code = NULL, response_headers = NULL, response_body = NULL "
-                    + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
+    private static final String RELEASE = "UPDATE idempotency_records SET status = 'FAILED', lease_expires_at = NULL, "
+            + "lease_id = NULL, response_code = NULL, response_headers = NULL, response_body = NULL "
+            + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
-    private static final String SELECT_LOCK_TIMEOUT_FOR_UPDATE = "SELECT lock_timeout_ms FROM idempotency_records "
-            + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ? FOR UPDATE";
-
-    private static final String EXTEND_LOCK = "UPDATE idempotency_records SET lock_expires_at = ? "
+    private static final String EXTEND_LEASE = "UPDATE idempotency_records SET lease_expires_at = ? "
             + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
     private static final String PURGE_EXPIRED = "DELETE FROM idempotency_records WHERE "
             + "(status = 'COMPLETE' AND expires_at < ?) OR "
             + "(status = 'FAILED' AND expires_at < ?) OR "
-            + "(status = 'IN_PROGRESS' AND lock_expires_at < ? AND expires_at < ?)";
+            + "(status = 'IN_PROGRESS' AND lease_expires_at < ? AND expires_at < ?)";
 
     /**
      * Outcome of inspecting a locked row during the poll loop.
      *
      * <ul>
-     *   <li>{@code result} non-null — outcome is fully resolved (COMPLETE or lock stolen)</li>
+     *   <li>{@code result} non-null — outcome is fully resolved (COMPLETE or lease stolen)</li>
      *   <li>{@code rowGone} true — row disappeared; retry insert immediately, no sleep</li>
-     *   <li>both null/false — row is active IN_PROGRESS; sleep and poll again</li>
+     *   <li>both null/false — row is active IN_PROGRESS; sleep and poll again.
+     *       {@code remainingLease} is how long the holder's lease still has to run, which
+     *       becomes {@code InFlight.retryAfter} if the wait budget runs out.</li>
      * </ul>
      */
-    private record RowInspection(AcquireResult result, boolean rowGone) {
+    private record RowInspection(AcquireResult result, boolean rowGone, Duration remainingLease) {
         static RowInspection resolved(AcquireResult r) {
-            return new RowInspection(r, false);
+            return new RowInspection(r, false, Duration.ZERO);
         }
 
         static RowInspection gone() {
-            return new RowInspection(null, true);
+            return new RowInspection(null, true, Duration.ZERO);
         }
 
-        static RowInspection keepPolling() {
-            return new RowInspection(null, false);
+        static RowInspection keepPolling(Duration remainingLease) {
+            return new RowInspection(null, false, remainingLease);
         }
     }
 
@@ -238,7 +236,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try (Connection conn = dataSource.getConnection();
                 Statement stmt = conn.createStatement()) {
             stmt.execute("CREATE INDEX idx_idempotency_status_expires "
-                    + "ON idempotency_records (status, expires_at, lock_expires_at)");
+                    + "ON idempotency_records (status, expires_at, lease_expires_at)");
         } catch (SQLException e) {
             // MySQL error 1061 = duplicate key name (index already exists)
             if (e.getErrorCode() != 1061) {
@@ -250,9 +248,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
         long startedAtNanos = System.nanoTime();
-        long timeoutNanos = context.lockTimeout().toNanos();
+        long waitNanos = context.waitTimeout().toNanos();
         String leaseId = UUID.randomUUID().toString();
-        IdempotencyIdentity identity = context.identity();
 
         // Fast path: evict any expired COMPLETE record for this identity, then insert a fresh
         // IN_PROGRESS row. The DELETE and INSERT run as separate autocommit statements —
@@ -263,8 +260,12 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             return AcquireResult.acquired(leaseId);
         }
 
-        // Duplicate key — poll until we can acquire, the operation completes, or timeout
-        while (System.nanoTime() - startedAtNanos < timeoutNanos) {
+        // Duplicate key — poll until we can acquire, the operation completes, or the wait
+        // budget runs out. A zero wait still takes one look: the loop body runs at least once.
+        boolean firstAttempt = true;
+        Duration remainingLease = Duration.ZERO;
+        while (firstAttempt || System.nanoTime() - startedAtNanos < waitNanos) {
+            firstAttempt = false;
             RowInspection inspection = inspectRow(context, leaseId);
 
             if (inspection.result() != null) {
@@ -279,19 +280,20 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             }
 
             // Active IN_PROGRESS — sleep before next poll
+            remainingLease = inspection.remainingLease();
             try {
-                long remainingNanos = timeoutNanos - (System.nanoTime() - startedAtNanos);
+                long remainingNanos = waitNanos - (System.nanoTime() - startedAtNanos);
                 if (remainingNanos <= 0) {
                     break;
                 }
                 TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, TimeUnit.MILLISECONDS.toNanos(pollIntervalMs)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return AcquireResult.lockTimeout(identity);
+                return AcquireResult.inFlight(remainingLease);
             }
         }
 
-        return AcquireResult.lockTimeout(identity);
+        return AcquireResult.inFlight(remainingLease);
     }
 
     @Override
@@ -346,22 +348,12 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                long lockTimeoutMs;
-                try (PreparedStatement sel = conn.prepareStatement(SELECT_LOCK_TIMEOUT_FOR_UPDATE)) {
-                    bindIdentity(sel, 1, identity);
-                    sel.setString(3, leaseId);
-                    try (ResultSet rs = sel.executeQuery()) {
-                        if (!rs.next()) {
-                            throw diagnoseMissingInProgress(conn, identity, leaseId, "release");
-                        }
-                        lockTimeoutMs = rs.getLong("lock_timeout_ms");
-                    }
-                }
-                Instant failedExpiry = currentTime(conn).plusMillis(lockTimeoutMs);
+                // expires_at is left as the row was created with: a FAILED record is
+                // re-acquirable at once, and its original TTL is what keeps a purge from
+                // dropping it before the retry arrives.
                 try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
-                    setTimestamp(ps, 1, failedExpiry);
-                    bindIdentity(ps, 2, identity);
-                    ps.setString(4, leaseId);
+                    bindIdentity(ps, 1, identity);
+                    ps.setString(3, leaseId);
                     if (ps.executeUpdate() == 0) {
                         throw diagnoseMissingInProgress(conn, identity, leaseId, "release");
                     }
@@ -387,7 +379,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         requirePositiveDuration(extension, "extension");
         try (Connection conn = dataSource.getConnection()) {
             Instant newExpiry = currentTime(conn).plus(extension);
-            try (PreparedStatement ps = conn.prepareStatement(EXTEND_LOCK)) {
+            try (PreparedStatement ps = conn.prepareStatement(EXTEND_LEASE)) {
                 setTimestamp(ps, 1, newExpiry);
                 bindIdentity(ps, 2, identity);
                 ps.setString(4, leaseId);
@@ -403,7 +395,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * Deletes stale records from the database in a single query.
      *
      * <p>Removes COMPLETE and FAILED rows whose {@code expires_at} is in
-     * the past, and IN_PROGRESS rows where both {@code lock_expires_at}
+     * the past, and IN_PROGRESS rows where both {@code lease_expires_at}
      * and {@code expires_at} are in the past.
      *
      * @return the number of rows deleted
@@ -442,12 +434,10 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             }
             try (PreparedStatement ins = conn.prepareStatement(INSERT)) {
                 bindIdentity(ins, 1, identity);
-                setTimestamp(ins, 3, now);
-                setTimestamp(ins, 4, now.plus(context.lockTimeout()));
-                setTimestamp(ins, 5, now.plus(context.ttl()));
-                ins.setString(6, context.requestFingerprint());
-                ins.setString(7, leaseId);
-                ins.setLong(8, context.lockTimeout().toMillis());
+                setTimestamp(ins, 3, now.plus(context.leaseDuration()));
+                setTimestamp(ins, 4, now.plus(context.ttl()));
+                ins.setString(5, context.requestFingerprint());
+                ins.setString(6, leaseId);
                 ins.executeUpdate();
                 return true;
             } catch (SQLException e) {
@@ -496,7 +486,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 }
 
                 String status = rs.getString("status");
-                Timestamp lockExpiresTs = rs.getTimestamp("lock_expires_at");
+                Timestamp leaseExpiresTs = rs.getTimestamp("lease_expires_at");
 
                 if ("COMPLETE".equals(status)) {
                     String storedFingerprint = rs.getString("request_fingerprint");
@@ -508,15 +498,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 }
 
                 Instant now = currentTime(conn);
-                if ("FAILED".equals(status) || isStale(lockExpiresTs, now)) {
-                    boolean stolen = tryStealLock(conn, context, leaseId, now);
+                if ("FAILED".equals(status) || isStale(leaseExpiresTs, now)) {
+                    boolean stolen = tryStealLease(conn, context, leaseId, now);
                     return stolen
                             ? RowInspection.resolved(AcquireResult.acquired(leaseId))
-                            : RowInspection.keepPolling();
+                            : RowInspection.keepPolling(Duration.ZERO);
                 }
 
                 if ("IN_PROGRESS".equals(status)) {
-                    return RowInspection.keepPolling();
+                    return RowInspection.keepPolling(remainingLease(leaseExpiresTs, now));
                 }
                 throw new IdempotencyCorruptRecordException(
                         "JDBC record for " + context.identity() + " has unknown status '" + status + "'");
@@ -524,22 +514,29 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    private boolean tryStealLock(Connection conn, IdempotencyContext context, String leaseId, Instant now)
+    private boolean tryStealLease(Connection conn, IdempotencyContext context, String leaseId, Instant now)
             throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(STEAL_LOCK)) {
-            setTimestamp(ps, 1, now);
-            setTimestamp(ps, 2, now.plus(context.lockTimeout()));
-            ps.setString(3, context.requestFingerprint());
-            ps.setString(4, leaseId);
-            ps.setLong(5, context.lockTimeout().toMillis());
-            bindIdentity(ps, 6, context.identity());
-            setTimestamp(ps, 8, now);
+        try (PreparedStatement ps = conn.prepareStatement(STEAL_LEASE)) {
+            setTimestamp(ps, 1, now.plus(context.leaseDuration()));
+            ps.setString(2, context.requestFingerprint());
+            ps.setString(3, leaseId);
+            bindIdentity(ps, 4, context.identity());
+            setTimestamp(ps, 6, now);
             return ps.executeUpdate() > 0;
         }
     }
 
-    private static boolean isStale(Timestamp lockExpiresTs, Instant now) {
-        return lockExpiresTs != null && lockExpiresTs.toInstant().isBefore(now);
+    private static boolean isStale(Timestamp leaseExpiresTs, Instant now) {
+        return leaseExpiresTs != null && leaseExpiresTs.toInstant().isBefore(now);
+    }
+
+    /** How much of the current holder's lease is left, floored at zero. */
+    private static Duration remainingLease(Timestamp leaseExpiresTs, Instant now) {
+        if (leaseExpiresTs == null) {
+            return Duration.ZERO;
+        }
+        Duration remaining = Duration.between(now, leaseExpiresTs.toInstant());
+        return remaining.isNegative() ? Duration.ZERO : remaining;
     }
 
     /**

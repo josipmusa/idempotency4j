@@ -63,20 +63,23 @@ public interface IdempotencyStore {
      * {@link IdempotencyContext#identity() identity}.
      *
      * <p>This is the only entry point into the state machine. The method
-     * blocks internally if the record is IN_PROGRESS (held by another caller)
-     * and returns one of four outcomes:
+     * blocks internally for up to {@link IdempotencyContext#waitTimeout()} if the
+     * record is IN_PROGRESS (held by another caller) and returns one of four
+     * outcomes:
      * <ul>
      *   <li>{@link AcquireResult.Acquired} — lock obtained, caller should
      *       execute the action and then call {@link #complete}.</li>
      *   <li>{@link AcquireResult.Duplicate} — the record was already completed,
      *       the stored payload is attached for replay.</li>
-     *   <li>{@link AcquireResult.LockTimeout} — the record is in-flight and the
-     *       caller's {@code lockTimeout} expired while waiting.</li>
+     *   <li>{@link AcquireResult.InFlight} — the record is still held by another
+     *       caller and this caller's {@code waitTimeout} elapsed. The attached
+     *       {@code retryAfter} is the remaining lease of the current holder at the
+     *       moment the store gave up, floored at zero.</li>
      *   <li>{@link AcquireResult.FingerprintMismatch} — the record is COMPLETE but
      *       belongs to a different request payload.</li>
      * </ul>
      *
-     * <p>Stale locks (IN_PROGRESS with expired {@code lockExpiresAt}) are
+     * <p>Stale acquisitions (IN_PROGRESS with an expired lease) are
      * stolen atomically — the caller receives {@code Acquired} as if the
      * record were new. FAILED records are reclaimed the same way.
      *
@@ -92,7 +95,9 @@ public interface IdempotencyStore {
      *       A caller that does not fingerprint cannot contradict one that does.</li>
      * </ul>
      *
-     * @param context contains the identity, TTL, and lockTimeout for this request
+     * @param context contains the identity, TTL, lease duration, and wait timeout for
+     *        this request. A {@link java.time.Duration#ZERO} wait means the store must
+     *        not block: it looks once and returns {@code InFlight} if the record is held.
      * @return the acquisition outcome — never null
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyStoreUnavailableException
      *         if the underlying storage is unreachable
@@ -132,6 +137,10 @@ public interface IdempotencyStore {
      * <p>Called by the engine when the action throws. The record becomes
      * immediately reclaimable by the next {@code tryAcquire} caller.
      *
+     * <p>Implementations must leave the record's {@code expires_at} untouched. A
+     * FAILED record is reclaimable straight away, and the TTL it was created with
+     * is what stops a purge from removing it out from under a retry.
+     *
      * @param identity the identity to release
      * @param leaseId  the lease returned by the successful {@code tryAcquire}
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException
@@ -142,8 +151,8 @@ public interface IdempotencyStore {
     /**
      * Extends the lock expiration for an IN_PROGRESS record.
      *
-     * <p>Called by the engine's heartbeat at {@code lockTimeout / 2}
-     * intervals to prevent the lock from being stolen while a
+     * <p>Called by the engine's heartbeat at {@code leaseDuration / 2}
+     * intervals to prevent the lease from being stolen while a
      * long-running action is still executing.
      *
      * <p>Must be a <strong>silent no-op</strong> if the record does not
@@ -164,9 +173,9 @@ public interface IdempotencyStore {
      * <ul>
      *   <li>{@code COMPLETE} records whose {@code expires_at} is in the past</li>
      *   <li>{@code FAILED} records whose {@code expires_at} is in the past</li>
-     *   <li>{@code IN_PROGRESS} records whose {@code lock_expires_at}
-     *       and {@code expires_at} are both in the past — indicating a
-     *       crashed caller whose TTL window has also closed</li>
+     *   <li>{@code IN_PROGRESS} records whose lease and {@code expires_at}
+     *       have both passed — indicating a crashed caller whose TTL window
+     *       has also closed</li>
      * </ul>
      *
      * <p>This method does not schedule itself. Callers are responsible for

@@ -23,7 +23,8 @@ public class IdempotencyProperties {
 
     private String keyHeader = "Idempotency-Key";
     private Duration defaultTtl = Duration.ofHours(24);
-    private Duration defaultLockTimeout = Duration.ofSeconds(10);
+    private Duration defaultLease = Duration.ofSeconds(30);
+    private Duration defaultWait = Duration.ofSeconds(10);
     private int filterOrder = 0;
     private long maxBodyBytes = 1_048_576L; // 1 MiB
     private Purge purge = new Purge();
@@ -44,12 +45,20 @@ public class IdempotencyProperties {
         this.defaultTtl = defaultTtl;
     }
 
-    public Duration getDefaultLockTimeout() {
-        return defaultLockTimeout;
+    public Duration getDefaultLease() {
+        return defaultLease;
     }
 
-    public void setDefaultLockTimeout(Duration defaultLockTimeout) {
-        this.defaultLockTimeout = defaultLockTimeout;
+    public void setDefaultLease(Duration defaultLease) {
+        this.defaultLease = defaultLease;
+    }
+
+    public Duration getDefaultWait() {
+        return defaultWait;
+    }
+
+    public void setDefaultWait(Duration defaultWait) {
+        this.defaultWait = defaultWait;
     }
 
     public int getFilterOrder() {

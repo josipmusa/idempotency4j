@@ -121,28 +121,57 @@ public abstract class IdempotencyStoreContract {
     }
 
     protected IdempotencyContext contextFor(String key) {
-        return new IdempotencyContext(
-                SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_DEFAULT);
+        return contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5));
     }
 
-    protected IdempotencyContext contextFor(String scope, String key, Duration lockTimeout) {
-        return new IdempotencyContext(scope, key, Duration.ofHours(1), lockTimeout, FINGERPRINT_DEFAULT);
+    /** Lease and wait both set to {@code duration} — the single-knob shape of the old API. */
+    protected IdempotencyContext contextFor(String scope, String key, Duration duration) {
+        return IdempotencyContext.builder(scope, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(duration)
+                .waitTimeout(duration)
+                .fingerprint(FINGERPRINT_DEFAULT)
+                .build();
     }
 
-    protected IdempotencyContext contextFor(String key, Duration lockTimeout) {
-        return contextFor(SCOPE_DEFAULT, key, lockTimeout);
+    protected IdempotencyContext contextFor(String key, Duration duration) {
+        return contextFor(SCOPE_DEFAULT, key, duration);
     }
 
-    private IdempotencyContext contextFor(String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(SCOPE_DEFAULT, key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
+    /** Lease and wait set independently — for the tests that are about the two diverging. */
+    protected IdempotencyContext contextWithLeaseAndWait(String key, Duration lease, Duration wait) {
+        return IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(lease)
+                .waitTimeout(wait)
+                .fingerprint(FINGERPRINT_DEFAULT)
+                .build();
+    }
+
+    private IdempotencyContext contextWithTtl(String key, Duration ttl, Duration duration) {
+        return IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(ttl)
+                .leaseDuration(duration)
+                .waitTimeout(duration)
+                .fingerprint(FINGERPRINT_DEFAULT)
+                .build();
     }
 
     protected IdempotencyContext contextFor(String key, String fingerprint) {
-        return new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5), fingerprint);
+        return IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .fingerprint(fingerprint)
+                .build();
     }
 
     protected IdempotencyContext contextWithoutFingerprint(String key) {
-        return IdempotencyContext.withoutFingerprint(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5));
+        return IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .build();
     }
 
     private StoredResponse sampleResponse() {
@@ -218,21 +247,21 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_StaleLockAndSameLockTimeout_Expect_IsStolen() throws InterruptedException {
+    void When_ExpiredLeaseAndSameLeaseDuration_Expect_IsStolen() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "stale-same-timeout";
-        Duration sharedTimeout = Duration.ofMillis(100);
+        Duration sharedDuration = Duration.ofMillis(100);
 
-        // Acquire with a 100ms lock
-        acquire(s, contextFor(key, sharedTimeout));
+        // Acquire with a 100ms lease
+        acquire(s, contextFor(key, sharedDuration));
         // Simulate crashed caller — never complete or release
-        sleepFor(Duration.ofMillis(150)); // past lockExpiresAt
+        sleepFor(Duration.ofMillis(150)); // past the lease
 
-        // Second caller uses the SAME timeout — must still steal the stale lock
-        AcquireResult result = acquire(s, contextFor(key, sharedTimeout));
+        // Second caller uses the SAME durations — must still steal the expired lease
+        AcquireResult result = acquire(s, contextFor(key, sharedDuration));
 
         assertThat(result)
-                .as("A stale lock should be stealable regardless of the caller's lockTimeout")
+                .as("An expired lease should be stealable regardless of the caller's own durations")
                 .isInstanceOf(AcquireResult.Acquired.class);
     }
 
@@ -240,14 +269,22 @@ public abstract class IdempotencyStoreContract {
     void When_OldOwnerResumesAfterLockIsStolen_Expect_CannotMutateNewLease() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "stale-owner-fencing";
-        var firstContext =
-                new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofMillis(30), FINGERPRINT_A);
+        var firstContext = IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(30))
+                .waitTimeout(Duration.ofMillis(30))
+                .fingerprint(FINGERPRINT_A)
+                .build();
         var first = (AcquireResult.Acquired) s.tryAcquire(firstContext);
 
         sleepFor(Duration.ofMillis(80));
 
-        var secondContext =
-                new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_B);
+        var secondContext = IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .fingerprint(FINGERPRINT_B)
+                .build();
         var second = (AcquireResult.Acquired) s.tryAcquire(secondContext);
         StoredResponse staleResponse = new StoredResponse(200, Map.of(), "stale".getBytes(), Instant.now());
 
@@ -311,7 +348,7 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_InFlightKeyLockTimeoutExceeded_Expect_ReturnsLockTimeout()
+    void When_InFlightKeyWaitTimeoutExceeded_Expect_ReturnsInFlight()
             throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
         String key = "timeout-key";
@@ -338,7 +375,7 @@ public abstract class IdempotencyStoreContract {
                 AcquireResult result = thread2.get(5, TimeUnit.SECONDS);
                 long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
-                assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+                assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
                 assertThat(elapsed).isBetween(200L, 600L);
                 thread1.cancel(true);
             } finally {
@@ -472,7 +509,7 @@ public abstract class IdempotencyStoreContract {
 
             assertThat(result)
                     .as("Extended lock should not be stealable before new expiry")
-                    .isInstanceOf(AcquireResult.LockTimeout.class);
+                    .isInstanceOf(AcquireResult.InFlight.class);
         }
     }
 
@@ -663,7 +700,7 @@ public abstract class IdempotencyStoreContract {
                 }
                 assertThat(chaosReady.await(5, TimeUnit.SECONDS)).isTrue();
 
-                // Victim thread with short lockTimeout — must return within bounded time
+                // Victim thread with a short wait — must return within bounded time
                 Future<AcquireResult> victim =
                         executor.submit(() -> acquire(s, contextFor(key, Duration.ofMillis(200))));
 
@@ -671,7 +708,7 @@ public abstract class IdempotencyStoreContract {
                 // victim.get(5s) will throw TimeoutException, failing the test.
                 AcquireResult result = victim.get(5, TimeUnit.SECONDS);
 
-                assertThat(result).isInstanceOfAny(AcquireResult.Acquired.class, AcquireResult.LockTimeout.class);
+                assertThat(result).isInstanceOfAny(AcquireResult.Acquired.class, AcquireResult.InFlight.class);
             } finally {
                 stop.set(true);
             }
@@ -688,7 +725,72 @@ public abstract class IdempotencyStoreContract {
         // Second acquire on same key should timeout, not succeed
         AcquireResult result = acquire(s, contextFor(key, Duration.ofMillis(200)));
 
-        assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+        assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
+    }
+
+    // --- lease vs wait contract ---
+
+    @Test
+    void When_WaitZeroAndInFlight_Expect_InFlightImmediately() {
+        IdempotencyStore s = store();
+        String key = "zero-wait";
+
+        acquire(s, contextWithLeaseAndWait(key, Duration.ofSeconds(30), Duration.ofSeconds(30)));
+
+        long start = System.nanoTime();
+        AcquireResult result = acquire(s, contextWithLeaseAndWait(key, Duration.ofSeconds(30), Duration.ZERO));
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
+        assertThat(elapsedMs)
+                .as("A zero wait must not block: the store looks once and reports InFlight")
+                .isLessThan(1_000L);
+    }
+
+    @Test
+    void When_WaitShorterThanLease_Expect_InFlightWithRemainingLease() {
+        IdempotencyStore s = store();
+        String key = "wait-shorter-than-lease";
+        Duration lease = Duration.ofSeconds(30);
+
+        acquire(s, contextWithLeaseAndWait(key, lease, lease));
+
+        AcquireResult result = acquire(s, contextWithLeaseAndWait(key, lease, Duration.ofMillis(200)));
+
+        assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
+        Duration retryAfter = ((AcquireResult.InFlight) result).retryAfter();
+        assertThat(retryAfter)
+                .as("retryAfter is what is left of the holder's 30s lease, not the caller's wait")
+                .isGreaterThan(Duration.ofSeconds(20))
+                .isLessThanOrEqualTo(lease);
+    }
+
+    @Test
+    void When_WaitLongerThanLease_Expect_StolenAfterLeaseExpiry() {
+        IdempotencyStore s = store();
+        String key = "wait-longer-than-lease";
+
+        // Holder takes a 200ms lease and never finishes.
+        acquire(s, contextWithLeaseAndWait(key, Duration.ofMillis(200), Duration.ofMillis(200)));
+
+        // Second caller is willing to wait 5s, far longer than the holder's lease, so it
+        // must end up stealing rather than reporting InFlight.
+        AcquireResult result = acquire(s, contextWithLeaseAndWait(key, Duration.ofSeconds(5), Duration.ofSeconds(5)));
+
+        assertThat(result).isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_InFlight_Expect_RetryAfterNotNegative() {
+        IdempotencyStore s = store();
+        String key = "retry-after-non-negative";
+
+        acquire(s, contextWithLeaseAndWait(key, Duration.ofSeconds(30), Duration.ofSeconds(30)));
+
+        AcquireResult result = acquire(s, contextWithLeaseAndWait(key, Duration.ofSeconds(30), Duration.ZERO));
+
+        assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
+        assertThat(((AcquireResult.InFlight) result).retryAfter().isNegative()).isFalse();
     }
 
     // --- purgeExpired contract ---
@@ -696,8 +798,8 @@ public abstract class IdempotencyStoreContract {
     @Test
     void When_ExpiredTtlEntryExists_Expect_PurgeRemovesIt() throws InterruptedException {
         IdempotencyStore s = store();
-        // Both TTL and lockTimeout are short so the IN_PROGRESS entry is eligible for purge
-        var ctx = contextFor("purge-expired-1", Duration.ofMillis(10), Duration.ofMillis(2));
+        // Both TTL and lease are short so the IN_PROGRESS entry is eligible for purge
+        var ctx = contextWithTtl("purge-expired-1", Duration.ofMillis(10), Duration.ofMillis(2));
         acquire(s, ctx);
         sleepFor(Duration.ofMillis(50));
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
@@ -707,7 +809,7 @@ public abstract class IdempotencyStoreContract {
     @Test
     void When_NonExpiredTtlEntryExists_Expect_PurgeKeepsIt() {
         IdempotencyStore s = store();
-        var ctx = contextFor("purge-keep-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
+        var ctx = contextWithTtl("purge-keep-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
         acquire(s, ctx);
         complete(s, ctx.key(), sampleResponse(), ctx.ttl());
         s.purgeExpired();
@@ -718,7 +820,7 @@ public abstract class IdempotencyStoreContract {
     @Test
     void When_CompletedEntryTtlExpired_Expect_PurgeRemovesIt() throws InterruptedException {
         IdempotencyStore s = store();
-        var ctx = contextFor("purge-completed-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
+        var ctx = contextWithTtl("purge-completed-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
         acquire(s, ctx);
         complete(
                 s,
@@ -734,7 +836,7 @@ public abstract class IdempotencyStoreContract {
     void When_StaleInProgressLockExpiredTtlNotExpired_Expect_PurgeKeepsIt() throws InterruptedException {
         IdempotencyStore s = store();
         // Lock expires quickly (2ms), but TTL is long (10 min)
-        var ctx = contextFor("purge-stale-inprogress-1", Duration.ofMinutes(10), Duration.ofMillis(2));
+        var ctx = contextWithTtl("purge-stale-inprogress-1", Duration.ofMinutes(10), Duration.ofMillis(2));
         acquire(s, ctx);
         sleepFor(Duration.ofMillis(50));
         int purged = s.purgeExpired();
@@ -748,8 +850,8 @@ public abstract class IdempotencyStoreContract {
     @Test
     void When_StaleInProgressBothLockAndTtlExpired_Expect_PurgeRemovesIt() throws InterruptedException {
         IdempotencyStore s = store();
-        // Both lockTimeout and TTL are short — entry is fully expired and safe to purge
-        var ctx = contextFor("purge-stale-both-1", Duration.ofMillis(2), Duration.ofMillis(2));
+        // Both lease and TTL are short — entry is fully expired and safe to purge
+        var ctx = contextWithTtl("purge-stale-both-1", Duration.ofMillis(2), Duration.ofMillis(2));
         acquire(s, ctx);
         sleepFor(Duration.ofMillis(50));
         assertThat(s.purgeExpired()).isGreaterThanOrEqualTo(1);
@@ -759,7 +861,7 @@ public abstract class IdempotencyStoreContract {
     @Test
     void When_NoExpiredEntries_Expect_PurgeReturnsZero() {
         IdempotencyStore s = store();
-        var ctx = contextFor("purge-none-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
+        var ctx = contextWithTtl("purge-none-1", Duration.ofMinutes(10), Duration.ofSeconds(5));
         acquire(s, ctx);
         int removed = s.purgeExpired();
         assertThat(removed).isEqualTo(0);
@@ -890,20 +992,19 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_KeyReleasedAfterLockExpired_Expect_FailedRecordNotImmediatelyPurgeable() throws InterruptedException {
+    void When_KeyReleasedAfterLeaseExpired_Expect_FailedRecordNotImmediatelyPurgeable() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "failed-expiry-contract";
 
-        // release() dates the FAILED record at now + lockTimeout, so lockTimeout is also the
-        // budget this test has between release() and purgeExpired(). Keep it far above the
-        // round-trip cost of those two calls: a 50ms budget was roughly the cost of the calls
-        // themselves against a containerised database and made this test flaky on CI.
-        Duration lockTimeout = Duration.ofSeconds(2);
+        // A short lease so it has certainly expired by the time release() runs, paired with
+        // the helper's one-hour TTL. release() must carry that TTL over untouched, not date
+        // the FAILED record from the already-past lease.
+        Duration lease = Duration.ofMillis(100);
 
-        acquire(s, contextFor(key, lockTimeout));
+        acquire(s, contextFor(key, lease));
 
-        // Wait for the lock to expire, then release
-        sleepFor(lockTimeout.plusMillis(100));
+        // Wait for the lease to expire, then release
+        sleepFor(lease.plusMillis(100));
         release(s, key);
 
         // Purge immediately — the FAILED record should NOT be eligible yet.
@@ -911,7 +1012,7 @@ public abstract class IdempotencyStoreContract {
 
         assertThat(purged)
                 .as("FAILED record should survive an immediate purgeExpired() call; "
-                        + "its expires_at must be now + lockTimeout, not the already-past lock_expires_at")
+                        + "release must leave expires_at at the record's TTL, not the expired lease")
                 .isEqualTo(0);
     }
 
@@ -978,10 +1079,13 @@ public abstract class IdempotencyStoreContract {
         String key = "fp-absent-in-flight";
         acquire(s, contextWithoutFingerprint(key));
 
-        var result = s.tryAcquire(
-                IdempotencyContext.withoutFingerprint(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofMillis(50)));
+        var result = s.tryAcquire(IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(50))
+                .waitTimeout(Duration.ofMillis(50))
+                .build());
 
-        assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+        assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
     }
 
     // ── Payload tests ──────────────────────────────────────────────────

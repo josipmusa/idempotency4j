@@ -34,11 +34,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class IdempotencyEngineTest {
 
@@ -67,7 +69,12 @@ class IdempotencyEngineTest {
     }
 
     private IdempotencyContext defaultContext(String key) {
-        return new IdempotencyContext(SCOPE, key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+        return IdempotencyContext.builder(SCOPE, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .fingerprint("a".repeat(64))
+                .build();
     }
 
     private long extendLockCalls() {
@@ -157,8 +164,8 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void When_LockTimeout_Expect_ThrowsLockTimeoutException() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout(identity("test-key")));
+    void When_InFlight_Expect_ThrowsLockTimeoutException() {
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.inFlight(Duration.ofSeconds(3)));
 
         assertThatThrownBy(() -> engine.execute(defaultContext("test-key"), () -> {}))
                 .isInstanceOf(IdempotencyLockTimeoutException.class)
@@ -169,9 +176,34 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void When_LongRunningAction_Expect_HeartbeatExtendsLock() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext(SCOPE, "hb-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+    void When_LeaseTenSeconds_Expect_HeartbeatAtFiveSeconds() throws Exception {
+        ScheduledExecutorService mockScheduler = mock(ScheduledExecutorService.class);
+        when(mockScheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any()))
+                .thenReturn(mock(ScheduledFuture.class));
+        IdempotencyEngine engineOnMockScheduler = new IdempotencyEngine(store, mockScheduler);
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-interval-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(10))
+                .build();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+
+        engineOnMockScheduler.execute(context, () -> {});
+
+        ArgumentCaptor<Long> initialDelay = ArgumentCaptor.forClass(Long.class);
+        ArgumentCaptor<Long> period = ArgumentCaptor.forClass(Long.class);
+        verify(mockScheduler)
+                .scheduleAtFixedRate(any(), initialDelay.capture(), period.capture(), eq(TimeUnit.MILLISECONDS));
+        assertThat(initialDelay.getValue()).isEqualTo(5_000L);
+        assertThat(period.getValue()).isEqualTo(5_000L);
+    }
+
+    @Test
+    void When_LongRunningAction_Expect_HeartbeatExtendsLease() throws Exception {
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         CountDownLatch beats = new CountDownLatch(1);
         doAnswer(invocation -> {
@@ -192,8 +224,11 @@ class IdempotencyEngineTest {
 
     @Test
     void When_ActionCompletes_Expect_HeartbeatStops() throws Exception {
-        IdempotencyContext context = new IdempotencyContext(
-                SCOPE, "hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-stop-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         engine.execute(context, () -> {});
@@ -202,7 +237,7 @@ class IdempotencyEngineTest {
         drainScheduler(Duration.ZERO);
         long countAfterExecute = extendLockCalls();
 
-        // Give the scheduler 4x the heartbeat interval (50ms for a 100ms lockTimeout) to fire again
+        // Give the scheduler 4x the heartbeat interval (50ms for a 100ms lease) to fire again
         drainScheduler(Duration.ofMillis(200));
 
         assertThat(extendLockCalls()).isEqualTo(countAfterExecute);
@@ -210,8 +245,11 @@ class IdempotencyEngineTest {
 
     @Test
     void When_ActionThrows_Expect_HeartbeatStops() throws Exception {
-        IdempotencyContext context = new IdempotencyContext(
-                SCOPE, "hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-throw-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         catchThrowable(() -> engine.execute(context, () -> {
@@ -295,8 +333,11 @@ class IdempotencyEngineTest {
 
     @Test
     void When_HeartbeatExtendLockThrows_Expect_HeartbeatContinues() throws Exception {
-        IdempotencyContext context = new IdempotencyContext(
-                SCOPE, "hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-error-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         CountDownLatch beats = new CountDownLatch(2);
         doAnswer(invocation -> {
@@ -339,8 +380,10 @@ class IdempotencyEngineTest {
 
     @Test
     void When_CompleteWithNoPayload_Expect_PayloadForwardedUnchanged() {
-        IdempotencyContext context = IdempotencyContext.withoutFingerprint(
-                SCOPE, "no-payload-key", Duration.ofHours(1), Duration.ofSeconds(5));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "no-payload-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .build();
         NoPayload payload = NoPayload.at(Instant.now());
 
         engine.complete(context, LEASE_ID, payload, context.ttl());

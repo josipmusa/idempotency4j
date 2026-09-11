@@ -48,7 +48,8 @@ public class IdempotencyAutoConfiguration {
     IdempotencyConfig idempotencyConfig(IdempotencyProperties idempotencyProperties) {
         return IdempotencyConfig.builder()
                 .defaultTtl(idempotencyProperties.getDefaultTtl())
-                .defaultLockTimeout(idempotencyProperties.getDefaultLockTimeout())
+                .defaultLeaseDuration(idempotencyProperties.getDefaultLease())
+                .defaultWaitTimeout(idempotencyProperties.getDefaultWait())
                 .build();
     }
 

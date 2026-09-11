@@ -47,8 +47,8 @@ import org.slf4j.LoggerFactory;
  *
  * <h2>Heartbeat</h2>
  * <p>While the action runs, a background task calls
- * {@link IdempotencyStore#extendLock} at half the lock timeout interval
- * (e.g. every 5s for a 10s lock). This prevents the lock from being stolen
+ * {@link IdempotencyStore#extendLock} at half the lease duration
+ * (e.g. every 5s for a 10s lease). This prevents the lease from being stolen
  * while the action is legitimately still running. The heartbeat is cancelled
  * in the {@code finally} block regardless of success or failure.
  *
@@ -100,10 +100,10 @@ public final class IdempotencyEngine {
     /**
      * Executes the given action idempotently.
      *
-     * <p>If the key is new, acquires the lock, starts a heartbeat, and runs the
+     * <p>If the key is new, acquires the lease, starts a heartbeat, and runs the
      * action. If the key was already completed, returns the stored payload
-     * without running the action. If the key is in-flight and the lock timeout
-     * is exceeded, throws {@link IdempotencyLockTimeoutException}.
+     * without running the action. If the key is still in-flight when the context's
+     * {@code waitTimeout} elapses, throws {@link IdempotencyLockTimeoutException}.
      *
      * <p>When {@link ExecutionResult.Executed} is returned, the <strong>caller</strong>
      * (adapter) is responsible for:
@@ -117,12 +117,12 @@ public final class IdempotencyEngine {
      * while waiting for a Redis replica after the primary accepted it. Callers must not
      * treat idempotency storage as a transaction around the business side effect.
      *
-     * @param context fully resolved idempotency context (identity, ttl, lockTimeout)
+     * @param context fully resolved idempotency context (identity, ttl, lease, wait)
      * @param action  the business logic to execute — only runs for new keys
      * @return {@link ExecutionResult.Executed} if the action ran, or
      *         {@link ExecutionResult.Duplicate} with the stored payload
-     * @throws IdempotencyLockTimeoutException if the key is in-flight and the
-     *         lock timeout expired while waiting
+     * @throws IdempotencyLockTimeoutException if the key is still in-flight when
+     *         the wait timeout elapsed
      * @throws Exception if the action itself throws — the original exception
      *         propagates unchanged, and the key is released for retry
      */
@@ -135,8 +135,8 @@ public final class IdempotencyEngine {
                 notify("onDuplicate", context, listener -> listener.onDuplicate(context, payload));
                 yield ExecutionResult.duplicate(payload);
             }
-            case AcquireResult.LockTimeout ignored ->
-                throw new IdempotencyLockTimeoutException(context.identity(), context.lockTimeout());
+            case AcquireResult.InFlight ignored ->
+                throw new IdempotencyLockTimeoutException(context.identity(), context.waitTimeout());
             case AcquireResult.FingerprintMismatch(String storedFingerprint, String receivedFingerprint) ->
                 throw new IdempotencyFingerprintMismatchException(
                         context.identity(), storedFingerprint, receivedFingerprint);
@@ -212,7 +212,7 @@ public final class IdempotencyEngine {
             notify("onAcquired", context, listener -> listener.onAcquired(context, leaseId));
             action.run();
             try {
-                store.extendLock(context.identity(), leaseId, context.lockTimeout());
+                store.extendLock(context.identity(), leaseId, context.leaseDuration());
             } catch (Exception ignored) {
                 // Best-effort: this final extension only buys the adapter time to call
                 // complete(). The lease is still valid, and complete() fences on it anyway,
@@ -233,13 +233,13 @@ public final class IdempotencyEngine {
     }
 
     private ScheduledFuture<?> startHeartbeat(IdempotencyContext context, String leaseId) {
-        long intervalMs = context.lockTimeout().dividedBy(2).toMillis();
+        long intervalMs = context.leaseDuration().dividedBy(2).toMillis();
         return scheduler.scheduleAtFixedRate(
                 () -> {
                     try {
-                        store.extendLock(context.identity(), leaseId, context.lockTimeout());
+                        store.extendLock(context.identity(), leaseId, context.leaseDuration());
                     } catch (Exception e) {
-                        // heartbeat failure is non-fatal - lock will eventually
+                        // heartbeat failure is non-fatal - the lease will eventually
                         // expire naturally and be stolen by a waiting request
                     }
                 },

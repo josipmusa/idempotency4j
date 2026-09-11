@@ -95,8 +95,13 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         return new RedisIdempotencyStore(connection);
     }
 
-    private IdempotencyContext context(String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(SCOPE_DEFAULT, key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
+    private IdempotencyContext context(String key, Duration ttl, Duration duration) {
+        return IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(ttl)
+                .leaseDuration(duration)
+                .waitTimeout(duration)
+                .fingerprint(FINGERPRINT_DEFAULT)
+                .build();
     }
 
     @Test
@@ -398,7 +403,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         AcquireResult result = s.tryAcquire(context("fixed-busy", Duration.ofHours(1), Duration.ofMillis(20)));
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 
-        assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+        assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
         assertThat(elapsedMs).isBetween(20L, 250L);
     }
 
@@ -421,7 +426,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
             AcquireResult result = s.tryAcquire(context(key, Duration.ofHours(1), Duration.ofMillis(10)));
 
-            assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+            assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
             completion.get(1, TimeUnit.SECONDS);
         }
     }

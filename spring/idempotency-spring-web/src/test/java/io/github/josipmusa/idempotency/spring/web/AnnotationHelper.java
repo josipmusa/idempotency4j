@@ -22,10 +22,14 @@ class AnnotationHelper {
     private AnnotationHelper() {}
 
     static Idempotent annotation(boolean required) {
-        return annotation(required, "", "");
+        return annotation(required, "", "", "");
     }
 
-    static Idempotent annotation(boolean required, String ttl, String lockTimeout) {
+    static Idempotent annotation(boolean required, String ttl, String lease) {
+        return annotation(required, ttl, lease, "");
+    }
+
+    static Idempotent annotation(boolean required, String ttl, String lease, String waitTimeout) {
         return new Idempotent() {
             @Override
             public String ttl() {
@@ -33,8 +37,13 @@ class AnnotationHelper {
             }
 
             @Override
-            public String lockTimeout() {
-                return lockTimeout;
+            public String lease() {
+                return lease;
+            }
+
+            @Override
+            public String waitTimeout() {
+                return waitTimeout;
             }
 
             @Override

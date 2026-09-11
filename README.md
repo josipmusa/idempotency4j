@@ -137,25 +137,29 @@ two endpoints is two independent records.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/request-outcomes-dark.png">
-  <img alt="Flowchart. A request with an Idempotency-Key is routed by the key's state in the store: a new key runs the handler and stores its response, a completed key replays the stored response when the request body matches and is rejected with 422 when it does not, and a key still in progress past the lock timeout is refused with 503." src="docs/diagrams/request-outcomes.png">
+  <img alt="Flowchart. A request with an Idempotency-Key is routed by the key's state in the store: a new key runs the handler and stores its response, a completed key replays the stored response when the request body matches and is rejected with 422 when it does not, and a key still in progress past the wait timeout is refused with 503." src="docs/diagrams/request-outcomes.png">
 </picture>
 
 The blocking happens inside the store, not in the engine. A concurrent duplicate waits inside
-`tryAcquire` for the holder to finish and only surfaces as `503` once `lockTimeout` elapses, which
-is why a duplicate arriving mid-flight usually gets the real response rather than an error.
+`tryAcquire` for the holder to finish and only surfaces as `503` once its `wait` elapses, which
+is why a duplicate arriving mid-flight usually gets the real response rather than an error. A
+caller that must not block - a message listener on a consumer thread - sets `wait` to zero and is
+told the record is in flight straight away.
 
 Behind that, each record moves through a small state machine. Every acquisition carries a lease,
 and `complete`, `release`, and the heartbeat all have to present a matching lease, which is what
-fences a stale owner out after its lock has been stolen:
+fences a stale owner out after its lease has been stolen:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/record-lifecycle-dark.png">
   <img alt="State machine. A record is created in progress when a caller acquires a lease, which a heartbeat keeps extending while the action runs and which the next caller may steal once it expires. The record then either completes with a replayable payload or fails and becomes reclaimable, and both terminal states are purged when their time to live elapses." src="docs/diagrams/record-lifecycle.png">
 </picture>
 
-The heartbeat fires at `lockTimeout / 2`, so a handler that legitimately runs longer than the lock
-timeout keeps its lease rather than having it stolen mid-flight. A handler that dies without
-releasing leaves an expired lease, which the next `tryAcquire` steals atomically.
+Two durations govern this, and they are set independently. `lease` is how long an acquisition is
+protected; `wait` is how long a second caller blocks for someone else's. The heartbeat fires at
+`lease / 2`, so a handler that legitimately runs longer than its lease keeps it rather than having
+it stolen mid-flight. A handler that dies without releasing leaves an expired lease, which the next
+`tryAcquire` steals atomically.
 
 Responsibilities are split across three layers, and the boundaries are enforced by design:
 
@@ -190,7 +194,7 @@ These come from the filter itself, before or instead of your handler. Each carri
 | `422 Unprocessable Entity` | Key header missing or blank while `required = true` |
 | `422 Unprocessable Entity` | Key longer than 255 characters |
 | `422 Unprocessable Entity` | Key reused with a different request body |
-| `503 Service Unavailable` | Another request still holds the key after `lockTimeout` |
+| `503 Service Unavailable` | Another request still holds the key after `waitTimeout` |
 
 ### Response headers on a replay
 
@@ -207,7 +211,8 @@ non-HTTP caller has no response to replay, so an HTTP duplicate for that key get
 ```java
 @Idempotent(
     ttl = "PT24H",          // How long to keep the stored response (ISO-8601). Default: 24h
-    lockTimeout = "PT10S",  // How long a concurrent duplicate waits. Default: 10s
+    lease = "PT30S",        // How long this request's acquisition is protected. Default: 30s
+    waitTimeout = "PT10S",  // How long a concurrent duplicate blocks. "PT0S" to not block. Default: 10s
     required = true         // Whether a missing key header is an error. Default: true
 )
 ```
@@ -302,7 +307,8 @@ All properties are prefixed with `idempotency`:
 idempotency:
   key-header: Idempotency-Key     # Header carrying the key. Default: Idempotency-Key
   default-ttl: PT24H              # Default TTL for stored responses. Default: 24h
-  default-lock-timeout: PT10S     # Default lock timeout. Default: 10s
+  default-lease: PT30S            # Default lease on an acquisition. Default: 30s
+  default-wait: PT10S             # Default wait for an in-flight key. Default: 10s
   max-body-bytes: 1048576         # Max request body size to fingerprint, in bytes. Default: 1 MiB
   filter-order: 0                 # Order of the filter in the chain. Default: 0
   purge:
@@ -323,8 +329,11 @@ name the unit of work, so two listeners handling the same event id each get thei
 ```java
 IdempotencyEngine engine = new IdempotencyEngine(store, scheduler);
 
-IdempotencyContext context = IdempotencyContext.withoutFingerprint(
-        "ShipmentListener.onOrderShipped", event.id(), Duration.ofHours(24), Duration.ofSeconds(10));
+IdempotencyContext context = IdempotencyContext.builder("ShipmentListener.onOrderShipped", event.id())
+        .ttl(Duration.ofHours(24))
+        .leaseDuration(Duration.ofSeconds(30))
+        .waitTimeout(Duration.ZERO)   // decline instead of parking the consumer thread
+        .build();
 
 ExecutionResult result = engine.execute(context, () -> handler.handle(event));
 
@@ -339,7 +348,7 @@ switch (result) {
 
 As in the HTTP flow, the engine acquires the lock and runs the action with a heartbeat, but calling
 `complete` is the caller's job: only the caller knows what, if anything, is worth storing for a
-duplicate. Pass a fingerprint (`new IdempotencyContext(scope, key, ttl, lockTimeout, sha256Hex)`) when the
+duplicate. Add `.fingerprint(sha256Hex)` to the builder when the
 payload is worth guarding against key reuse, and a `StoredResponse` to `complete` when a duplicate
 should get a real result back.
 
@@ -387,7 +396,7 @@ The contract, in short:
 - `onCompleted` fires only once the store has confirmed the completion. An unconfirmed durability
   guarantee counts as `onFailed` with `FailurePhase.COMPLETION`, which means the action's side
   effects happened but a retry will most likely run them again.
-- A lock timeout or a fingerprint mismatch acquires no lease and fires nothing. Heartbeat activity
+- An in-flight result or a fingerprint mismatch acquires no lease and fires nothing. Heartbeat activity
   is not surfaced either.
 
 Outside Spring, pass the listeners to the engine directly:

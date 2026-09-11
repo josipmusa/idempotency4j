@@ -42,10 +42,22 @@ public @interface Idempotent {
     String ttl() default "";
 
     /**
-     * ISO-8601 duration for how long a concurrent caller waits.
-     * Empty string means use {@link io.github.josipmusa.idempotency.core.IdempotencyConfig#defaultLockTimeout()}.
+     * ISO-8601 duration for how long this request's acquisition is protected before another
+     * caller may steal it. The heartbeat extends it at half this interval, so it also sets
+     * the crash-detection window.
+     * Empty string means use {@link io.github.josipmusa.idempotency.core.IdempotencyConfig#defaultLeaseDuration()}.
      */
-    String lockTimeout() default "";
+    String lease() default "";
+
+    /**
+     * ISO-8601 duration for how long a concurrent caller blocks waiting for an in-flight
+     * request before the endpoint answers 503. {@code "PT0S"} means do not block.
+     * Empty string means use {@link io.github.josipmusa.idempotency.core.IdempotencyConfig#defaultWaitTimeout()}.
+     *
+     * <p>Named {@code waitTimeout} rather than {@code wait} because an annotation element
+     * cannot be called {@code wait} — it would clash with {@link Object#wait()}.
+     */
+    String waitTimeout() default "";
 
     /**
      * Whether a missing idempotency key header should be rejected with 422 Unprocessable Entity.

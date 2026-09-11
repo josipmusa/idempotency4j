@@ -13,9 +13,15 @@
       "defaultValue": "24h"
     },
     {
-      "name": "idempotency.default-lock-timeout",
+      "name": "idempotency.default-lease",
       "type": "java.time.Duration",
-      "description": "Maximum duration to wait when acquiring a lock for an in-flight idempotency key.",
+      "description": "Default duration an acquisition is protected before another caller may steal it. The heartbeat extends it at half this interval.",
+      "defaultValue": "30s"
+    },
+    {
+      "name": "idempotency.default-wait",
+      "type": "java.time.Duration",
+      "description": "Default duration a concurrent caller blocks waiting for an in-flight idempotency key before giving up. Zero means do not block.",
       "defaultValue": "10s"
     },
     {
