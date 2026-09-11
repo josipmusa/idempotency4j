@@ -1,4 +1,5 @@
 CREATE TABLE IF NOT EXISTS idempotency_records (
+    scope             VARCHAR(128)  NOT NULL,
     idempotency_key   VARCHAR(255)  NOT NULL,
     status            VARCHAR(20)   NOT NULL,
     locked_at         TIMESTAMP(6)  NULL,
@@ -12,5 +13,5 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
     completed_at      TIMESTAMP(6)  NULL,
     created_at        TIMESTAMP(6)  DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
     expires_at        TIMESTAMP(6)  NULL,
-    PRIMARY KEY (idempotency_key)
+    PRIMARY KEY (scope, idempotency_key)
 );

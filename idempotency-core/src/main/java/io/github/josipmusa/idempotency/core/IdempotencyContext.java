@@ -30,9 +30,12 @@ import java.util.regex.Pattern;
  * <p>Every field except {@code requestFingerprint} is required. The context must
  * be fully resolved before it reaches the engine.
  *
- * @param key         the idempotency key, typically from an HTTP header
- *                    (e.g. {@code Idempotency-Key}) or a message identifier. Two
- *                    operations with the same key are considered duplicates.
+ * @param identity    what the store dedupes on: the scope naming the unit of work (a
+ *                    handler method, a listener, a job) together with the idempotency
+ *                    key, typically from an HTTP header (e.g. {@code Idempotency-Key})
+ *                    or a message identifier. Two operations with the same identity
+ *                    are duplicates; the same key under two scopes is two operations.
+ *                    See {@link IdempotencyIdentity} for the limits.
  * @param ttl         how long a completed payload is kept before the key
  *                    can be reused. Determines the deduplication window.
  * @param lockTimeout how long a second caller will wait for an in-flight
@@ -48,24 +51,18 @@ import java.util.regex.Pattern;
  *                           string of at least 16 characters when present; a blank
  *                           string is rejected — use {@code null} to say "none".
  */
-public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout, String requestFingerprint) {
+public record IdempotencyContext(
+        IdempotencyIdentity identity, Duration ttl, Duration lockTimeout, String requestFingerprint) {
 
     private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(2);
-    public static final int MAX_KEY_LENGTH = 255;
     private static final int MIN_FINGERPRINT_LENGTH = 16;
     private static final Pattern HEX_PATTERN = Pattern.compile("[0-9a-fA-F]+");
 
     public IdempotencyContext {
-        Objects.requireNonNull(key, "key must not be null");
+        Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(ttl, "ttl must not be null");
         Objects.requireNonNull(lockTimeout, "lockTimeout must not be null");
 
-        if (key.isBlank()) {
-            throw new IllegalArgumentException("key must not be blank");
-        }
-        if (key.length() > MAX_KEY_LENGTH) {
-            throw new IllegalArgumentException("key length must not exceed " + MAX_KEY_LENGTH + " characters");
-        }
         if (ttl.compareTo(Duration.ofMillis(1)) < 0) {
             throw new IllegalArgumentException("ttl must be at least 1ms");
         }
@@ -89,17 +86,51 @@ public record IdempotencyContext(String key, Duration ttl, Duration lockTimeout,
     }
 
     /**
+     * Creates a context from a scope and key that have not yet been combined into an
+     * {@link IdempotencyIdentity}. Equivalent to the canonical constructor with
+     * {@code new IdempotencyIdentity(scope, key)}.
+     *
+     * @param scope       the unit of work, see {@link IdempotencyIdentity}
+     * @param key         the idempotency key
+     * @param ttl         how long a completed payload is kept
+     * @param lockTimeout how long a second caller waits for an in-flight operation
+     * @param requestFingerprint the request fingerprint, or {@code null} for none
+     */
+    public IdempotencyContext(String scope, String key, Duration ttl, Duration lockTimeout, String requestFingerprint) {
+        this(new IdempotencyIdentity(scope, key), ttl, lockTimeout, requestFingerprint);
+    }
+
+    /**
      * Creates a context for a caller that has no request payload to fingerprint —
-     * a message listener or an event handler, for example, where the key alone
+     * a message listener or an event handler, for example, where the identity alone
      * identifies the operation.
      *
+     * @param scope       the unit of work, see {@link IdempotencyIdentity}
      * @param key         the idempotency key
      * @param ttl         how long a completed payload is kept
      * @param lockTimeout how long a second caller waits for an in-flight operation
      * @return a context whose {@code requestFingerprint} is {@code null}
      */
-    public static IdempotencyContext withoutFingerprint(String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(key, ttl, lockTimeout, null);
+    public static IdempotencyContext withoutFingerprint(String scope, String key, Duration ttl, Duration lockTimeout) {
+        return new IdempotencyContext(scope, key, ttl, lockTimeout, null);
+    }
+
+    /**
+     * Returns the scope of this operation's {@link #identity()}.
+     *
+     * @return the scope
+     */
+    public String scope() {
+        return identity.scope();
+    }
+
+    /**
+     * Returns the idempotency key of this operation's {@link #identity()}.
+     *
+     * @return the key
+     */
+    public String key() {
+        return identity.key();
     }
 
     /**

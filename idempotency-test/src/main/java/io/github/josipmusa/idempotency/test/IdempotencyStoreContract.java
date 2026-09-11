@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.NoPayload;
@@ -47,52 +48,76 @@ public abstract class IdempotencyStoreContract {
     protected static final String FINGERPRINT_A = "a".repeat(64);
     protected static final String FINGERPRINT_B = "b".repeat(64);
 
+    /** The scope every fixture uses unless a test is specifically about scope isolation. */
+    protected static final String SCOPE_DEFAULT = "ContractScope.action";
+
+    protected static final String SCOPE_OTHER = "OtherScope.action";
+
     protected abstract IdempotencyStore store();
 
-    private final ThreadLocal<Map<String, String>> activeLeases = ThreadLocal.withInitial(java.util.HashMap::new);
+    private final ThreadLocal<Map<IdempotencyIdentity, String>> activeLeases =
+            ThreadLocal.withInitial(java.util.HashMap::new);
 
     protected AcquireResult acquire(IdempotencyStore store, IdempotencyContext context) {
         AcquireResult result = store.tryAcquire(context);
-        if (result instanceof AcquireResult.Acquired acquired) {
-            activeLeases.get().put(context.key(), acquired.leaseId());
+        if (result instanceof AcquireResult.Acquired(String leaseId)) {
+            activeLeases.get().put(context.identity(), leaseId);
         }
         return result;
     }
 
     protected void complete(IdempotencyStore store, String key, IdempotencyPayload payload, Duration ttl) {
-        store.complete(key, activeLease(key), payload, ttl);
+        complete(store, identity(key), payload, ttl);
+    }
+
+    protected void complete(
+            IdempotencyStore store, IdempotencyIdentity identity, IdempotencyPayload payload, Duration ttl) {
+        store.complete(identity, activeLease(identity), payload, ttl);
     }
 
     protected void release(IdempotencyStore store, String key) {
-        store.release(key, activeLease(key));
+        release(store, identity(key));
+    }
+
+    protected void release(IdempotencyStore store, IdempotencyIdentity identity) {
+        store.release(identity, activeLease(identity));
     }
 
     protected void extendLock(IdempotencyStore store, String key, Duration extension) {
-        store.extendLock(key, activeLease(key), extension);
+        store.extendLock(identity(key), activeLease(identity(key)), extension);
     }
 
-    private String activeLease(String key) {
-        return activeLeases.get().getOrDefault(key, "unknown-test-lease");
+    private String activeLease(IdempotencyIdentity identity) {
+        return activeLeases.get().getOrDefault(identity, "unknown-test-lease");
+    }
+
+    protected static IdempotencyIdentity identity(String key) {
+        return new IdempotencyIdentity(SCOPE_DEFAULT, key);
     }
 
     protected IdempotencyContext contextFor(String key) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_DEFAULT);
+        return new IdempotencyContext(
+                SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_DEFAULT);
+    }
+
+    protected IdempotencyContext contextFor(String scope, String key, Duration lockTimeout) {
+        return new IdempotencyContext(scope, key, Duration.ofHours(1), lockTimeout, FINGERPRINT_DEFAULT);
     }
 
     protected IdempotencyContext contextFor(String key, Duration lockTimeout) {
-        return new IdempotencyContext(key, Duration.ofHours(1), lockTimeout, FINGERPRINT_DEFAULT);
+        return contextFor(SCOPE_DEFAULT, key, lockTimeout);
     }
 
     private IdempotencyContext contextFor(String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
+        return new IdempotencyContext(SCOPE_DEFAULT, key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
     }
 
     protected IdempotencyContext contextFor(String key, String fingerprint) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), fingerprint);
+        return new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5), fingerprint);
     }
 
     protected IdempotencyContext contextWithoutFingerprint(String key) {
-        return IdempotencyContext.withoutFingerprint(key, Duration.ofHours(1), Duration.ofSeconds(5));
+        return IdempotencyContext.withoutFingerprint(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5));
     }
 
     private StoredResponse sampleResponse() {
@@ -130,7 +155,7 @@ public abstract class IdempotencyStoreContract {
         String key = "release-key";
 
         var first = (AcquireResult.Acquired) acquire(s, contextFor(key));
-        s.release(key, first.leaseId());
+        s.release(identity(key), first.leaseId());
 
         var result = (AcquireResult.Acquired) acquire(s, contextFor(key));
 
@@ -190,26 +215,28 @@ public abstract class IdempotencyStoreContract {
     void When_OldOwnerResumesAfterLockIsStolen_Expect_CannotMutateNewLease() throws InterruptedException {
         IdempotencyStore s = store();
         String key = "stale-owner-fencing";
-        var firstContext = new IdempotencyContext(key, Duration.ofHours(1), Duration.ofMillis(30), FINGERPRINT_A);
+        var firstContext =
+                new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofMillis(30), FINGERPRINT_A);
         var first = (AcquireResult.Acquired) s.tryAcquire(firstContext);
 
         Thread.sleep(80);
 
-        var secondContext = new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_B);
+        var secondContext =
+                new IdempotencyContext(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofSeconds(5), FINGERPRINT_B);
         var second = (AcquireResult.Acquired) s.tryAcquire(secondContext);
         StoredResponse staleResponse = new StoredResponse(200, Map.of(), "stale".getBytes(), Instant.now());
 
-        assertThatThrownBy(() -> s.complete(key, first.leaseId(), staleResponse, Duration.ofHours(1)))
+        assertThatThrownBy(() -> s.complete(identity(key), first.leaseId(), staleResponse, Duration.ofHours(1)))
                 .isInstanceOf(IdempotencyLeaseLostException.class)
                 .hasMessageContaining("lease");
-        assertThatThrownBy(() -> s.release(key, first.leaseId()))
+        assertThatThrownBy(() -> s.release(identity(key), first.leaseId()))
                 .isInstanceOf(IdempotencyLeaseLostException.class)
                 .hasMessageContaining("lease");
-        assertThatCode(() -> s.extendLock(key, first.leaseId(), Duration.ofHours(1)))
+        assertThatCode(() -> s.extendLock(identity(key), first.leaseId(), Duration.ofHours(1)))
                 .doesNotThrowAnyException();
 
         StoredResponse currentResponse = new StoredResponse(201, Map.of(), "current".getBytes(), Instant.now());
-        s.complete(key, second.leaseId(), currentResponse, Duration.ofHours(1));
+        s.complete(identity(key), second.leaseId(), currentResponse, Duration.ofHours(1));
 
         AcquireResult replay = s.tryAcquire(secondContext);
         assertThat(replay).isInstanceOf(AcquireResult.Duplicate.class);
@@ -716,6 +743,62 @@ public abstract class IdempotencyStoreContract {
         assertThat(removed).isEqualTo(0);
     }
 
+    // ── Scope isolation ─────────────────────────────────────────────────
+
+    @Test
+    void When_SameKeyDifferentScope_Expect_BothAcquired() {
+        IdempotencyStore s = store();
+        String key = "shared-key-two-scopes";
+
+        AcquireResult first = acquire(s, contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5)));
+        AcquireResult second = acquire(s, contextFor(SCOPE_OTHER, key, Duration.ofMillis(50)));
+
+        assertThat(first).isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(second)
+                .as("The same key under another scope is another unit of work and must not block or dedupe")
+                .isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(((AcquireResult.Acquired) second).leaseId())
+                .isNotEqualTo(((AcquireResult.Acquired) first).leaseId());
+    }
+
+    @Test
+    void When_CompleteInOneScope_Expect_OtherScopeStillAcquires() {
+        IdempotencyStore s = store();
+        String key = "completed-in-one-scope";
+
+        acquire(s, contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5)));
+        complete(s, new IdempotencyIdentity(SCOPE_DEFAULT, key), sampleResponse(), Duration.ofHours(1));
+
+        AcquireResult sameScope = acquire(s, contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5)));
+        AcquireResult otherScope = acquire(s, contextFor(SCOPE_OTHER, key, Duration.ofMillis(50)));
+
+        assertThat(sameScope).isInstanceOf(AcquireResult.Duplicate.class);
+        assertThat(otherScope)
+                .as("A completion is visible only within its own scope")
+                .isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_ReleaseInOneScope_Expect_OtherScopeUntouched() {
+        IdempotencyStore s = store();
+        String key = "released-in-one-scope";
+        IdempotencyIdentity releasedIdentity = new IdempotencyIdentity(SCOPE_DEFAULT, key);
+        IdempotencyIdentity heldIdentity = new IdempotencyIdentity(SCOPE_OTHER, key);
+
+        var released = (AcquireResult.Acquired) acquire(s, contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5)));
+        var held = (AcquireResult.Acquired) acquire(s, contextFor(SCOPE_OTHER, key, Duration.ofSeconds(5)));
+
+        release(s, releasedIdentity);
+
+        // The held lease in the other scope is still the owner: the release must not have
+        // touched it, so its own release succeeds and a stale release with the wrong lease fails.
+        assertThatThrownBy(() -> s.release(heldIdentity, released.leaseId()))
+                .isInstanceOf(IdempotencyLeaseLostException.class);
+        assertThatCode(() -> s.release(heldIdentity, held.leaseId())).doesNotThrowAnyException();
+        assertThat(acquire(s, contextFor(SCOPE_DEFAULT, key, Duration.ofSeconds(5))))
+                .isInstanceOf(AcquireResult.Acquired.class);
+    }
+
     // ── Fingerprint tests ──────────────────────────────────────────────
 
     @Test
@@ -873,8 +956,8 @@ public abstract class IdempotencyStoreContract {
         String key = "fp-absent-in-flight";
         acquire(s, contextWithoutFingerprint(key));
 
-        var result =
-                s.tryAcquire(IdempotencyContext.withoutFingerprint(key, Duration.ofHours(1), Duration.ofMillis(50)));
+        var result = s.tryAcquire(
+                IdempotencyContext.withoutFingerprint(SCOPE_DEFAULT, key, Duration.ofHours(1), Duration.ofMillis(50)));
 
         assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
     }

@@ -130,8 +130,10 @@ Send it twice and the second response comes back from the store, carrying
 
 ## How it works
 
-Every request carrying a key resolves down one of four paths, decided entirely by the state that
-key already holds in the store:
+Every request carrying a key resolves down one of four paths, decided entirely by the state the
+record already holds in the store. A record is identified by a *scope* and the key together: the
+filter uses the handler method as the scope (`PaymentController.create`), so the same key sent to
+two endpoints is two independent records.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/request-outcomes-dark.png">
@@ -315,13 +317,14 @@ event handler, or anything else that needs a key to run at most once. The annota
 and `StoredResponse` are the Spring adapter's business, not the engine's.
 
 A caller with no request body to hash builds a context without a fingerprint, and completes with
-`NoPayload` because there is nothing for a duplicate to replay:
+`NoPayload` because there is nothing for a duplicate to replay. The first argument is the scope:
+name the unit of work, so two listeners handling the same event id each get their own record.
 
 ```java
 IdempotencyEngine engine = new IdempotencyEngine(store, scheduler);
 
 IdempotencyContext context = IdempotencyContext.withoutFingerprint(
-        "order-shipped:" + event.id(), Duration.ofHours(24), Duration.ofSeconds(10));
+        "ShipmentListener.onOrderShipped", event.id(), Duration.ofHours(24), Duration.ofSeconds(10));
 
 ExecutionResult result = engine.execute(context, () -> handler.handle(event));
 
@@ -336,7 +339,7 @@ switch (result) {
 
 As in the HTTP flow, the engine acquires the lock and runs the action with a heartbeat, but calling
 `complete` is the caller's job: only the caller knows what, if anything, is worth storing for a
-duplicate. Pass a fingerprint (`new IdempotencyContext(key, ttl, lockTimeout, sha256Hex)`) when the
+duplicate. Pass a fingerprint (`new IdempotencyContext(scope, key, ttl, lockTimeout, sha256Hex)`) when the
 payload is worth guarding against key reuse, and a `StoredResponse` to `complete` when a duplicate
 should get a real result back.
 
@@ -401,9 +404,10 @@ reactive `WebFilter` adapter is a candidate for a future release.
 **No messaging adapter.** Non-HTTP callers drive `IdempotencyEngine` directly; there is no
 ready-made listener integration yet.
 
-**One global key namespace.** Keys live in a single namespace within the store, with no built-in
-per-tenant or per-user isolation. Two callers using the same key value share idempotency state. In
-multi-tenant environments, prefix keys at the application level (for example `userId:clientKey`).
+**No tenant isolation.** Records are scoped per handler method, but within a scope there is no
+built-in per-tenant or per-user isolation: two callers sending the same key to the same endpoint
+share idempotency state. In multi-tenant environments, prefix keys at the application level (for
+example `userId:clientKey`).
 
 **Redis Cluster is not supported.** The provider takes Lettuce's non-cluster
 `StatefulRedisConnection`, and its bounded SCAN purge is not node-aware. Standalone and Sentinel

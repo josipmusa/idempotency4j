@@ -16,6 +16,7 @@
 package io.github.josipmusa.idempotency.spring.web;
 
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
+import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import java.lang.reflect.Method;
 import java.time.DateTimeException;
 import java.time.Duration;
@@ -31,8 +32,14 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
  * Eagerly resolves and validates all {@link Idempotent}-annotated handler methods at startup,
  * caching the parsed metadata for zero-overhead lookup on the hot path.
  *
- * <p>Fails fast at startup if any annotation contains an invalid ISO-8601 duration string,
- * preventing misconfiguration from reaching production traffic.
+ * <p>Each handler method is also given its idempotency <em>scope</em>: {@code <simple class
+ * name>.<method name>}, for example {@code PaymentController.create}. The scope is half of the
+ * {@link IdempotencyIdentity} the store dedupes on, so the same {@code Idempotency-Key} sent to two
+ * handlers is two independent records.
+ *
+ * <p>Fails fast at startup if any annotation contains an invalid ISO-8601 duration string or a
+ * handler's scope exceeds {@link IdempotencyIdentity#MAX_SCOPE_LENGTH}, preventing misconfiguration
+ * from reaching production traffic.
  *
  * <p>Do not annotate with {@code @Component} — wiring belongs in the starter.
  */
@@ -58,7 +65,8 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
             Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl(), handlerMethod);
             Duration lockTimeout =
                     parseDuration(annotation.lockTimeout(), "lockTimeout", config.defaultLockTimeout(), handlerMethod);
-            builtAnnotationCache.put(method, new ResolvedIdempotent(annotation.required(), ttl, lockTimeout));
+            String scope = scopeOf(handlerMethod);
+            builtAnnotationCache.put(method, new ResolvedIdempotent(annotation.required(), ttl, lockTimeout, scope));
         });
         this.cache = Map.copyOf(builtAnnotationCache);
     }
@@ -83,5 +91,22 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
         }
     }
 
-    public record ResolvedIdempotent(boolean required, Duration ttl, Duration lockTimeout) {}
+    private static String scopeOf(HandlerMethod handlerMethod) {
+        String scope = handlerMethod.getBeanType().getSimpleName() + "."
+                + handlerMethod.getMethod().getName();
+        if (scope.length() > IdempotencyIdentity.MAX_SCOPE_LENGTH) {
+            throw new IllegalStateException(
+                    "Idempotency scope '" + scope + "' for " + handlerMethod.getShortLogMessage() + " exceeds "
+                            + IdempotencyIdentity.MAX_SCOPE_LENGTH + " characters");
+        }
+        return scope;
+    }
+
+    /**
+     * @param required    whether a request without a key is rejected
+     * @param ttl         how long the completed response is kept
+     * @param lockTimeout how long a concurrent duplicate waits for the in-flight request
+     * @param scope       the handler's idempotency scope, {@code <simple class name>.<method name>}
+     */
+    public record ResolvedIdempotent(boolean required, Duration ttl, Duration lockTimeout, String scope) {}
 }

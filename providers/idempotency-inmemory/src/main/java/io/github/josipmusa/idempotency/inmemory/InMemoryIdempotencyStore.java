@@ -17,6 +17,7 @@ package io.github.josipmusa.idempotency.inmemory;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
@@ -65,7 +66,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             String requestFingerprint,
             String leaseId) {}
 
-    private final ConcurrentHashMap<String, Entry> store = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<IdempotencyIdentity, Entry> store = new ConcurrentHashMap<>();
     private final Clock clock;
     private final long pollIntervalMs;
 
@@ -90,19 +91,20 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
         long startedAtNanos = System.nanoTime();
         long timeoutNanos = context.lockTimeout().toNanos();
         String leaseId = UUID.randomUUID().toString();
+        IdempotencyIdentity identity = context.identity();
         boolean firstAttempt = true;
 
         while (true) {
             if (!firstAttempt && System.nanoTime() - startedAtNanos >= timeoutNanos) {
-                return AcquireResult.lockTimeout(context.key());
+                return AcquireResult.lockTimeout(identity);
             }
             firstAttempt = false;
             Instant now = clock.instant();
 
-            // Evict expired COMPLETE entry for this key so a fresh insert can follow
+            // Evict expired COMPLETE entry for this identity so a fresh insert can follow
             store.computeIfPresent(
-                    context.key(),
-                    (key, entry) -> entry.status() == Status.COMPLETE
+                    identity,
+                    (id, entry) -> entry.status() == Status.COMPLETE
                                     && entry.expiresAt().isBefore(now)
                             ? null
                             : entry);
@@ -116,7 +118,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                     context.requestFingerprint(),
                     leaseId);
 
-            Entry existing = store.putIfAbsent(context.key(), newEntry);
+            Entry existing = store.putIfAbsent(identity, newEntry);
 
             if (existing == null) {
                 return AcquireResult.acquired(leaseId);
@@ -136,7 +138,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             if (existing.status() == Status.FAILED
                     || (existing.lockExpiresAt() != null
                             && existing.lockExpiresAt().isBefore(now))) {
-                if (store.replace(context.key(), existing, newEntry)) {
+                if (store.replace(identity, existing, newEntry)) {
                     return AcquireResult.acquired(leaseId);
                 }
                 continue; // lost the race — re-inspect on next iteration
@@ -145,30 +147,31 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             // Active IN_PROGRESS — wait before retrying
             long remainingNanos = timeoutNanos - (System.nanoTime() - startedAtNanos);
             if (remainingNanos <= 0) {
-                return AcquireResult.lockTimeout(context.key());
+                return AcquireResult.lockTimeout(identity);
             }
             try {
                 TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, TimeUnit.MILLISECONDS.toNanos(pollIntervalMs)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return AcquireResult.lockTimeout(context.key());
+                return AcquireResult.lockTimeout(identity);
             }
         }
     }
 
     @Override
-    public void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl) {
+    public void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl) {
+        Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
-        store.compute(key, (k, existing) -> {
+        store.compute(identity, (id, existing) -> {
             if (existing == null) {
                 throw new IdempotencyLeaseLostException(
-                        "Cannot complete key '" + key + "': no entry exists or it expired");
+                        "Cannot complete " + identity + ": no entry exists or it expired");
             }
             if (existing.status() != Status.IN_PROGRESS) {
                 throw new IdempotencyLeaseLostException(
-                        "Cannot complete key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
+                        "Cannot complete " + identity + ": entry is " + existing.status() + ", expected IN_PROGRESS");
             }
-            requireLease(existing, leaseId, key, "complete");
+            requireLease(existing, leaseId, identity, "complete");
             return new Entry(
                     Status.COMPLETE,
                     payload,
@@ -181,17 +184,18 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void release(String key, String leaseId) {
-        store.compute(key, (k, existing) -> {
+    public void release(IdempotencyIdentity identity, String leaseId) {
+        Objects.requireNonNull(identity, "identity must not be null");
+        store.compute(identity, (id, existing) -> {
             if (existing == null) {
                 throw new IdempotencyLeaseLostException(
-                        "Cannot release key '" + key + "': no entry exists or it expired");
+                        "Cannot release " + identity + ": no entry exists or it expired");
             }
             if (existing.status() != Status.IN_PROGRESS) {
                 throw new IdempotencyLeaseLostException(
-                        "Cannot release key '" + key + "': entry is " + existing.status() + ", expected IN_PROGRESS");
+                        "Cannot release " + identity + ": entry is " + existing.status() + ", expected IN_PROGRESS");
             }
-            requireLease(existing, leaseId, key, "release");
+            requireLease(existing, leaseId, identity, "release");
             // Expire after lockTimeout rather than full TTL — FAILED entries are immediately
             // re-acquirable, so keeping them for the full TTL would unnecessarily retain memory.
             Instant failedExpiry = clock.instant().plus(existing.lockTimeout());
@@ -207,8 +211,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void extendLock(String key, String leaseId, Duration extension) {
-        store.computeIfPresent(key, (k, entry) -> {
+    public void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension) {
+        Objects.requireNonNull(identity, "identity must not be null");
+        store.computeIfPresent(identity, (id, entry) -> {
             if (entry.status() != Status.IN_PROGRESS || !Objects.equals(entry.leaseId(), leaseId)) {
                 return entry;
             }
@@ -234,11 +239,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                 && !storedFingerprint.equals(incomingFingerprint);
     }
 
-    private static void requireLease(Entry entry, String leaseId, String key, String operation) {
+    private static void requireLease(Entry entry, String leaseId, IdempotencyIdentity identity, String operation) {
         Objects.requireNonNull(leaseId, "leaseId must not be null");
         if (!leaseId.equals(entry.leaseId())) {
             throw new IdempotencyLeaseLostException(
-                    "Cannot " + operation + " key '" + key + "': lease no longer owns the key");
+                    "Cannot " + operation + " " + identity + ": lease no longer owns the record");
         }
     }
 
@@ -286,12 +291,13 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     private static boolean isExpired(Entry entry, Instant now) {
         return switch (entry.status()) {
-            case COMPLETE, FAILED -> entry.expiresAt() != null
-                    && entry.expiresAt().isBefore(now);
-            case IN_PROGRESS -> entry.lockExpiresAt() != null
-                    && entry.lockExpiresAt().isBefore(now)
-                    && entry.expiresAt() != null
-                    && entry.expiresAt().isBefore(now);
+            case COMPLETE, FAILED ->
+                entry.expiresAt() != null && entry.expiresAt().isBefore(now);
+            case IN_PROGRESS ->
+                entry.lockExpiresAt() != null
+                        && entry.lockExpiresAt().isBefore(now)
+                        && entry.expiresAt() != null
+                        && entry.expiresAt().isBefore(now);
         };
     }
 }

@@ -20,6 +20,7 @@ import static io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegist
 import io.github.josipmusa.idempotency.core.ExecutionResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.NoPayload;
 import io.github.josipmusa.idempotency.core.StoredResponse;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
@@ -51,6 +52,10 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
  * for the {@link Idempotent} annotation. If present, it delegates to {@link IdempotencyEngine} and
  * either stores the new response or replays the stored one for duplicates. All Servlet-level
  * translation lives in {@link HttpIdempotencyMapper}.
+ *
+ * <p>The record's scope is the resolved handler method, {@code <simple class name>.<method name>},
+ * so the same {@code Idempotency-Key} sent to two endpoints is two independent records. See
+ * {@link IdempotentHandlerRegistry}.
  *
  * <p>Do not annotate with {@code @Component} or {@code @Bean} — wiring belongs in the starter.
  */
@@ -143,7 +148,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             return;
         }
 
-        if (key.length() > IdempotencyContext.MAX_KEY_LENGTH) {
+        if (key.length() > IdempotencyIdentity.MAX_KEY_LENGTH) {
             HttpIdempotencyMapper.writeJsonError(response, 422, ERROR_KEY_TOO_LONG);
             return;
         }
@@ -156,8 +161,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         }
         String fingerprint = RequestFingerprint.of(wrappedRequest.body());
 
-        IdempotencyContext context =
-                new IdempotencyContext(key, resolvedIdempotent.ttl(), resolvedIdempotent.lockTimeout(), fingerprint);
+        IdempotencyContext context = new IdempotencyContext(
+                resolvedIdempotent.scope(),
+                key,
+                resolvedIdempotent.ttl(),
+                resolvedIdempotent.lockTimeout(),
+                fingerprint);
 
         ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
         ExecutionResult result;
@@ -181,12 +190,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             case ExecutionResult.Duplicate duplicate -> {
                 switch (duplicate.payload()) {
                     case StoredResponse stored -> HttpIdempotencyMapper.replay(stored, response);
-                        // Only a non-HTTP caller stores NoPayload under a key, so this cannot arise
-                        // from a record this filter created. Answer 204 rather than fail the request.
+                    // Only a non-HTTP caller stores NoPayload under a key, so this cannot arise
+                    // from a record this filter created. Answer 204 rather than fail the request.
                     case NoPayload ignored -> {
                         log.warn(
-                                "Idempotency key '{}' was completed by a non-HTTP caller with no response to replay; answering 204",
-                                context.key());
+                                "Idempotency record {} was completed by a non-HTTP caller with no response to replay; answering 204",
+                                context.identity());
                         HttpIdempotencyMapper.replayEmpty(response);
                     }
                 }
@@ -210,23 +219,22 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                 engine.complete(context, leaseId, sanitized, context.ttl());
             } catch (IdempotencyDurabilityException e) {
                 log.error(
-                        "Stored idempotency response for key '{}', but requested durability was not confirmed; storage state is indeterminate",
-                        context.key(),
+                        "Stored idempotency response for {}, but requested durability was not confirmed; storage state is indeterminate",
+                        context.identity(),
                         e);
             } catch (IdempotencyLeaseLostException e) {
                 log.error(
-                        "Could not store idempotency response for key '{}' because this execution no longer owns the lease",
-                        context.key(),
+                        "Could not store idempotency response for {} because this execution no longer owns the lease",
+                        context.identity(),
                         e);
             } catch (Exception e) {
                 log.error(
-                        "Failed while storing idempotency response for key '{}'; storage state is indeterminate",
-                        context.key(),
+                        "Failed while storing idempotency response for {}; storage state is indeterminate",
+                        context.identity(),
                         e);
             }
         } catch (Exception e) {
-            log.error(
-                    "Failed to sanitize idempotency response for key '{}'; response was not stored", context.key(), e);
+            log.error("Failed to sanitize idempotency response for {}; response was not stored", context.identity(), e);
         } finally {
             wrapped.copyBodyToResponse();
         }

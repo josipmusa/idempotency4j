@@ -97,11 +97,41 @@ class IdempotentHandlerRegistryTest {
         assertThat(registry.resolve(handlerMethod)).isNull();
     }
 
+    @Test
+    void When_Resolved_Expect_ScopeIsSimpleClassNameAndMethodName() {
+        HandlerMethod handlerMethod =
+                setupHandler(AnnotationHelper.annotation(true), PaymentController.class, "create");
+        registry.afterSingletonsInstantiated();
+
+        ResolvedIdempotent resolved = registry.resolve(handlerMethod);
+
+        assertThat(resolved.scope()).isEqualTo("PaymentController.create");
+    }
+
+    @Test
+    void When_ScopeExceedsMaxLength_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.annotation(true), PaymentController.class, "m".repeat(128));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scope")
+                .hasMessageContaining("128");
+    }
+
     private HandlerMethod setupHandler(Idempotent annotation) {
+        return setupHandler(annotation, PaymentController.class, "create");
+    }
+
+    private HandlerMethod setupHandler(Idempotent annotation, Class<?> beanType, String methodName) {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(annotation);
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        Method method = mock(Method.class);
+        when(method.getName()).thenReturn(methodName);
+        when(handlerMethod.getMethod()).thenReturn(method);
+        doReturn(beanType).when(handlerMethod).getBeanType();
         return handlerMethod;
     }
+
+    static class PaymentController {}
 }

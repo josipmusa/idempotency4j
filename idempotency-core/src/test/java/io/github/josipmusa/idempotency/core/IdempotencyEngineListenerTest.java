@@ -65,8 +65,14 @@ class IdempotencyEngineListenerTest {
         scheduler.shutdownNow();
     }
 
+    private static final String SCOPE = "TestScope.action";
+
+    private static IdempotencyIdentity identity(String key) {
+        return new IdempotencyIdentity(SCOPE, key);
+    }
+
     private IdempotencyContext defaultContext(String key) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+        return new IdempotencyContext(SCOPE, key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
     }
 
     private StoredResponse anyStoredResponse() {
@@ -114,7 +120,7 @@ class IdempotencyEngineListenerTest {
 
         InOrder inOrder = inOrder(listener, store);
         inOrder.verify(listener).onAcquired(context, LEASE_ID);
-        inOrder.verify(store).release("action-fail-key", LEASE_ID);
+        inOrder.verify(store).release(identity("action-fail-key"), LEASE_ID);
         inOrder.verify(listener).onFailed(context, LEASE_ID, actionFailure, FailurePhase.ACTION);
         verify(listener, never()).onCompleted(any(), any(), any());
     }
@@ -168,7 +174,7 @@ class IdempotencyEngineListenerTest {
     @Test
     void When_DuplicateWithNoPayload_Expect_NoPayloadForwarded() throws Exception {
         IdempotencyContext context = IdempotencyContext.withoutFingerprint(
-                "duplicate-no-payload", Duration.ofHours(1), Duration.ofSeconds(5));
+                SCOPE, "duplicate-no-payload", Duration.ofHours(1), Duration.ofSeconds(5));
         NoPayload stored = NoPayload.at(Instant.now());
         when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored));
 
@@ -192,7 +198,7 @@ class IdempotencyEngineListenerTest {
 
     @Test
     void When_LockTimeout_Expect_NoCallbacks() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout("timeout-key"));
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout(identity("timeout-key")));
 
         assertThatThrownBy(() -> engine.execute(defaultContext("timeout-key"), () -> {}))
                 .isNotNull();
@@ -246,7 +252,7 @@ class IdempotencyEngineListenerTest {
 
         engine.complete(context, LEASE_ID, payload, context.ttl());
 
-        verify(store).complete("throwing-completed-key", LEASE_ID, payload, context.ttl());
+        verify(store).complete(identity("throwing-completed-key"), LEASE_ID, payload, context.ttl());
     }
 
     @Test

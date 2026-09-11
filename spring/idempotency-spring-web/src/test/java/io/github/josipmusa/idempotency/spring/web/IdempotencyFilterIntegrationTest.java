@@ -22,6 +22,7 @@ import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
@@ -60,6 +61,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 class IdempotencyFilterIntegrationTest {
 
     private static final String KEY_HEADER = "Idempotency-Key";
+    private static final String ECHO_SCOPE = "EchoController.echo";
+    private static final String OTHER_SCOPE = "EchoController.other";
     private static final AtomicInteger invocations = new AtomicInteger();
 
     /** Shared timeline so listener callbacks can be ordered against the controller invocation. */
@@ -99,7 +102,7 @@ class IdempotencyFilterIntegrationTest {
         assertThat(result.getResponse().getStatus()).isEqualTo(200);
         assertThat(result.getResponse().getContentAsString()).isEqualTo("echo:hello-body");
         assertThat(invocations).hasValue(1);
-        StoredResponse stored = store.completed.get("key-1");
+        StoredResponse stored = store.completed.get(new IdempotencyIdentity(ECHO_SCOPE, "key-1"));
         assertThat(stored).isNotNull();
         assertThat(stored.statusCode()).isEqualTo(200);
         assertThat(new String(stored.body(), StandardCharsets.UTF_8)).isEqualTo("echo:hello-body");
@@ -170,7 +173,7 @@ class IdempotencyFilterIntegrationTest {
                 .andReturn();
 
         StoredResponse observed = (StoredResponse) listener.completed.getFirst();
-        assertThat(observed).isEqualTo(store.completed.get("listener-2"));
+        assertThat(observed).isEqualTo(store.completed.get(new IdempotencyIdentity(ECHO_SCOPE, "listener-2")));
         assertThat(new String(observed.body(), StandardCharsets.UTF_8)).isEqualTo("echo:hello-body");
     }
 
@@ -194,6 +197,33 @@ class IdempotencyFilterIntegrationTest {
     }
 
     @Test
+    void When_SameKeyOnTwoHandlers_Expect_IndependentRecords() throws Exception {
+        MockMvc mockMvc = mockMvc(null);
+
+        MvcResult echo = mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "shared-key")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("same-body"))
+                .andReturn();
+        MvcResult other = mockMvc.perform(post("/other")
+                        .header(KEY_HEADER, "shared-key")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("same-body"))
+                .andReturn();
+
+        assertThat(echo.getResponse().getContentAsString()).isEqualTo("echo:same-body");
+        assertThat(other.getResponse().getContentAsString()).isEqualTo("other:same-body");
+        assertThat(other.getResponse().getHeader("Idempotent-Replayed"))
+                .as("The second handler must run, not replay the first handler's response")
+                .isNull();
+        assertThat(invocations).hasValue(2);
+        assertThat(store.completed)
+                .containsOnlyKeys(
+                        new IdempotencyIdentity(ECHO_SCOPE, "shared-key"),
+                        new IdempotencyIdentity(OTHER_SCOPE, "shared-key"));
+    }
+
+    @Test
     void When_ListenerThrows_Expect_ResponseAndStorageUnaffected() throws Exception {
         MockMvc mockMvc = mockMvc(null, List.of(new ThrowingListener()));
 
@@ -206,7 +236,7 @@ class IdempotencyFilterIntegrationTest {
         assertThat(result.getResponse().getStatus()).isEqualTo(200);
         assertThat(result.getResponse().getContentAsString()).isEqualTo("echo:hello-body");
         assertThat(invocations).hasValue(1);
-        assertThat(store.completed).containsKey("listener-4");
+        assertThat(store.completed).containsKey(new IdempotencyIdentity(ECHO_SCOPE, "listener-4"));
     }
 
     private MockMvc mockMvc(Long maxBodyBytes) {
@@ -244,6 +274,14 @@ class IdempotencyFilterIntegrationTest {
             events.add("controller");
             controllerThread.set(Thread.currentThread());
             return "echo:" + body;
+        }
+
+        @PostMapping(value = "/other", consumes = MediaType.TEXT_PLAIN_VALUE)
+        @Idempotent
+        public String other(@RequestBody String body) {
+            invocations.incrementAndGet();
+            events.add("other-controller");
+            return "other:" + body;
         }
     }
 
@@ -291,26 +329,26 @@ class IdempotencyFilterIntegrationTest {
     }
 
     private static final class RecordingStore implements IdempotencyStore {
-        private final Map<String, StoredResponse> completed = new ConcurrentHashMap<>();
+        private final Map<IdempotencyIdentity, StoredResponse> completed = new ConcurrentHashMap<>();
 
         @Override
         public AcquireResult tryAcquire(IdempotencyContext context) {
-            StoredResponse stored = completed.get(context.key());
+            StoredResponse stored = completed.get(context.identity());
             return stored != null
                     ? AcquireResult.duplicate(stored)
                     : AcquireResult.acquired(UUID.randomUUID().toString());
         }
 
         @Override
-        public void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl) {
-            completed.put(key, (StoredResponse) payload);
+        public void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl) {
+            completed.put(identity, (StoredResponse) payload);
         }
 
         @Override
-        public void release(String key, String leaseId) {}
+        public void release(IdempotencyIdentity identity, String leaseId) {}
 
         @Override
-        public void extendLock(String key, String leaseId, Duration extension) {}
+        public void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension) {}
 
         @Override
         public int purgeExpired() {

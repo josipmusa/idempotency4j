@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** A record is identified by a scope and a key together, never by the key alone. The
+  new `IdempotencyIdentity(scope, key)` record in core is what every store dedupes on;
+  `IdempotencyContext` holds an `IdempotencyIdentity` component (`scope()` and `key()` delegate
+  to it, and a `(scope, key, ...)` convenience constructor remains), and
+  `IdempotencyContext.withoutFingerprint(scope, key, ttl, lockTimeout)` takes the scope first.
+  `IdempotencyStore.complete`, `release` and `extendLock` take an `IdempotencyIdentity` where they
+  took a `String key`; `AcquireResult.LockTimeout`, `IdempotencyLockTimeoutException` and
+  `IdempotencyFingerprintMismatchException` carry the identity (`getIdentity()` replaces
+  `getKey()`). `IdempotencyContext.MAX_KEY_LENGTH` moved to `IdempotencyIdentity`, which also
+  defines `MAX_SCOPE_LENGTH` (128). The same message id delivered to two consumers, or the same
+  `Idempotency-Key` sent to two endpoints, is now two units of work with two records instead of one
+  silently skipping the other's work.
+- **Breaking.** `IdempotencyFilter` scopes every record by its handler method, formatted as
+  `<simple class name>.<method name>` (for example `PaymentController.create`).
+  `IdempotentHandlerRegistry` resolves the scope at startup and fails fast if it exceeds 128
+  characters.
+- **Breaking.** The JDBC schema gains a `scope VARCHAR(128) NOT NULL` column and its primary key
+  becomes `(scope, idempotency_key)`. Every statement filters on both columns. There is no migration
+  from the key-only table; recreate it.
+- **Breaking.** The Redis record key becomes `<prefix>rec:<scope>:<key>`. Records written under the
+  previous `<prefix>rec:<key>` layout are not read.
 - **Breaking.** `idempotency-core` no longer models HTTP. The engine, the store SPI and the
   context are transport-neutral, so a message listener or an event handler can drive them the
   same way the Servlet filter does.

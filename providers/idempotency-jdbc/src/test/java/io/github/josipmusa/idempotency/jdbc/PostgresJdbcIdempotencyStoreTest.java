@@ -96,8 +96,8 @@ class PostgresJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
         when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
 
         JdbcIdempotencyStore failingStore = new JdbcIdempotencyStore(exhaustedDs, false);
-        IdempotencyContext context =
-                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+        IdempotencyContext context = new IdempotencyContext(
+                SCOPE_DEFAULT, "key", Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
 
         assertThat(failingStore).isNotNull();
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> failingStore.tryAcquire(context))

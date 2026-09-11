@@ -19,6 +19,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
+import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.NoPayload;
@@ -71,6 +72,10 @@ import java.util.concurrent.TimeUnit;
  * IdempotencyStore store = new RedisIdempotencyStore(connection, config);
  * }</pre>
  *
+ * <h2>Key layout</h2>
+ * <p>A record lives at {@code <prefix>rec:<scope>:<key>}, so the same key under two scopes is
+ * two hashes. The hash fields hold the record state.
+ *
  * <h2>Namespace ownership</h2>
  * <p>Every record contains an owner and format marker. The store never overwrites or deletes data
  * without matching markers. A colliding foreign key fails closed, while purge skips it.
@@ -104,8 +109,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
      * <p>The fingerprint argument is the empty string when the caller supplied none, and is
      * stored as such. An absent fingerprint on either side never mismatches.
      */
-    private static final LuaScript ACQUIRE = LuaScript.of(
-            """
+    private static final LuaScript ACQUIRE = LuaScript.of("""
             local rec = KEYS[1]
             local kind = redis.call('TYPE', rec).ok
             local status = nil
@@ -167,8 +171,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
      * <p>The code argument is the empty string for a record completed with no payload to
      * replay; {@code headers} and {@code body} are empty alongside it.
      */
-    private static final LuaScript COMPLETE = LuaScript.of(
-            """
+    private static final LuaScript COMPLETE = LuaScript.of("""
             local rec = KEYS[1]
             local kind = redis.call('TYPE', rec).ok
             if kind == 'none' then return {'MISSING'} end
@@ -195,8 +198,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             """);
 
     /** KEYS: record. ARGV: lease, grace, owner, format. */
-    private static final LuaScript RELEASE = LuaScript.of(
-            """
+    private static final LuaScript RELEASE = LuaScript.of("""
             local rec = KEYS[1]
             local kind = redis.call('TYPE', rec).ok
             if kind == 'none' then return {'MISSING'} end
@@ -217,8 +219,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             """);
 
     /** KEYS: record. ARGV: lease, extension, grace, owner, format. */
-    private static final LuaScript EXTEND_LOCK = LuaScript.of(
-            """
+    private static final LuaScript EXTEND_LOCK = LuaScript.of("""
             local rec = KEYS[1]
             local kind = redis.call('TYPE', rec).ok
             if kind == 'none' then return {'NOOP'} end
@@ -240,8 +241,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             """);
 
     /** KEYS: records. ARGV: owner, format. Returns the number of owned records deleted. */
-    private static final LuaScript PURGE = LuaScript.of(
-            """
+    private static final LuaScript PURGE = LuaScript.of("""
             local clock = redis.call('TIME')
             local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
             local deleted = 0
@@ -310,12 +310,13 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         long startedAtNanos = System.nanoTime();
         long timeoutNanos = context.lockTimeout().toNanos();
         String leaseId = UUID.randomUUID().toString();
+        IdempotencyIdentity identity = context.identity();
         int busyAttempts = 0;
         boolean firstAttempt = true;
 
         while (true) {
             if (!firstAttempt && elapsedNanos(startedAtNanos) >= timeoutNanos) {
-                return AcquireResult.lockTimeout(context.key());
+                return AcquireResult.lockTimeout(identity);
             }
             firstAttempt = false;
             AcquireResult result = attemptAcquire(context, leaseId);
@@ -325,19 +326,20 @@ public class RedisIdempotencyStore implements IdempotencyStore {
 
             long remainingNanos = timeoutNanos - elapsedNanos(startedAtNanos);
             if (remainingNanos <= 0) {
-                return AcquireResult.lockTimeout(context.key());
+                return AcquireResult.lockTimeout(identity);
             }
             try {
                 TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, jitteredBackoffNanos(busyAttempts++)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return AcquireResult.lockTimeout(context.key());
+                return AcquireResult.lockTimeout(identity);
             }
         }
     }
 
     @Override
-    public void complete(String key, String leaseId, IdempotencyPayload payload, Duration ttl) {
+    public void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl) {
+        Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
         requireMillisecondDuration(ttl, "ttl");
         byte[] code;
@@ -357,8 +359,8 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         }
         List<Object> reply = eval(
                 COMPLETE,
-                "complete key '" + key + "'",
-                keysFor(key),
+                "complete " + identity,
+                keysFor(identity),
                 arg(leaseId),
                 arg(ttl.toMillis()),
                 arg(graceMs),
@@ -368,43 +370,45 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 arg(payload.completedAt().toEpochMilli()),
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
-        requireOk(reply, key, "complete");
-        awaitReplication("complete key '" + key + "'");
+        requireOk(reply, identity, "complete");
+        awaitReplication("complete " + identity);
     }
 
     @Override
-    public void release(String key, String leaseId) {
+    public void release(IdempotencyIdentity identity, String leaseId) {
+        Objects.requireNonNull(identity, "identity must not be null");
         List<Object> reply = eval(
                 RELEASE,
-                "release key '" + key + "'",
-                keysFor(key),
+                "release " + identity,
+                keysFor(identity),
                 arg(leaseId),
                 arg(graceMs),
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
-        requireOk(reply, key, "release");
-        awaitReplication("release key '" + key + "'");
+        requireOk(reply, identity, "release");
+        awaitReplication("release " + identity);
     }
 
     @Override
-    public void extendLock(String key, String leaseId, Duration extension) {
+    public void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension) {
+        Objects.requireNonNull(identity, "identity must not be null");
         requireMillisecondDuration(extension, "extension");
         List<Object> reply = eval(
                 EXTEND_LOCK,
-                "extend lock for key '" + key + "'",
-                keysFor(key),
+                "extend lock for " + identity,
+                keysFor(identity),
                 arg(leaseId),
                 arg(extension.toMillis()),
                 arg(graceMs),
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
-        String outcome = outcome(reply, key, "extend lock");
+        String outcome = outcome(reply, identity, "extend lock");
         switch (outcome) {
-            case "OK" -> awaitReplication("extend lock for key '" + key + "'");
+            case "OK" -> awaitReplication("extend lock for " + identity);
             case "NOOP" -> {}
-            case "FOREIGN" -> throw foreignRecord(key);
-            case "CORRUPT" -> throw corruptRecord(key, reply);
-            default -> throw unexpectedOutcome(outcome, key, "extend lock");
+            case "FOREIGN" -> throw foreignRecord(identity);
+            case "CORRUPT" -> throw corruptRecord(identity, reply);
+            default -> throw unexpectedOutcome(outcome, identity, "extend lock");
         }
     }
 
@@ -441,10 +445,11 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     }
 
     private AcquireResult attemptAcquire(IdempotencyContext context, String leaseId) {
+        IdempotencyIdentity identity = context.identity();
         List<Object> reply = eval(
                 ACQUIRE,
-                "acquire key '" + context.key() + "'",
-                keysFor(context.key()),
+                "acquire " + identity,
+                keysFor(identity),
                 arg(context.lockTimeout().toMillis()),
                 arg(context.ttl().toMillis()),
                 arg(graceMs),
@@ -453,19 +458,19 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
 
-        String outcome = outcome(reply, context.key(), "acquire");
+        String outcome = outcome(reply, identity, "acquire");
         return switch (outcome) {
             case "ACQUIRED" -> {
-                awaitReplication("acquire key '" + context.key() + "'");
+                awaitReplication("acquire " + identity);
                 yield AcquireResult.acquired(leaseId);
             }
             case "BUSY" -> null;
-            case "MISMATCH" -> AcquireResult.fingerprintMismatch(
-                    token(reply, 1, "acquire key '" + context.key() + "'"), context.requestFingerprint());
-            case "DUPLICATE" -> AcquireResult.duplicate(readPayload(reply, context.key()));
-            case "FOREIGN" -> throw foreignRecord(context.key());
-            case "CORRUPT" -> throw corruptRecord(context.key(), reply);
-            default -> throw unexpectedOutcome(outcome, context.key(), "acquire");
+            case "MISMATCH" ->
+                AcquireResult.fingerprintMismatch(token(reply, 1, "acquire " + identity), context.requestFingerprint());
+            case "DUPLICATE" -> AcquireResult.duplicate(readPayload(reply, identity));
+            case "FOREIGN" -> throw foreignRecord(identity);
+            case "CORRUPT" -> throw corruptRecord(identity, reply);
+            default -> throw unexpectedOutcome(outcome, identity, "acquire");
         };
     }
 
@@ -475,7 +480,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
      * <p>An empty {@code code} field means the record was completed by a caller with nothing
      * to replay, and reads back as {@link NoPayload}.
      */
-    private IdempotencyPayload readPayload(List<Object> reply, String key) {
+    private IdempotencyPayload readPayload(List<Object> reply, IdempotencyIdentity identity) {
         try {
             String code = token(reply, 1, "read response");
             Instant completedAt = Instant.ofEpochMilli(Long.parseLong(token(reply, 4, "read response")));
@@ -490,23 +495,26 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             throw e;
         } catch (RuntimeException e) {
             throw new IdempotencyCorruptRecordException(
-                    "Stored Redis response for key '" + key + "' is malformed and cannot be replayed", e);
+                    "Stored Redis response for " + identity + " is malformed and cannot be replayed", e);
         }
     }
 
-    private void requireOk(List<Object> reply, String key, String operation) {
-        String result = outcome(reply, key, operation);
+    private void requireOk(List<Object> reply, IdempotencyIdentity identity, String operation) {
+        String result = outcome(reply, identity, operation);
         switch (result) {
             case "OK" -> {}
-            case "MISSING" -> throw new IdempotencyLeaseLostException(
-                    "Cannot " + operation + " key '" + key + "': no entry exists or it expired");
-            case "CONFLICT" -> throw new IdempotencyLeaseLostException("Cannot " + operation + " key '" + key
-                    + "': entry is " + token(reply, 1, operation) + ", expected IN_PROGRESS");
-            case "STALE" -> throw new IdempotencyLeaseLostException(
-                    "Cannot " + operation + " key '" + key + "': lease no longer owns the key");
-            case "FOREIGN" -> throw foreignRecord(key);
-            case "CORRUPT" -> throw corruptRecord(key, reply);
-            default -> throw unexpectedOutcome(result, key, operation);
+            case "MISSING" ->
+                throw new IdempotencyLeaseLostException(
+                        "Cannot " + operation + " " + identity + ": no entry exists or it expired");
+            case "CONFLICT" ->
+                throw new IdempotencyLeaseLostException("Cannot " + operation + " " + identity + ": entry is "
+                        + token(reply, 1, operation) + ", expected IN_PROGRESS");
+            case "STALE" ->
+                throw new IdempotencyLeaseLostException(
+                        "Cannot " + operation + " " + identity + ": lease no longer owns the record");
+            case "FOREIGN" -> throw foreignRecord(identity);
+            case "CORRUPT" -> throw corruptRecord(identity, reply);
+            default -> throw unexpectedOutcome(result, identity, operation);
         }
     }
 
@@ -559,31 +567,31 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         return System.nanoTime() - startedAtNanos;
     }
 
-    private String[] keysFor(String key) {
-        Objects.requireNonNull(key, "key must not be null");
-        return new String[] {recordKeyPrefix + key};
+    private String[] keysFor(IdempotencyIdentity identity) {
+        return new String[] {recordKeyPrefix + identity.scope() + ":" + identity.key()};
     }
 
-    private static IdempotencyForeignRecordException foreignRecord(String key) {
+    private static IdempotencyForeignRecordException foreignRecord(IdempotencyIdentity identity) {
         return new IdempotencyForeignRecordException(
-                "Redis key for idempotency key '" + key + "' is not owned by idempotency4j");
+                "Redis key for idempotency record " + identity + " is not owned by idempotency4j");
     }
 
-    private static IdempotencyCorruptRecordException corruptRecord(String key, List<Object> reply) {
+    private static IdempotencyCorruptRecordException corruptRecord(IdempotencyIdentity identity, List<Object> reply) {
         String field = reply.size() > 1 ? token(reply, 1, "read corrupt-record reason") : "record";
         return new IdempotencyCorruptRecordException(
-                "Redis record for idempotency key '" + key + "' has an invalid or unsupported " + field);
+                "Redis record for " + identity + " has an invalid or unsupported " + field);
     }
 
-    private static IdempotencyCorruptRecordException unexpectedOutcome(String outcome, String key, String operation) {
+    private static IdempotencyCorruptRecordException unexpectedOutcome(
+            String outcome, IdempotencyIdentity identity, String operation) {
         return new IdempotencyCorruptRecordException(
-                "Unexpected Redis " + operation + " outcome '" + outcome + "' for key '" + key + "'");
+                "Unexpected Redis " + operation + " outcome '" + outcome + "' for " + identity);
     }
 
-    private static String outcome(List<Object> reply, String key, String operation) {
+    private static String outcome(List<Object> reply, IdempotencyIdentity identity, String operation) {
         if (reply == null || reply.isEmpty()) {
             throw new IdempotencyCorruptRecordException(
-                    "Redis returned an empty " + operation + " result for key '" + key + "'");
+                    "Redis returned an empty " + operation + " result for " + identity);
         }
         return token(reply, 0, operation);
     }

@@ -58,8 +58,14 @@ class IdempotencyEngineTest {
         scheduler.shutdownNow();
     }
 
+    private static final String SCOPE = "TestScope.action";
+
+    private static IdempotencyIdentity identity(String key) {
+        return new IdempotencyIdentity(SCOPE, key);
+    }
+
     private IdempotencyContext defaultContext(String key) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+        return new IdempotencyContext(SCOPE, key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
     }
 
     private StoredResponse anyStoredResponse() {
@@ -111,7 +117,7 @@ class IdempotencyEngineTest {
         } catch (Exception ignored) {
         }
 
-        verify(store, times(1)).release(key, LEASE_ID);
+        verify(store, times(1)).release(identity(key), LEASE_ID);
     }
 
     @Test
@@ -141,31 +147,31 @@ class IdempotencyEngineTest {
 
     @Test
     void When_LockTimeout_Expect_ThrowsLockTimeoutException() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout("test-key"));
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout(identity("test-key")));
 
         assertThatThrownBy(() -> engine.execute(defaultContext("test-key"), () -> {}))
                 .isInstanceOf(IdempotencyLockTimeoutException.class)
                 .satisfies(e -> {
                     IdempotencyLockTimeoutException ex = (IdempotencyLockTimeoutException) e;
-                    assertThat(ex.getKey()).isEqualTo("test-key");
+                    assertThat(ex.getIdentity()).isEqualTo(identity("test-key"));
                 });
     }
 
     @Test
     void When_LongRunningAction_Expect_HeartbeatExtendsLock() throws Exception {
         IdempotencyContext context =
-                new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+                new IdempotencyContext(SCOPE, "hb-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         engine.execute(context, () -> Thread.sleep(300));
 
-        verify(store, atLeastOnce()).extendLock(eq("hb-key"), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+        verify(store, atLeastOnce()).extendLock(eq(identity("hb-key")), eq(LEASE_ID), eq(Duration.ofMillis(100)));
     }
 
     @Test
     void When_ActionCompletes_Expect_HeartbeatStops() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = new IdempotencyContext(
+                SCOPE, "hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         engine.execute(context, () -> {});
@@ -189,8 +195,8 @@ class IdempotencyEngineTest {
 
     @Test
     void When_ActionThrows_Expect_HeartbeatStops() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = new IdempotencyContext(
+                SCOPE, "hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         try {
@@ -216,7 +222,7 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void When_FingerprintMismatch_Expect_ThrowsFingerprintMismatchException() throws Exception {
+    void When_FingerprintMismatch_Expect_ThrowsFingerprintMismatchException() {
         IdempotencyContext context = defaultContext("fp-mismatch-key");
         when(store.tryAcquire(context)).thenReturn(AcquireResult.fingerprintMismatch("stored-hash", "received-hash"));
 
@@ -284,15 +290,15 @@ class IdempotencyEngineTest {
 
     @Test
     void When_HeartbeatExtendLockThrows_Expect_HeartbeatContinues() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = new IdempotencyContext(
+                SCOPE, "hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any(), any());
 
         engine.execute(context, () -> Thread.sleep(300));
 
         // Heartbeat should have been called multiple times despite throwing each time
-        verify(store, atLeast(2)).extendLock(eq("hb-error-key"), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+        verify(store, atLeast(2)).extendLock(eq(identity("hb-error-key")), eq(LEASE_ID), eq(Duration.ofMillis(100)));
     }
 
     @Test
@@ -305,7 +311,7 @@ class IdempotencyEngineTest {
                 .isInstanceOf(RejectedExecutionException.class);
 
         assertThat(actionCalls).hasValue(0);
-        verify(store).release("scheduler-rejected", LEASE_ID);
+        verify(store).release(identity("scheduler-rejected"), LEASE_ID);
     }
 
     @Test
@@ -315,18 +321,18 @@ class IdempotencyEngineTest {
 
         engine.complete(context, LEASE_ID, payload, context.ttl());
 
-        verify(store).complete("complete-key", LEASE_ID, payload, context.ttl());
+        verify(store).complete(identity("complete-key"), LEASE_ID, payload, context.ttl());
     }
 
     @Test
     void When_CompleteWithNoPayload_Expect_PayloadForwardedUnchanged() {
-        IdempotencyContext context =
-                IdempotencyContext.withoutFingerprint("no-payload-key", Duration.ofHours(1), Duration.ofSeconds(5));
+        IdempotencyContext context = IdempotencyContext.withoutFingerprint(
+                SCOPE, "no-payload-key", Duration.ofHours(1), Duration.ofSeconds(5));
         NoPayload payload = NoPayload.at(Instant.now());
 
         engine.complete(context, LEASE_ID, payload, context.ttl());
 
-        verify(store).complete("no-payload-key", LEASE_ID, payload, context.ttl());
+        verify(store).complete(identity("no-payload-key"), LEASE_ID, payload, context.ttl());
     }
 
     @Test

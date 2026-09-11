@@ -96,7 +96,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
     }
 
     private IdempotencyContext context(String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
+        return new IdempotencyContext(SCOPE_DEFAULT, key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
     }
 
     @Test
@@ -142,15 +142,17 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
         acquire(s, contextFor("prefixed-key"));
 
-        assertThat(commands.exists("tenant-a:rec:prefixed-key")).isEqualTo(1);
-        assertThat(commands.exists("idempotency4j:rec:prefixed-key")).isZero();
+        assertThat(commands.exists("tenant-a:rec:" + SCOPE_DEFAULT + ":prefixed-key"))
+                .isEqualTo(1);
+        assertThat(commands.exists("idempotency4j:rec:" + SCOPE_DEFAULT + ":prefixed-key"))
+                .isZero();
     }
 
     @Test
     void When_RecordWritten_Expect_OwnershipAndFormatMarkersPresent() {
         acquire(store(), contextFor("owned-record"));
 
-        Map<String, byte[]> record = commands.hgetall("idempotency4j:rec:owned-record");
+        Map<String, byte[]> record = commands.hgetall("idempotency4j:rec:" + SCOPE_DEFAULT + ":owned-record");
         assertThat(new String(record.get("owner"), StandardCharsets.UTF_8))
                 .isEqualTo(RedisIdempotencyStore.RECORD_OWNER);
         assertThat(new String(record.get("formatVersion"), StandardCharsets.UTF_8))
@@ -159,7 +161,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
     @Test
     void When_ForeignStringUsesRecordKey_Expect_AcquireFailsWithoutMutation() {
-        String redisKey = "idempotency4j:rec:foreign-string";
+        String redisKey = "idempotency4j:rec:" + SCOPE_DEFAULT + ":foreign-string";
         byte[] original = "another application".getBytes(StandardCharsets.UTF_8);
         commands.set(redisKey, original);
 
@@ -171,8 +173,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
     @Test
     void When_ForeignRecordsMatchScanPattern_Expect_PurgeSkipsThem() {
-        String foreignString = "shared:rec:foreign-string";
-        String foreignHash = "shared:rec:foreign-hash";
+        String foreignString = "shared:rec:" + SCOPE_DEFAULT + ":foreign-string";
+        String foreignHash = "shared:rec:" + SCOPE_DEFAULT + ":foreign-hash";
         String unrelatedIndex = "shared:idx";
         commands.set(foreignString, "value".getBytes(StandardCharsets.UTF_8));
         commands.hset(foreignHash, "status", "COMPLETE".getBytes(StandardCharsets.UTF_8));
@@ -186,7 +188,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
     @Test
     void When_OwnedRecordUsesUnsupportedFormat_Expect_FailsClosed() {
-        String redisKey = "idempotency4j:rec:future-format";
+        String redisKey = "idempotency4j:rec:" + SCOPE_DEFAULT + ":future-format";
         commands.hset(redisKey, "owner", RedisIdempotencyStore.RECORD_OWNER.getBytes(StandardCharsets.UTF_8));
         commands.hset(redisKey, "formatVersion", "999".getBytes(StandardCharsets.US_ASCII));
         commands.hset(redisKey, "status", "FAILED".getBytes(StandardCharsets.UTF_8));
@@ -218,7 +220,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         // The native TTL is the backstop that reclaims memory when purgeExpired() never
         // runs. It must trail logical expiry, otherwise Redis would delete records before
         // purgeExpired() could account for them.
-        assertThat(commands.pttl("idempotency4j:rec:native-ttl-key")).isGreaterThan(ttl.toMillis());
+        assertThat(commands.pttl("idempotency4j:rec:" + SCOPE_DEFAULT + ":native-ttl-key"))
+                .isGreaterThan(ttl.toMillis());
     }
 
     @Test
@@ -261,7 +264,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         Thread.sleep(50);
         assertThat(s.purgeExpired()).isEqualTo(1);
 
-        assertThat(commands.exists("idempotency4j:rec:purge-orphan-key")).isZero();
+        assertThat(commands.exists("idempotency4j:rec:" + SCOPE_DEFAULT + ":purge-orphan-key"))
+                .isZero();
     }
 
     @Test
@@ -344,7 +348,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         Thread.sleep(50);
 
         assertThat(s.purgeExpired()).isZero();
-        assertThat(commands.exists("idempotency4j:rec:extend-rescore-key")).isEqualTo(1);
+        assertThat(commands.exists("idempotency4j:rec:" + SCOPE_DEFAULT + ":extend-rescore-key"))
+                .isEqualTo(1);
     }
 
     @Test
@@ -364,7 +369,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
     @Test
     void When_StoredResponseIsMalformed_Expect_StoreExceptionInsteadOfCodecFailure() {
         long future = Instant.now().plus(Duration.ofHours(1)).toEpochMilli();
-        String record = "idempotency4j:rec:malformed-response";
+        String record = "idempotency4j:rec:" + SCOPE_DEFAULT + ":malformed-response";
         commands.hset(record, "owner", RedisIdempotencyStore.RECORD_OWNER.getBytes(StandardCharsets.UTF_8));
         commands.hset(record, "formatVersion", RedisIdempotencyStore.FORMAT_VERSION.getBytes(StandardCharsets.UTF_8));
         commands.hset(record, "status", "COMPLETE".getBytes(StandardCharsets.UTF_8));
@@ -407,7 +412,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
                     Thread.currentThread().interrupt();
                 }
                 s.complete(
-                        key,
+                        identity(key),
                         first.leaseId(),
                         new StoredResponse(200, Map.of(), new byte[0], Instant.now()),
                         Duration.ofHours(1));
@@ -449,7 +454,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
                         .build());
         StoredResponse response = new StoredResponse(201, Map.of(), "saved".getBytes(), Instant.now());
 
-        assertThatThrownBy(() -> acknowledged.complete(key, acquired.leaseId(), response, Duration.ofHours(1)))
+        assertThatThrownBy(
+                        () -> acknowledged.complete(identity(key), acquired.leaseId(), response, Duration.ofHours(1)))
                 .isInstanceOf(IdempotencyDurabilityException.class);
 
         AcquireResult retry = normal.tryAcquire(contextFor(key));
@@ -517,7 +523,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
             String key = "lifecycle";
             var acquired = (AcquireResult.Acquired) restrictedStore.tryAcquire(contextFor(key));
             restrictedStore.complete(
-                    key,
+                    identity(key),
                     acquired.leaseId(),
                     new StoredResponse(200, Map.of(), "ok".getBytes(), Instant.now()),
                     Duration.ofMillis(10));

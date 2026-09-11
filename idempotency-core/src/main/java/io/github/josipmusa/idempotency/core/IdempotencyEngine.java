@@ -117,7 +117,7 @@ public final class IdempotencyEngine {
      * while waiting for a Redis replica after the primary accepted it. Callers must not
      * treat idempotency storage as a transaction around the business side effect.
      *
-     * @param context fully resolved idempotency context (key, ttl, lockTimeout)
+     * @param context fully resolved idempotency context (identity, ttl, lockTimeout)
      * @param action  the business logic to execute — only runs for new keys
      * @return {@link ExecutionResult.Executed} if the action ran, or
      *         {@link ExecutionResult.Duplicate} with the stored payload
@@ -130,15 +130,16 @@ public final class IdempotencyEngine {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(action, "action must not be null");
         return switch (store.tryAcquire(context)) {
-            case AcquireResult.Acquired acquired -> runWithHeartbeat(context, acquired.leaseId(), action);
-            case AcquireResult.Duplicate d -> {
-                notify("onDuplicate", context, listener -> listener.onDuplicate(context, d.payload()));
-                yield ExecutionResult.duplicate(d.payload());
+            case AcquireResult.Acquired(String leaseId) -> runWithHeartbeat(context, leaseId, action);
+            case AcquireResult.Duplicate(IdempotencyPayload payload) -> {
+                notify("onDuplicate", context, listener -> listener.onDuplicate(context, payload));
+                yield ExecutionResult.duplicate(payload);
             }
-            case AcquireResult.LockTimeout ignored -> throw new IdempotencyLockTimeoutException(
-                    context.key(), context.lockTimeout());
-            case AcquireResult.FingerprintMismatch fm -> throw new IdempotencyFingerprintMismatchException(
-                    context.key(), fm.storedFingerprint(), fm.receivedFingerprint());
+            case AcquireResult.LockTimeout ignored ->
+                throw new IdempotencyLockTimeoutException(context.identity(), context.lockTimeout());
+            case AcquireResult.FingerprintMismatch(String storedFingerprint, String receivedFingerprint) ->
+                throw new IdempotencyFingerprintMismatchException(
+                        context.identity(), storedFingerprint, receivedFingerprint);
         };
     }
 
@@ -172,7 +173,7 @@ public final class IdempotencyEngine {
         Objects.requireNonNull(payload, "payload must not be null");
         Objects.requireNonNull(ttl, "ttl must not be null");
         try {
-            store.complete(context.key(), leaseId, payload, ttl);
+            store.complete(context.identity(), leaseId, payload, ttl);
         } catch (Exception e) {
             notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
             throw e;
@@ -201,7 +202,7 @@ public final class IdempotencyEngine {
             heartbeat = startHeartbeat(context, leaseId);
         } catch (RuntimeException schedulingFailure) {
             try {
-                store.release(context.key(), leaseId);
+                store.release(context.identity(), leaseId);
             } catch (Exception releaseFailure) {
                 schedulingFailure.addSuppressed(releaseFailure);
             }
@@ -211,13 +212,13 @@ public final class IdempotencyEngine {
             notify("onAcquired", context, listener -> listener.onAcquired(context, leaseId));
             action.run();
             try {
-                store.extendLock(context.key(), leaseId, context.lockTimeout());
+                store.extendLock(context.identity(), leaseId, context.lockTimeout());
             } catch (Exception ignored) {
             }
             return ExecutionResult.executed(leaseId);
         } catch (Exception e) {
             try {
-                store.release(context.key(), leaseId);
+                store.release(context.identity(), leaseId);
             } catch (Exception releaseEx) {
                 e.addSuppressed(releaseEx);
             }
@@ -233,7 +234,7 @@ public final class IdempotencyEngine {
         return scheduler.scheduleAtFixedRate(
                 () -> {
                     try {
-                        store.extendLock(context.key(), leaseId, context.lockTimeout());
+                        store.extendLock(context.identity(), leaseId, context.lockTimeout());
                     } catch (Exception e) {
                         // heartbeat failure is non-fatal - lock will eventually
                         // expire naturally and be stolen by a waiting request
@@ -265,10 +266,10 @@ public final class IdempotencyEngine {
                 throw e;
             } catch (Throwable t) {
                 log.warn(
-                        "Idempotency lifecycle listener {} threw from {} for key '{}'; ignoring",
+                        "Idempotency lifecycle listener {} threw from {} for {}; ignoring",
                         listener.getClass().getName(),
                         callback,
-                        context.key(),
+                        context.identity(),
                         t);
             }
         }

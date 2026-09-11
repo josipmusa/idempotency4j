@@ -38,8 +38,8 @@ public sealed interface AcquireResult
                 AcquireResult.FingerprintMismatch {
 
     /**
-     * Lock obtained — this caller owns the key and should execute the action.
-     * The key is now IN_PROGRESS. The caller must eventually call either
+     * Lock obtained — this caller owns the identity and should execute the action.
+     * The record is now IN_PROGRESS. The caller must eventually call either
      * {@link IdempotencyStore#complete} or {@link IdempotencyStore#release}, passing
      * this lease ID so a stale owner cannot mutate a newer acquisition.
      */
@@ -53,7 +53,7 @@ public sealed interface AcquireResult
     }
 
     /**
-     * Key was already completed — carries the stored payload for replay.
+     * Identity was already completed — carries the stored payload for replay.
      * The action must NOT be executed again.
      */
     record Duplicate(IdempotencyPayload payload) implements AcquireResult {
@@ -63,14 +63,18 @@ public sealed interface AcquireResult
     }
 
     /**
-     * Key is in-flight (held by another caller) and this caller's
+     * Identity is in-flight (held by another caller) and this caller's
      * {@code lockTimeout} expired while waiting. The action was not
      * executed. The caller should return an appropriate error (e.g. 409 or 503).
      */
-    record LockTimeout(String key) implements AcquireResult {}
+    record LockTimeout(IdempotencyIdentity identity) implements AcquireResult {
+        public LockTimeout {
+            Objects.requireNonNull(identity, "identity must not be null");
+        }
+    }
 
     /**
-     * Key was already completed and both the stored and the incoming request
+     * Identity was already completed and both the stored and the incoming request
      * carry a fingerprint, but the two differ. An HTTP adapter should return
      * 422 to indicate the key was reused with a different payload.
      *
@@ -87,8 +91,8 @@ public sealed interface AcquireResult
         return new Duplicate(payload);
     }
 
-    static AcquireResult lockTimeout(String key) {
-        return new LockTimeout(key);
+    static AcquireResult lockTimeout(IdempotencyIdentity identity) {
+        return new LockTimeout(identity);
     }
 
     static AcquireResult fingerprintMismatch(String storedFingerprint, String receivedFingerprint) {

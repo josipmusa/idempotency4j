@@ -138,7 +138,7 @@ class IdempotencyAutoConfigurationTest {
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .run(context -> {
                     FilterRegistrationBean<?> registration = context.getBean(FilterRegistrationBean.class);
-                    assertThat(registration.getOrder()).isEqualTo(0);
+                    assertThat(registration.getOrder()).isZero();
                 });
     }
 
@@ -234,7 +234,8 @@ class IdempotencyAutoConfigurationTest {
     }
 
     private static IdempotencyContext anyContext() {
-        return IdempotencyContext.withoutFingerprint("listener-key", Duration.ofHours(1), Duration.ofSeconds(5));
+        return IdempotencyContext.withoutFingerprint(
+                "ListenerScope.handle", "listener-key", Duration.ofHours(1), Duration.ofSeconds(5));
     }
 
     private static IdempotencyStore acquiringStore() {

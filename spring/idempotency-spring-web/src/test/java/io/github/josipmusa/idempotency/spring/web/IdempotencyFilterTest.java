@@ -270,7 +270,8 @@ class IdempotencyFilterTest {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         when(engine.execute(any(), any()))
-                .thenThrow(new IdempotencyLockTimeoutException("test-key", Duration.ofSeconds(10)));
+                .thenThrow(new IdempotencyLockTimeoutException(
+                        new IdempotencyIdentity("PaymentController.create", "test-key"), Duration.ofSeconds(10)));
 
         filter.doFilter(request, response, filterChain);
 
@@ -354,7 +355,8 @@ class IdempotencyFilterTest {
         // The storage outcome is indeterminate. This retry models the backend reporting that the
         // key is still in flight.
         MockHttpServletResponse response2 = new MockHttpServletResponse();
-        doThrow(new IdempotencyLockTimeoutException("test-key", Duration.ofSeconds(10)))
+        doThrow(new IdempotencyLockTimeoutException(
+                        new IdempotencyIdentity("PaymentController.create", "test-key"), Duration.ofSeconds(10)))
                 .when(engine)
                 .execute(any(), any());
 
@@ -432,7 +434,8 @@ class IdempotencyFilterTest {
         request.addHeader("Idempotency-Key", "key-1");
         request.setContent("{\"amount\":100}".getBytes());
         when(engine.execute(any(), any()))
-                .thenThrow(new IdempotencyFingerprintMismatchException("key-1", "stored-hash", "received-hash"));
+                .thenThrow(new IdempotencyFingerprintMismatchException(
+                        new IdempotencyIdentity("PaymentController.create", "key-1"), "stored-hash", "received-hash"));
 
         filter.doFilter(request, response, filterChain);
 
@@ -570,16 +573,36 @@ class IdempotencyFilterTest {
                 .doesNotContainKeys("Connection", "Transfer-Encoding", "Content-Length");
     }
 
+    @Test
+    void When_AnnotatedHandler_Expect_ScopeIsHandlerClassAndMethod() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(storedResponse()));
+
+        filter.doFilter(request, response, filterChain);
+
+        verify(engine)
+                .execute(
+                        argThat(context -> context.identity()
+                                .equals(new IdempotencyIdentity("PaymentController.create", "test-key"))),
+                        any());
+    }
+
     private void setupAnnotatedHandler(Idempotent annotation) throws Exception {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(annotation);
         HandlerExecutionChain chain = new HandlerExecutionChain(handlerMethod);
 
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        Method method = mock(Method.class);
+        when(method.getName()).thenReturn("create");
+        when(handlerMethod.getMethod()).thenReturn(method);
+        doReturn(PaymentController.class).when(handlerMethod).getBeanType();
         registry.afterSingletonsInstantiated();
         when(handlerMapping.getHandler(request)).thenReturn(chain);
     }
+
+    static class PaymentController {}
 
     @Test
     void When_DuplicateCarriesNoPayload_Expect_NoContentMarkedAsReplayed() throws Exception {

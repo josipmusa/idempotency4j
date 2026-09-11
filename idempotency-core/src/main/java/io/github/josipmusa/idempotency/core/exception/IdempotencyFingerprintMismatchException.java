@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.core.exception;
 
+import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import java.io.Serial;
 
 /**
@@ -29,20 +30,21 @@ public class IdempotencyFingerprintMismatchException extends IdempotencyExceptio
     @Serial
     private static final long serialVersionUID = 1L;
 
-    private final String key;
+    private final IdempotencyIdentity identity;
     private final String storedFingerprint;
     private final String receivedFingerprint;
 
-    public IdempotencyFingerprintMismatchException(String key, String storedFingerprint, String receivedFingerprint) {
-        super("Request fingerprint mismatch for key '" + key + "': stored=" + storedFingerprint + ", received="
+    public IdempotencyFingerprintMismatchException(
+            IdempotencyIdentity identity, String storedFingerprint, String receivedFingerprint) {
+        super("Request fingerprint mismatch for " + identity + ": stored=" + storedFingerprint + ", received="
                 + receivedFingerprint);
-        this.key = key;
+        this.identity = identity;
         this.storedFingerprint = storedFingerprint;
         this.receivedFingerprint = receivedFingerprint;
     }
 
-    public String getKey() {
-        return key;
+    public IdempotencyIdentity getIdentity() {
+        return identity;
     }
 
     public String getStoredFingerprint() {
