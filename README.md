@@ -16,7 +16,7 @@ the stored result back.**
 [![Java 21+](https://img.shields.io/badge/Java-21%2B-blue)](https://adoptium.net/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-`idempotency-core` is the whole library: an engine that acquires a lease on a key, runs your action
+An engine that acquires a lease on a key, runs your action
 under a heartbeat, stores the result, and hands the stored result back to whoever shows up with
 that key next. It has no framework or transport types in it, so you can drive it directly.
 
