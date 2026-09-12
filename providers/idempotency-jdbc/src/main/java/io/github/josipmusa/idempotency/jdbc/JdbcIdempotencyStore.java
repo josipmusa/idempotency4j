@@ -27,6 +27,7 @@ import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordEx
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreUnavailableException;
+import io.github.josipmusa.idempotency.jdbc.ConnectionResolver.Operation;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -144,6 +145,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     private final DataSource dataSource;
+    private final ConnectionResolver connections;
     private final long pollIntervalMs;
 
     /**
@@ -165,7 +167,26 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema, long pollIntervalMs) {
+        this(dataSource, initSchema, pollIntervalMs, null);
+    }
+
+    /**
+     * Builds a store whose connections come from the given resolver.
+     *
+     * <p>The {@code DataSource} is still required: schema initialisation uses it directly, and
+     * it is what the default resolver is built from when {@code connections} is {@code null}.
+     *
+     * @param dataSource     the database, used for schema initialisation and as the default
+     *                       source of connections
+     * @param initSchema     whether to create the table and index on construction
+     * @param pollIntervalMs how long {@code tryAcquire} sleeps between polls, in milliseconds
+     * @param connections    decides which connection each operation runs on; {@code null}
+     *                       means {@link ConnectionResolver#forDataSource(DataSource)}
+     */
+    public JdbcIdempotencyStore(
+            DataSource dataSource, boolean initSchema, long pollIntervalMs, ConnectionResolver connections) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
+        this.connections = connections != null ? connections : ConnectionResolver.forDataSource(dataSource);
         if (pollIntervalMs <= 0) {
             throw new IllegalArgumentException("pollIntervalMs must be positive, got: " + pollIntervalMs);
         }
@@ -173,6 +194,51 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         if (initSchema) {
             initSchema();
         }
+    }
+
+    /**
+     * Reports {@code true}: a JDBC store completes on whatever connection its
+     * {@link ConnectionResolver} hands it, so a resolver that returns the caller's
+     * transaction-bound connection for {@link Operation#COMPLETE} makes the record commit with
+     * the caller's own writes.
+     *
+     * @return {@code true}
+     */
+    @Override
+    public boolean supportsTransactionalCompletion() {
+        return true;
+    }
+
+    /**
+     * Runs {@code work} on a connection resolved for {@code operation} and hands it back
+     * afterwards, whatever happens.
+     *
+     * <p>The connection is returned through {@link ConnectionResolver#release(Connection)}
+     * rather than closed, because the store does not know whether it owns it.
+     */
+    private <T> T using(Operation operation, SqlWork<T> work) throws SQLException {
+        Connection conn = connections.connectionFor(operation);
+        try {
+            return work.run(conn);
+        } finally {
+            releaseConnection(conn);
+        }
+    }
+
+    private void releaseConnection(Connection conn) {
+        try {
+            connections.release(conn);
+        } catch (SQLException ignored) {
+            // Handing the connection back on the way out, possibly while a failure is already
+            // being reported. A broken connection is discarded by the pool anyway, and masking
+            // the caller's real failure with this one would only lose information.
+        }
+    }
+
+    /** A unit of work that needs a connection; see {@link #using}. */
+    @FunctionalInterface
+    private interface SqlWork<T> {
+        T run(Connection conn) throws SQLException;
     }
 
     /**
@@ -297,19 +363,22 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
         requirePositiveDuration(ttl, "ttl");
-        try (Connection conn = dataSource.getConnection()) {
-            Instant now = currentTime(conn);
-            try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
-                bindPayload(ps, payload);
-                setTimestamp(ps, 4, now);
-                setTimestamp(ps, 5, now.plus(ttl));
-                bindIdentity(ps, 6, identity);
-                ps.setString(8, leaseId);
-                int updated = ps.executeUpdate();
-                if (updated == 0) {
-                    throw diagnoseMissingInProgress(conn, identity, leaseId, "complete");
+        try {
+            using(Operation.COMPLETE, conn -> {
+                Instant now = currentTime(conn);
+                try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
+                    bindPayload(ps, payload);
+                    setTimestamp(ps, 4, now);
+                    setTimestamp(ps, 5, now.plus(ttl));
+                    bindIdentity(ps, 6, identity);
+                    ps.setString(8, leaseId);
+                    int updated = ps.executeUpdate();
+                    if (updated == 0) {
+                        throw diagnoseMissingInProgress(conn, identity, leaseId, "complete");
+                    }
                 }
-            }
+                return null;
+            });
         } catch (SQLException e) {
             throw unavailable("complete " + identity, e);
         }
@@ -330,9 +399,12 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     @Override
     public void release(IdempotencyIdentity identity, String leaseId) {
         Objects.requireNonNull(identity, "identity must not be null");
-        try (Connection conn = dataSource.getConnection()) {
-            conn.setAutoCommit(false);
-            deleteInTransaction(conn, identity, leaseId);
+        try {
+            using(Operation.RELEASE, conn -> {
+                conn.setAutoCommit(false);
+                deleteInTransaction(conn, identity, leaseId);
+                return null;
+            });
         } catch (SQLException e) {
             throw unavailable("release " + identity, e);
         }
@@ -367,15 +439,18 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     public void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension) {
         Objects.requireNonNull(identity, "identity must not be null");
         requirePositiveDuration(extension, "extension");
-        try (Connection conn = dataSource.getConnection()) {
-            Instant newExpiry = currentTime(conn).plus(extension);
-            try (PreparedStatement ps = conn.prepareStatement(EXTEND_LEASE)) {
-                setTimestamp(ps, 1, newExpiry);
-                bindIdentity(ps, 2, identity);
-                ps.setString(4, leaseId);
-                ps.executeUpdate();
-                // Silently ignore if no rows updated - heartbeat may fire after completion.
-            }
+        try {
+            using(Operation.EXTEND, conn -> {
+                Instant newExpiry = currentTime(conn).plus(extension);
+                try (PreparedStatement ps = conn.prepareStatement(EXTEND_LEASE)) {
+                    setTimestamp(ps, 1, newExpiry);
+                    bindIdentity(ps, 2, identity);
+                    ps.setString(4, leaseId);
+                    ps.executeUpdate();
+                    // Silently ignore if no rows updated - heartbeat may fire after completion.
+                }
+                return null;
+            });
         } catch (SQLException e) {
             throw unavailable("extend lock for " + identity, e);
         }
@@ -397,13 +472,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      */
     @Override
     public int purgeExpired() {
-        try (Connection conn = dataSource.getConnection()) {
-            Instant now = currentTime(conn);
-            try (PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
-                setTimestamp(ps, 1, now);
-                setTimestamp(ps, 2, now);
-                return ps.executeUpdate();
-            }
+        try {
+            return using(Operation.PURGE, conn -> {
+                Instant now = currentTime(conn);
+                try (PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
+                    setTimestamp(ps, 1, now);
+                    setTimestamp(ps, 2, now);
+                    return ps.executeUpdate();
+                }
+            });
         } catch (SQLException e) {
             throw unavailable("purge expired records", e);
         }
@@ -418,14 +495,16 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      */
     private boolean tryInsert(IdempotencyContext context, String leaseId) {
         IdempotencyIdentity identity = context.identity();
-        try (Connection conn = dataSource.getConnection()) {
-            Instant now = currentTime(conn);
-            try (PreparedStatement del = conn.prepareStatement(DELETE_EXPIRED)) {
-                bindIdentity(del, 1, identity);
-                setTimestamp(del, 3, now);
-                del.executeUpdate();
-            }
-            return insertRow(conn, context, leaseId, now);
+        try {
+            return using(Operation.ACQUIRE, conn -> {
+                Instant now = currentTime(conn);
+                try (PreparedStatement del = conn.prepareStatement(DELETE_EXPIRED)) {
+                    bindIdentity(del, 1, identity);
+                    setTimestamp(del, 3, now);
+                    del.executeUpdate();
+                }
+                return insertRow(conn, context, leaseId, now);
+            });
         } catch (SQLException e) {
             if (isTransientRollback(e)) {
                 return false;
@@ -466,9 +545,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * decide what to do next.
      */
     private RowInspection inspectRow(IdempotencyContext context, String leaseId) {
-        try (Connection conn = dataSource.getConnection()) {
-            conn.setAutoCommit(false);
-            return inspectRowInTransaction(conn, context, leaseId);
+        try {
+            return using(Operation.ACQUIRE, conn -> {
+                conn.setAutoCommit(false);
+                return inspectRowInTransaction(conn, context, leaseId);
+            });
         } catch (SQLException e) {
             throw unavailable("get connection for " + context.identity(), e);
         }

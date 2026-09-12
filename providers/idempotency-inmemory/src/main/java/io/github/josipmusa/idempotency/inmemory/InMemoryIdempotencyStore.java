@@ -83,6 +83,17 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
         this.pollIntervalMs = pollIntervalMs;
     }
 
+    /**
+     * Reports {@code false}: there is no transaction to join. A completion lands in the map
+     * the moment {@code complete} returns, and nothing can take it back.
+     *
+     * @return {@code false}
+     */
+    @Override
+    public boolean supportsTransactionalCompletion() {
+        return false;
+    }
+
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
         long startedAtNanos = System.nanoTime();

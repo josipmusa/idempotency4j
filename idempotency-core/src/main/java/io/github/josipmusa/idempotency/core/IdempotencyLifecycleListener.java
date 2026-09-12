@@ -166,6 +166,15 @@ public interface IdempotencyLifecycleListener {
          * landed - so a retry will most likely execute the action again even
          * though its side effects already happened.
          */
-        COMPLETION
+        COMPLETION,
+
+        /**
+         * The completion was recorded inside the caller's transaction under
+         * {@link CompletionMode#JOIN_TRANSACTION}, and that transaction rolled
+         * back. The record went with it, and the lease has been released, so the
+         * key is reclaimable and a retry will execute the action again - correctly,
+         * because the action's own writes rolled back too.
+         */
+        ROLLBACK
     }
 }
