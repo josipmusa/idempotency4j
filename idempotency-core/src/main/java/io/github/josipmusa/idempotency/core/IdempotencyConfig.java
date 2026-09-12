@@ -22,8 +22,9 @@ import java.util.Objects;
  * Application-level defaults for idempotency behavior.
  *
  * <p>Used by the adapter layer to resolve {@link IdempotencyContext} when
- * per-operation values are not specified. The engine itself never reads this
- * class — it only sees the fully resolved context.
+ * per-operation values are not specified. The engine reads only
+ * {@link #completionFailurePolicy()} from it; everything else it sees has already been
+ * resolved into the context it is handed.
  *
  * <p>Transport-specific settings do not live here. The HTTP header carrying
  * the key, for instance, is configured on
@@ -32,17 +33,29 @@ import java.util.Objects;
  * <h2>Defaults</h2>
  * <ul>
  *   <li>{@code defaultTtl} = 24 hours — how long completed payloads are kept</li>
- *   <li>{@code defaultLockTimeout} = 10 seconds — how long a second caller waits</li>
+ *   <li>{@code defaultLeaseDuration} = 30 seconds — how long an acquisition is protected</li>
+ *   <li>{@code defaultWaitTimeout} = 10 seconds — how long a second caller blocks</li>
+ *   <li>{@code completionFailurePolicy} = {@link CompletionFailurePolicy#PROPAGATE} — what
+ *       happens when the action ran but its completion could not be recorded</li>
+ *   <li>{@code defaultCompletionMode} = {@link CompletionMode#AUTONOMOUS} — whether an
+ *       operation that does not choose for itself records its completion on its own or
+ *       inside the caller's transaction</li>
  * </ul>
  */
 public final class IdempotencyConfig {
 
     private final Duration defaultTtl;
-    private final Duration defaultLockTimeout;
+    private final Duration defaultLeaseDuration;
+    private final Duration defaultWaitTimeout;
+    private final CompletionFailurePolicy completionFailurePolicy;
+    private final CompletionMode defaultCompletionMode;
 
     private IdempotencyConfig(Builder builder) {
         this.defaultTtl = builder.defaultTtl;
-        this.defaultLockTimeout = builder.defaultLockTimeout;
+        this.defaultLeaseDuration = builder.defaultLeaseDuration;
+        this.defaultWaitTimeout = builder.defaultWaitTimeout;
+        this.completionFailurePolicy = builder.completionFailurePolicy;
+        this.defaultCompletionMode = builder.defaultCompletionMode;
     }
 
     /**
@@ -55,8 +68,8 @@ public final class IdempotencyConfig {
     }
 
     /**
-     * Returns an {@link IdempotencyConfig} with all defaults: 24h TTL and a
-     * 10s lock timeout.
+     * Returns an {@link IdempotencyConfig} with all defaults: 24h TTL, a 30s
+     * lease, and a 10s wait.
      *
      * @return a default config instance
      */
@@ -68,19 +81,52 @@ public final class IdempotencyConfig {
         return defaultTtl;
     }
 
-    public Duration defaultLockTimeout() {
-        return defaultLockTimeout;
+    public Duration defaultLeaseDuration() {
+        return defaultLeaseDuration;
+    }
+
+    public Duration defaultWaitTimeout() {
+        return defaultWaitTimeout;
+    }
+
+    /**
+     * What the engine does when the action ran but its completion could not be recorded.
+     *
+     * @return the configured policy; never {@code null}
+     */
+    public CompletionFailurePolicy completionFailurePolicy() {
+        return completionFailurePolicy;
+    }
+
+    /**
+     * The completion mode an operation gets when it does not choose one for itself.
+     *
+     * <p>Read by the adapter layer while it builds an {@link IdempotencyContext}, not by the
+     * engine: the engine only ever sees the mode already resolved onto the context it is
+     * handed. Setting it to {@link CompletionMode#JOIN_TRANSACTION} makes joined completion
+     * the application-wide answer, which is what an application whose idempotent work is all
+     * transactional wants to say once rather than on every method.
+     *
+     * @return the default completion mode; never {@code null}
+     */
+    public CompletionMode defaultCompletionMode() {
+        return defaultCompletionMode;
     }
 
     @Override
     public String toString() {
-        return "IdempotencyConfig{defaultTtl=" + defaultTtl + ", defaultLockTimeout=" + defaultLockTimeout + "}";
+        return "IdempotencyConfig{defaultTtl=" + defaultTtl + ", defaultLeaseDuration=" + defaultLeaseDuration
+                + ", defaultWaitTimeout=" + defaultWaitTimeout + ", completionFailurePolicy="
+                + completionFailurePolicy + ", defaultCompletionMode=" + defaultCompletionMode + "}";
     }
 
     public static final class Builder {
 
         private Duration defaultTtl = Duration.ofHours(24);
-        private Duration defaultLockTimeout = Duration.ofSeconds(10);
+        private Duration defaultLeaseDuration = Duration.ofSeconds(30);
+        private Duration defaultWaitTimeout = Duration.ofSeconds(10);
+        private CompletionFailurePolicy completionFailurePolicy = CompletionFailurePolicy.PROPAGATE;
+        private CompletionMode defaultCompletionMode = CompletionMode.AUTONOMOUS;
 
         /**
          * Sets the default TTL for completed idempotency records.
@@ -99,29 +145,76 @@ public final class IdempotencyConfig {
         }
 
         /**
-         * Sets the default lock timeout for in-flight operations.
+         * Sets the default lease duration for an acquisition.
          *
-         * <p>A second caller arriving while the key is IN_PROGRESS will block
-         * for up to this duration waiting for a result. If the holder does not
-         * complete within this window, the second caller receives
-         * {@link AcquireResult.LockTimeout}.
+         * <p>The lease is how long this acquisition is protected. If the holder
+         * crashes without completing or releasing, the record becomes stealable
+         * once the lease expires, so this value sets the crash-detection window.
+         * The engine's heartbeat extends the lease at half this interval.
          *
-         * <p>This value is also the initial lock expiry for the holder — if the
-         * holder crashes without completing or releasing, the lock becomes
-         * stealable after this duration. The heartbeat extends the lock at
-         * half this interval, so this value effectively sets the crash-detection
-         * window as well.
-         *
-         * <p>Defaults to 10 seconds. Minimum is 2 ms (the engine divides by 2
+         * <p>Defaults to 30 seconds. Minimum is 2 ms (the engine divides by 2
          * for the heartbeat interval, so values below 2 ms are rejected).
          *
-         * @param timeout must be at least 2 ms
+         * @param leaseDuration must be at least 2 ms
          * @return this builder
-         * @throws IllegalArgumentException if {@code timeout} is less than 2 ms
          */
-        public Builder defaultLockTimeout(Duration timeout) {
-            Objects.requireNonNull(timeout, "defaultLockTimeout must not be null");
-            this.defaultLockTimeout = timeout;
+        public Builder defaultLeaseDuration(Duration leaseDuration) {
+            Objects.requireNonNull(leaseDuration, "defaultLeaseDuration must not be null");
+            this.defaultLeaseDuration = leaseDuration;
+            return this;
+        }
+
+        /**
+         * Sets the default wait timeout for an in-flight record.
+         *
+         * <p>A second caller arriving while the identity is IN_PROGRESS blocks
+         * inside the store for up to this duration waiting for a result. If the
+         * holder does not finish within this window, the second caller receives
+         * {@link AcquireResult.InFlight}.
+         *
+         * <p>{@link Duration#ZERO} is valid and means "do not block": the store
+         * returns {@code InFlight} on the first look. Defaults to 10 seconds.
+         *
+         * @param waitTimeout must not be negative
+         * @return this builder
+         */
+        public Builder defaultWaitTimeout(Duration waitTimeout) {
+            Objects.requireNonNull(waitTimeout, "defaultWaitTimeout must not be null");
+            this.defaultWaitTimeout = waitTimeout;
+            return this;
+        }
+
+        /**
+         * Sets what the engine does when the action ran but its completion could not be
+         * recorded.
+         *
+         * <p>Defaults to {@link CompletionFailurePolicy#PROPAGATE}. An HTTP adapter
+         * normally wants {@link CompletionFailurePolicy#LOG_AND_RETURN} instead, so a
+         * response the handler already produced still reaches the client.
+         *
+         * @param completionFailurePolicy the policy to apply
+         * @return this builder
+         */
+        public Builder completionFailurePolicy(CompletionFailurePolicy completionFailurePolicy) {
+            this.completionFailurePolicy =
+                    Objects.requireNonNull(completionFailurePolicy, "completionFailurePolicy must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the completion mode for an operation that does not choose one for itself.
+         *
+         * <p>Defaults to {@link CompletionMode#AUTONOMOUS}.
+         * {@link CompletionMode#JOIN_TRANSACTION} requires a store whose
+         * {@link IdempotencyStore#supportsTransactionalCompletion()} is {@code true}, and every
+         * operation that falls back to it must be entered inside an active transaction.
+         *
+         * @param defaultCompletionMode the mode to apply where none is specified
+         * @return this builder
+         */
+        public Builder defaultCompletionMode(CompletionMode defaultCompletionMode) {
+            this.defaultCompletionMode =
+                    Objects.requireNonNull(defaultCompletionMode, "defaultCompletionMode must not be null");
             return this;
         }
 
@@ -130,17 +223,21 @@ public final class IdempotencyConfig {
          *
          * @return a new immutable config instance
          * @throws IllegalArgumentException if any value fails validation
-         *         ({@code defaultTtl} must be positive; {@code defaultLockTimeout}
-         *         must be &ge; 2 ms)
+         *         ({@code defaultTtl} must be positive; {@code defaultLeaseDuration}
+         *         must be &ge; 2 ms; {@code defaultWaitTimeout} must not be negative)
          */
         public IdempotencyConfig build() {
             if (defaultTtl.toMillis() < 1) {
                 throw new IllegalArgumentException("defaultTtl must be at least 1ms, got: " + defaultTtl);
             }
-            if (defaultLockTimeout.toMillis() < 2) {
+            if (defaultLeaseDuration.toMillis() < 2) {
                 throw new IllegalArgumentException(
-                        "defaultLockTimeout must be at least 2ms (engine divides by 2 for heartbeat interval), got: "
-                                + defaultLockTimeout);
+                        "defaultLeaseDuration must be at least 2ms (engine divides by 2 for heartbeat interval), got: "
+                                + defaultLeaseDuration);
+            }
+            if (defaultWaitTimeout.isNegative()) {
+                throw new IllegalArgumentException(
+                        "defaultWaitTimeout must not be negative, got: " + defaultWaitTimeout);
             }
             return new IdempotencyConfig(this);
         }

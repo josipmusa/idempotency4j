@@ -17,25 +17,30 @@ package io.github.josipmusa.idempotency.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class IdempotencyEngineTest {
 
@@ -57,40 +62,163 @@ class IdempotencyEngineTest {
         scheduler.shutdownNow();
     }
 
-    private IdempotencyContext defaultContext(String key) {
-        return new IdempotencyContext(key, Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+    private static final String SCOPE = "TestScope.action";
+
+    private static IdempotencyIdentity identity(String key) {
+        return new IdempotencyIdentity(SCOPE, key);
     }
 
-    private StoredResponse anyStoredResponse() {
-        return new StoredResponse(
-                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes(), Instant.now());
+    private IdempotencyContext defaultContext(String key) {
+        return IdempotencyContext.builder(SCOPE, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .fingerprint("a".repeat(64))
+                .build();
     }
+
+    private long extendLockCalls() {
+        return mockingDetails(store).getInvocations().stream()
+                .filter(i -> "extendLock".equals(i.getMethod().getName()))
+                .count();
+    }
+
+    /**
+     * Blocks until the scheduler has run everything due within {@code delay}. The scheduler is
+     * single-threaded and ordered by due time, so once this returns no heartbeat that was due
+     * earlier can still be pending or in flight.
+     */
+    private void drainScheduler(Duration delay) throws Exception {
+        scheduler.schedule(() -> {}, delay.toMillis(), TimeUnit.MILLISECONDS).get(5, TimeUnit.SECONDS);
+    }
+
+    /** A codec for a plain string result, so the payload the engine stores is inspectable. */
+    private static final PayloadCodec<String> STRING_CODEC = new PayloadCodec<>() {
+        @Override
+        public Payload encode(String value) {
+            return new Payload("text/plain", value.getBytes(StandardCharsets.UTF_8), Map.of());
+        }
+
+        @Override
+        public String decode(Payload payload) {
+            return new String(payload.body(), StandardCharsets.UTF_8);
+        }
+    };
 
     @Test
     void When_NewKey_Expect_ReturnsExecuted() throws Exception {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        ExecutionResult result = engine.execute(defaultContext("new-key"), () -> {});
+        Outcome<Void> outcome = engine.execute(defaultContext("new-key"), () -> {});
 
-        assertThat(result).isInstanceOf(ExecutionResult.Executed.class);
-        assertThat(((ExecutionResult.Executed) result).leaseId()).isEqualTo(LEASE_ID);
+        assertThat(outcome).isEqualTo(new Outcome.Executed<Void>(null));
     }
 
     @Test
-    void When_CompletedKey_Expect_ReturnsDuplicate() throws Exception {
-        StoredResponse response = anyStoredResponse();
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(response));
+    void When_ActionReturnsValue_Expect_ExecutedWithValueAndRecordComplete() throws Exception {
+        IdempotencyContext context = defaultContext("value-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        ExecutionResult result = engine.execute(defaultContext("done-key"), () -> {});
+        Outcome<String> outcome = engine.execute(context, () -> "charged", STRING_CODEC);
 
-        assertThat(result).isInstanceOf(ExecutionResult.Duplicate.class);
-        ExecutionResult.Duplicate duplicate = (ExecutionResult.Duplicate) result;
-        assertThat(duplicate.payload()).isSameAs(response);
+        assertThat(outcome).isEqualTo(new Outcome.Executed<>("charged"));
+        verify(store).complete(identity("value-key"), LEASE_ID, STRING_CODEC.encode("charged"), context.ttl());
+    }
+
+    @Test
+    void When_Duplicate_Expect_ReplayedWithDecodedValue() throws Exception {
+        Instant completedAt = Instant.now();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(STRING_CODEC.encode("charged"), completedAt));
+
+        Outcome<String> outcome = engine.execute(defaultContext("done-key"), () -> "fresh", STRING_CODEC);
+
+        assertThat(outcome).isEqualTo(new Outcome.Replayed<>("charged", completedAt));
+        verify(store, never()).complete(any(), any(), any(), any());
+    }
+
+    @Test
+    void When_RunnableOverload_Expect_NonePayloadStored() throws Exception {
+        IdempotencyContext context = defaultContext("runnable-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+
+        engine.execute(context, () -> {});
+
+        verify(store).complete(identity("runnable-key"), LEASE_ID, Payload.none(), context.ttl());
+    }
+
+    @Test
+    void When_CompletionFailsWithPropagate_Expect_ExceptionAndOnFailedCompletion() {
+        IdempotencyContext context = defaultContext("propagate-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
+        doThrow(failure).when(store).complete(any(), any(), any(), any());
+        IdempotencyLifecycleListener listener = mock(IdempotencyLifecycleListener.class);
+        IdempotencyEngine propagating = new IdempotencyEngine(
+                store,
+                scheduler,
+                List.of(listener),
+                IdempotencyConfig.builder()
+                        .completionFailurePolicy(CompletionFailurePolicy.PROPAGATE)
+                        .build());
+
+        assertThatThrownBy(() -> propagating.execute(context, () -> "charged", STRING_CODEC))
+                .isSameAs(failure);
+
+        verify(listener).onFailed(context, LEASE_ID, failure, IdempotencyLifecycleListener.FailurePhase.COMPLETION);
+        verify(listener, never()).onCompleted(any(), any(), any());
+        verify(store, never()).release(any(), any());
+    }
+
+    @Test
+    void When_CompletionFailsWithLogAndReturn_Expect_ExecutedAndOnFailedCompletion() throws Exception {
+        IdempotencyContext context = defaultContext("log-and-return-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
+        doThrow(failure).when(store).complete(any(), any(), any(), any());
+        IdempotencyLifecycleListener listener = mock(IdempotencyLifecycleListener.class);
+        IdempotencyEngine lenient = new IdempotencyEngine(
+                store,
+                scheduler,
+                List.of(listener),
+                IdempotencyConfig.builder()
+                        .completionFailurePolicy(CompletionFailurePolicy.LOG_AND_RETURN)
+                        .build());
+
+        Outcome<String> outcome = lenient.execute(context, () -> "charged", STRING_CODEC);
+
+        assertThat(outcome).isEqualTo(new Outcome.Executed<>("charged"));
+        verify(listener).onFailed(context, LEASE_ID, failure, IdempotencyLifecycleListener.FailurePhase.COMPLETION);
+        verify(listener, never()).onCompleted(any(), any(), any());
+        verify(store, never()).release(any(), any());
+    }
+
+    @Test
+    void When_EncodingFails_Expect_TreatedAsCompletionFailure() {
+        IdempotencyContext context = defaultContext("encode-fail-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IllegalStateException failure = new IllegalStateException("cannot encode");
+        PayloadCodec<String> broken = new PayloadCodec<>() {
+            @Override
+            public Payload encode(String value) {
+                throw failure;
+            }
+
+            @Override
+            public String decode(Payload payload) {
+                throw new UnsupportedOperationException();
+            }
+        };
+
+        assertThatThrownBy(() -> engine.execute(context, () -> "charged", broken))
+                .isSameAs(failure);
+
+        verify(store, never()).complete(any(), any(), any(), any());
+        verify(store, never()).release(any(), any());
     }
 
     @Test
     void When_CompletedKey_Expect_ActionNotCalled() throws Exception {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(anyStoredResponse()));
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(Payload.none(), Instant.now()));
         AtomicInteger counter = new AtomicInteger(0);
 
         engine.execute(defaultContext("dup-key"), counter::incrementAndGet);
@@ -103,26 +231,20 @@ class IdempotencyEngineTest {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         String key = "fail-key";
 
-        try {
-            engine.execute(defaultContext(key), () -> {
-                throw new RuntimeException("boom");
-            });
-        } catch (Exception ignored) {
-        }
+        catchThrowable(() -> engine.execute(defaultContext(key), () -> {
+            throw new RuntimeException("boom");
+        }));
 
-        verify(store, times(1)).release(key, LEASE_ID);
+        verify(store, times(1)).release(identity(key), LEASE_ID);
     }
 
     @Test
     void When_ActionThrows_Expect_CompleteNeverCalled() {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        try {
-            engine.execute(defaultContext("fail-key"), () -> {
-                throw new RuntimeException("boom");
-            });
-        } catch (Exception ignored) {
-        }
+        catchThrowable(() -> engine.execute(defaultContext("fail-key"), () -> {
+            throw new RuntimeException("boom");
+        }));
 
         verify(store, never()).complete(any(), any(), any(), any());
     }
@@ -139,89 +261,114 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void When_LockTimeout_Expect_ThrowsLockTimeoutException() {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.lockTimeout("test-key"));
+    void When_InFlight_Expect_InFlightOutcomeAndActionNotRun() throws Exception {
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.inFlight(Duration.ofSeconds(3)));
+        AtomicInteger actionCalls = new AtomicInteger();
 
-        assertThatThrownBy(() -> engine.execute(defaultContext("test-key"), () -> {}))
-                .isInstanceOf(IdempotencyLockTimeoutException.class)
-                .satisfies(e -> {
-                    IdempotencyLockTimeoutException ex = (IdempotencyLockTimeoutException) e;
-                    assertThat(ex.getKey()).isEqualTo("test-key");
-                });
+        Outcome<Void> outcome = engine.execute(defaultContext("test-key"), actionCalls::incrementAndGet);
+
+        assertThat(outcome).isEqualTo(new Outcome.InFlight<Void>(Duration.ofSeconds(3)));
+        assertThat(actionCalls).hasValue(0);
     }
 
     @Test
-    void When_LongRunningAction_Expect_HeartbeatExtendsLock() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext("hb-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+    void When_LeaseTenSeconds_Expect_HeartbeatAtFiveSeconds() throws Exception {
+        ScheduledExecutorService mockScheduler = mock(ScheduledExecutorService.class);
+        when(mockScheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any()))
+                .thenReturn(mock(ScheduledFuture.class));
+        IdempotencyEngine engineOnMockScheduler = new IdempotencyEngine(store, mockScheduler);
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-interval-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(10))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        engine.execute(context, () -> Thread.sleep(300));
+        engineOnMockScheduler.execute(context, () -> {});
 
-        verify(store, atLeastOnce()).extendLock(eq("hb-key"), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+        ArgumentCaptor<Long> initialDelay = ArgumentCaptor.forClass(Long.class);
+        ArgumentCaptor<Long> period = ArgumentCaptor.forClass(Long.class);
+        verify(mockScheduler)
+                .scheduleAtFixedRate(any(), initialDelay.capture(), period.capture(), eq(TimeUnit.MILLISECONDS));
+        assertThat(initialDelay.getValue()).isEqualTo(5_000L);
+        assertThat(period.getValue()).isEqualTo(5_000L);
+    }
+
+    @Test
+    void When_LongRunningAction_Expect_HeartbeatExtendsLease() throws Exception {
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        CountDownLatch beats = new CountDownLatch(1);
+        doAnswer(invocation -> {
+                    beats.countDown();
+                    return null;
+                })
+                .when(store)
+                .extendLock(any(), any(), any());
+
+        // The action outlives the first heartbeat rather than a fixed sleep, so the test is
+        // deterministic regardless of how slow the machine running it is.
+        engine.execute(
+                context, () -> assertThat(beats.await(5, TimeUnit.SECONDS)).isTrue());
+        drainScheduler(Duration.ZERO);
+
+        verify(store, atLeastOnce()).extendLock(identity("hb-key"), LEASE_ID, Duration.ofMillis(100));
     }
 
     @Test
     void When_ActionCompletes_Expect_HeartbeatStops() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext("hb-stop-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-stop-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         engine.execute(context, () -> {});
 
-        // Wait briefly to let any in-flight heartbeat fire
-        Thread.sleep(50);
-        int countAfterExecute = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        // Let any in-flight heartbeat finish, then take the count
+        drainScheduler(Duration.ZERO);
+        long countAfterExecute = extendLockCalls();
 
-        // Wait 2x the heartbeat interval (50ms interval for 100ms lockTimeout)
-        Thread.sleep(100);
-        int countAfterWait = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        // Give the scheduler 4x the heartbeat interval (50ms for a 100ms lease) to fire again
+        drainScheduler(Duration.ofMillis(200));
 
-        assertThat(countAfterWait).isEqualTo(countAfterExecute);
+        assertThat(extendLockCalls()).isEqualTo(countAfterExecute);
     }
 
     @Test
     void When_ActionThrows_Expect_HeartbeatStops() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext("hb-throw-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-throw-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        try {
-            engine.execute(context, () -> {
-                throw new RuntimeException("fail");
-            });
-        } catch (Exception ignored) {
-        }
+        catchThrowable(() -> engine.execute(context, () -> {
+            throw new RuntimeException("fail");
+        }));
 
-        Thread.sleep(50);
-        int countAfterExecute = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        drainScheduler(Duration.ZERO);
+        long countAfterExecute = extendLockCalls();
 
-        Thread.sleep(100);
-        int countAfterWait = mockingDetails(store).getInvocations().stream()
-                .filter(i -> i.getMethod().getName().equals("extendLock"))
-                .toList()
-                .size();
+        drainScheduler(Duration.ofMillis(200));
 
-        assertThat(countAfterWait).isEqualTo(countAfterExecute);
+        assertThat(extendLockCalls()).isEqualTo(countAfterExecute);
     }
 
     @Test
-    void When_FingerprintMismatch_Expect_ThrowsFingerprintMismatchException() throws Exception {
+    void When_FingerprintMismatch_Expect_ThrowsFingerprintMismatchException() {
         IdempotencyContext context = defaultContext("fp-mismatch-key");
         when(store.tryAcquire(context)).thenReturn(AcquireResult.fingerprintMismatch("stored-hash", "received-hash"));
 
         assertThatThrownBy(() -> engine.execute(context, () -> {}))
                 .isInstanceOf(IdempotencyFingerprintMismatchException.class)
-                .hasMessageContaining("fp-mismatch-key")
+                .hasMessageContaining(context.identity().maskedKey())
+                .hasMessageNotContaining("fp-mismatch-key")
                 .hasMessageContaining("stored-hash")
                 .hasMessageContaining("received-hash");
     }
@@ -235,7 +382,7 @@ class IdempotencyEngineTest {
 
         engine.execute(context, () -> {});
 
-        verify(store).tryAcquire(eq(context));
+        verify(store).tryAcquire(context);
     }
 
     // --- Checked exception propagation ---
@@ -283,15 +430,26 @@ class IdempotencyEngineTest {
 
     @Test
     void When_HeartbeatExtendLockThrows_Expect_HeartbeatContinues() throws Exception {
-        IdempotencyContext context =
-                new IdempotencyContext("hb-error-key", Duration.ofHours(1), Duration.ofMillis(100), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "hb-error-key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofMillis(100))
+                .fingerprint("a".repeat(64))
+                .build();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
-        doThrow(new IdempotencyStoreException("connection lost")).when(store).extendLock(any(), any(), any());
+        CountDownLatch beats = new CountDownLatch(2);
+        doAnswer(invocation -> {
+                    beats.countDown();
+                    throw new IdempotencyStoreException("connection lost");
+                })
+                .when(store)
+                .extendLock(any(), any(), any());
 
-        engine.execute(context, () -> Thread.sleep(300));
+        engine.execute(
+                context, () -> assertThat(beats.await(5, TimeUnit.SECONDS)).isTrue());
+        drainScheduler(Duration.ZERO);
 
         // Heartbeat should have been called multiple times despite throwing each time
-        verify(store, atLeast(2)).extendLock(eq("hb-error-key"), eq(LEASE_ID), eq(Duration.ofMillis(100)));
+        verify(store, atLeast(2)).extendLock(identity("hb-error-key"), LEASE_ID, Duration.ofMillis(100));
     }
 
     @Test
@@ -304,6 +462,41 @@ class IdempotencyEngineTest {
                 .isInstanceOf(RejectedExecutionException.class);
 
         assertThat(actionCalls).hasValue(0);
-        verify(store).release("scheduler-rejected", LEASE_ID);
+        verify(store).release(identity("scheduler-rejected"), LEASE_ID);
+    }
+
+    @Test
+    void When_ActionSucceeds_Expect_CompleteUsesContextTtlAndLease() throws Exception {
+        IdempotencyContext context = defaultContext("complete-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+
+        engine.execute(context, () -> "charged", STRING_CODEC);
+
+        verify(store).complete(identity("complete-key"), LEASE_ID, STRING_CODEC.encode("charged"), context.ttl());
+    }
+
+    @Test
+    void When_StoreCompleteThrows_Expect_ExceptionPropagatesUnchanged() {
+        IdempotencyContext context = defaultContext("durability-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
+        doThrow(failure).when(store).complete(any(), any(), any(), any());
+
+        assertThatThrownBy(() -> engine.execute(context, () -> "charged", STRING_CODEC))
+                .isSameAs(failure);
+    }
+
+    @Test
+    void When_NullCodec_Expect_Rejected() {
+        assertThatThrownBy(() -> engine.execute(defaultContext("null-codec-key"), () -> "x", null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("codec");
+    }
+
+    @Test
+    void When_NullListeners_Expect_Rejected() {
+        assertThatThrownBy(() -> new IdempotencyEngine(store, scheduler, (List<IdempotencyLifecycleListener>) null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("listeners");
     }
 }

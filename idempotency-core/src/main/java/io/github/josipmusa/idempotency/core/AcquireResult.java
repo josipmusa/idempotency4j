@@ -15,6 +15,8 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Objects;
 
 /**
@@ -26,7 +28,7 @@ import java.util.Objects;
  * switch (store.tryAcquire(context)) {
  *     case AcquireResult.Acquired a   -> // run the action
  *     case AcquireResult.Duplicate d  -> // replay d.payload()
- *     case AcquireResult.LockTimeout t -> // timeout, reject request
+ *     case AcquireResult.InFlight f  -> // still running, reject and retry after f.retryAfter()
  *     case AcquireResult.FingerprintMismatch fm -> // reject: key reused with different body
  * }
  * }</pre>
@@ -34,12 +36,12 @@ import java.util.Objects;
 public sealed interface AcquireResult
         permits AcquireResult.Acquired,
                 AcquireResult.Duplicate,
-                AcquireResult.LockTimeout,
+                AcquireResult.InFlight,
                 AcquireResult.FingerprintMismatch {
 
     /**
-     * Lock obtained — this caller owns the key and should execute the action.
-     * The key is now IN_PROGRESS. The caller must eventually call either
+     * Lock obtained — this caller owns the identity and should execute the action.
+     * The record is now IN_PROGRESS. The caller must eventually call either
      * {@link IdempotencyStore#complete} or {@link IdempotencyStore#release}, passing
      * this lease ID so a stale owner cannot mutate a newer acquisition.
      */
@@ -53,24 +55,41 @@ public sealed interface AcquireResult
     }
 
     /**
-     * Key was already completed — carries the stored payload for replay.
-     * The action must NOT be executed again.
+     * Identity was already completed — carries the stored payload for replay, and when the
+     * original operation finished. The action must NOT be executed again.
+     *
+     * @param payload     what the original execution stored; {@link Payload#none()} when it
+     *                    had nothing to replay
+     * @param completedAt when the store recorded that completion
      */
-    record Duplicate(IdempotencyPayload payload) implements AcquireResult {
+    record Duplicate(Payload payload, Instant completedAt) implements AcquireResult {
         public Duplicate {
             Objects.requireNonNull(payload, "payload must not be null");
+            Objects.requireNonNull(completedAt, "completedAt must not be null");
         }
     }
 
     /**
-     * Key is in-flight (held by another caller) and this caller's
-     * {@code lockTimeout} expired while waiting. The action was not
+     * Identity is in-flight (held by another caller) and this caller's
+     * {@code waitTimeout} elapsed without the holder finishing. The action was not
      * executed. The caller should return an appropriate error (e.g. 409 or 503).
+     *
+     * <p>{@code retryAfter} is how much of the holder's lease was left when the store
+     * gave up — an upper bound on how long the identity can stay in-flight before it
+     * becomes stealable. It is never negative; a store that cannot tell reports
+     * {@link Duration#ZERO}.
      */
-    record LockTimeout(String key) implements AcquireResult {}
+    record InFlight(Duration retryAfter) implements AcquireResult {
+        public InFlight {
+            Objects.requireNonNull(retryAfter, "retryAfter must not be null");
+            if (retryAfter.isNegative()) {
+                throw new IllegalArgumentException("retryAfter must not be negative, got: " + retryAfter);
+            }
+        }
+    }
 
     /**
-     * Key was already completed and both the stored and the incoming request
+     * Identity was already completed and both the stored and the incoming request
      * carry a fingerprint, but the two differ. An HTTP adapter should return
      * 422 to indicate the key was reused with a different payload.
      *
@@ -83,12 +102,12 @@ public sealed interface AcquireResult
         return new Acquired(leaseId);
     }
 
-    static AcquireResult duplicate(IdempotencyPayload payload) {
-        return new Duplicate(payload);
+    static AcquireResult duplicate(Payload payload, Instant completedAt) {
+        return new Duplicate(payload, completedAt);
     }
 
-    static AcquireResult lockTimeout(String key) {
-        return new LockTimeout(key);
+    static AcquireResult inFlight(Duration retryAfter) {
+        return new InFlight(retryAfter);
     }
 
     static AcquireResult fingerprintMismatch(String storedFingerprint, String receivedFingerprint) {

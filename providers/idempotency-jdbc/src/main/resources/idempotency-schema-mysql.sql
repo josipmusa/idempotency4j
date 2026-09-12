@@ -1,16 +1,15 @@
 CREATE TABLE IF NOT EXISTS idempotency_records (
+    scope             VARCHAR(128)  NOT NULL,
     idempotency_key   VARCHAR(255)  NOT NULL,
-    status            VARCHAR(20)   NOT NULL,
-    locked_at         TIMESTAMP(6)  NULL,
-    lock_expires_at   TIMESTAMP(6)  NULL,
-    response_code     INT           NULL,
-    response_headers  TEXT          NULL,
-    response_body     MEDIUMBLOB    NULL,
-    request_fingerprint VARCHAR(255) NULL,
+    status            VARCHAR(12)   NOT NULL,
     lease_id          VARCHAR(36)   NULL,
-    lock_timeout_ms   BIGINT        NOT NULL DEFAULT 0,
-    completed_at      TIMESTAMP(6)  NULL,
+    lease_expires_at  TIMESTAMP(6)  NULL,
+    fingerprint       VARCHAR(128)  NULL,
+    payload_type      VARCHAR(255)  NULL,
+    payload           MEDIUMBLOB    NULL,
+    attributes        TEXT          NULL,
     created_at        TIMESTAMP(6)  DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
-    expires_at        TIMESTAMP(6)  NULL,
-    PRIMARY KEY (idempotency_key)
+    completed_at      TIMESTAMP(6)  NULL,
+    expires_at        TIMESTAMP(6)  NOT NULL,
+    PRIMARY KEY (scope, idempotency_key)
 );

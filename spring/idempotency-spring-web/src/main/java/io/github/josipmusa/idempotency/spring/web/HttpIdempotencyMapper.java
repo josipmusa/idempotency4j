@@ -15,10 +15,9 @@
  */
 package io.github.josipmusa.idempotency.spring.web;
 
-import io.github.josipmusa.idempotency.core.StoredResponse;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -58,15 +57,13 @@ final class HttpIdempotencyMapper {
     private HttpIdempotencyMapper() {}
 
     /**
-     * Snapshots what the handler wrote, ready for storage.
+     * Snapshots what the handler wrote, ready for encoding and storage.
      *
-     * @param response   the wrapper that buffered the handler's output
-     * @param completedAt when the request finished
+     * @param response the wrapper that buffered the handler's output
      * @return the captured response
      */
-    static StoredResponse capture(ContentCachingResponseWrapper response, Instant completedAt) {
-        return new StoredResponse(
-                response.getStatus(), collectHeaders(response), response.getContentAsByteArray(), completedAt);
+    static StoredResponse capture(ContentCachingResponseWrapper response) {
+        return new StoredResponse(response.getStatus(), collectHeaders(response), response.getContentAsByteArray());
     }
 
     /**
@@ -103,6 +100,26 @@ final class HttpIdempotencyMapper {
     static void replayEmpty(HttpServletResponse response) {
         response.setStatus(HttpServletResponse.SC_NO_CONTENT);
         markReplayed(response);
+    }
+
+    /**
+     * Rejects a request whose key another caller is still holding.
+     *
+     * <p>{@code Retry-After} carries the holder's remaining lease in whole seconds, rounded
+     * up so a client never retries before the key could possibly be free, and floored at 1
+     * so a store that cannot tell still gets a usable hint rather than an immediate retry.
+     *
+     * @param response   the response to write to
+     * @param status     the configured in-flight status
+     * @param retryAfter the holder's remaining lease
+     * @param message    the human-readable error message
+     * @throws IOException if the body cannot be written
+     */
+    static void writeInFlight(HttpServletResponse response, int status, Duration retryAfter, String message)
+            throws IOException {
+        long seconds = Math.max(1, (retryAfter.toMillis() + 999) / 1000);
+        response.setHeader("Retry-After", Long.toString(seconds));
+        writeJsonError(response, status, message);
     }
 
     /**

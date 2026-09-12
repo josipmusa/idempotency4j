@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.Payload;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyForeignRecordException;
@@ -37,7 +37,6 @@ import io.lettuce.core.protocol.CommandType;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -95,8 +94,13 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         return new RedisIdempotencyStore(connection);
     }
 
-    private IdempotencyContext context(String key, Duration ttl, Duration lockTimeout) {
-        return new IdempotencyContext(key, ttl, lockTimeout, FINGERPRINT_DEFAULT);
+    private IdempotencyContext context(String key, Duration ttl, Duration duration) {
+        return IdempotencyContext.builder(SCOPE_DEFAULT, key)
+                .ttl(ttl)
+                .leaseDuration(duration)
+                .waitTimeout(duration)
+                .fingerprint(FINGERPRINT_DEFAULT)
+                .build();
     }
 
     @Test
@@ -118,11 +122,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         // must fall back to EVAL rather than surfacing the error.
         commands.scriptFlush();
 
-        assertThatCode(() -> complete(
-                        s,
-                        "script-cache-key",
-                        new StoredResponse(200, Map.of(), "body".getBytes(), Instant.now()),
-                        Duration.ofHours(1)))
+        assertThatCode(() -> complete(s, "script-cache-key", payloadWithBody("body"), Duration.ofHours(1)))
                 .doesNotThrowAnyException();
         assertThat(acquire(s, contextFor("script-cache-key"))).isInstanceOf(AcquireResult.Duplicate.class);
     }
@@ -142,24 +142,27 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
         acquire(s, contextFor("prefixed-key"));
 
-        assertThat(commands.exists("tenant-a:rec:prefixed-key")).isEqualTo(1);
-        assertThat(commands.exists("idempotency4j:rec:prefixed-key")).isZero();
+        assertThat(commands.exists("tenant-a:rec:" + SCOPE_DEFAULT + ":prefixed-key"))
+                .isEqualTo(1);
+        assertThat(commands.exists("idempotency4j:rec:" + SCOPE_DEFAULT + ":prefixed-key"))
+                .isZero();
     }
 
     @Test
     void When_RecordWritten_Expect_OwnershipAndFormatMarkersPresent() {
         acquire(store(), contextFor("owned-record"));
 
-        Map<String, byte[]> record = commands.hgetall("idempotency4j:rec:owned-record");
-        assertThat(new String(record.get("owner"), StandardCharsets.UTF_8))
+        Map<String, byte[]> idempotencyRecord =
+                commands.hgetall("idempotency4j:rec:" + SCOPE_DEFAULT + ":owned-record");
+        assertThat(new String(idempotencyRecord.get("owner"), StandardCharsets.UTF_8))
                 .isEqualTo(RedisIdempotencyStore.RECORD_OWNER);
-        assertThat(new String(record.get("formatVersion"), StandardCharsets.UTF_8))
+        assertThat(new String(idempotencyRecord.get("formatVersion"), StandardCharsets.UTF_8))
                 .isEqualTo(RedisIdempotencyStore.FORMAT_VERSION);
     }
 
     @Test
     void When_ForeignStringUsesRecordKey_Expect_AcquireFailsWithoutMutation() {
-        String redisKey = "idempotency4j:rec:foreign-string";
+        String redisKey = "idempotency4j:rec:" + SCOPE_DEFAULT + ":foreign-string";
         byte[] original = "another application".getBytes(StandardCharsets.UTF_8);
         commands.set(redisKey, original);
 
@@ -171,8 +174,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
     @Test
     void When_ForeignRecordsMatchScanPattern_Expect_PurgeSkipsThem() {
-        String foreignString = "shared:rec:foreign-string";
-        String foreignHash = "shared:rec:foreign-hash";
+        String foreignString = "shared:rec:" + SCOPE_DEFAULT + ":foreign-string";
+        String foreignHash = "shared:rec:" + SCOPE_DEFAULT + ":foreign-hash";
         String unrelatedIndex = "shared:idx";
         commands.set(foreignString, "value".getBytes(StandardCharsets.UTF_8));
         commands.hset(foreignHash, "status", "COMPLETE".getBytes(StandardCharsets.UTF_8));
@@ -186,10 +189,10 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
 
     @Test
     void When_OwnedRecordUsesUnsupportedFormat_Expect_FailsClosed() {
-        String redisKey = "idempotency4j:rec:future-format";
+        String redisKey = "idempotency4j:rec:" + SCOPE_DEFAULT + ":future-format";
         commands.hset(redisKey, "owner", RedisIdempotencyStore.RECORD_OWNER.getBytes(StandardCharsets.UTF_8));
         commands.hset(redisKey, "formatVersion", "999".getBytes(StandardCharsets.US_ASCII));
-        commands.hset(redisKey, "status", "FAILED".getBytes(StandardCharsets.UTF_8));
+        commands.hset(redisKey, "status", "IN_PROGRESS".getBytes(StandardCharsets.UTF_8));
 
         assertThatThrownBy(() -> store().tryAcquire(contextFor("future-format")))
                 .isInstanceOf(IdempotencyCorruptRecordException.class)
@@ -218,7 +221,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         // The native TTL is the backstop that reclaims memory when purgeExpired() never
         // runs. It must trail logical expiry, otherwise Redis would delete records before
         // purgeExpired() could account for them.
-        assertThat(commands.pttl("idempotency4j:rec:native-ttl-key")).isGreaterThan(ttl.toMillis());
+        assertThat(commands.pttl("idempotency4j:rec:" + SCOPE_DEFAULT + ":native-ttl-key"))
+                .isGreaterThan(ttl.toMillis());
     }
 
     @Test
@@ -228,29 +232,27 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         byte[] binary = new byte[] {0, -1, -128, 127, 65, 0, -17, -69, -65};
 
         acquire(s, contextFor(key));
-        complete(s, key, new StoredResponse(200, Map.of(), binary, Instant.now()), Duration.ofHours(1));
+        complete(s, key, new Payload(PAYLOAD_TYPE, binary, Map.of()), Duration.ofHours(1));
 
         AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        assertThat(storedResponseOf(result).body()).isEqualTo(binary);
+        assertThat(payloadOf(result).body()).isEqualTo(binary);
     }
 
     @Test
-    void When_EmptyResponseBody_Expect_ReplayedAsEmpty() {
+    void When_EmptyPayloadBody_Expect_ReplayedAsEmpty() {
         IdempotencyStore s = store();
         String key = "empty-body-key";
+        Payload payload = new Payload(PAYLOAD_TYPE, new byte[0], Map.of("status", "204"));
 
         acquire(s, contextFor(key));
-        complete(s, key, new StoredResponse(204, Map.of(), new byte[0], Instant.now()), Duration.ofHours(1));
+        complete(s, key, payload, Duration.ofHours(1));
 
         AcquireResult result = acquire(s, contextFor(key));
 
         assertThat(result).isInstanceOf(AcquireResult.Duplicate.class);
-        StoredResponse replayed = storedResponseOf(result);
-        assertThat(replayed.statusCode()).isEqualTo(204);
-        assertThat(replayed.body()).isEmpty();
-        assertThat(replayed.headers()).isEmpty();
+        assertThat(payloadOf(result)).isEqualTo(payload);
     }
 
     @Test
@@ -258,10 +260,11 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         IdempotencyStore s = store();
         acquire(s, context("purge-orphan-key", Duration.ofMillis(10), Duration.ofMillis(2)));
 
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
         assertThat(s.purgeExpired()).isEqualTo(1);
 
-        assertThat(commands.exists("idempotency4j:rec:purge-orphan-key")).isZero();
+        assertThat(commands.exists("idempotency4j:rec:" + SCOPE_DEFAULT + ":purge-orphan-key"))
+                .isZero();
     }
 
     @Test
@@ -275,7 +278,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
                         .build());
         acquire(s, context("orphan-index-key", Duration.ofMillis(10), Duration.ofMillis(2)));
 
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
 
         assertThat(s.purgeExpired())
                 .as("A record already reclaimed by Redis is not counted as a purge deletion")
@@ -292,7 +295,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
             acquire(s, context("batched-key-" + i, Duration.ofMillis(10), Duration.ofMillis(2)));
         }
 
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
 
         assertThat(s.purgeExpired()).isEqualTo(10);
         assertThat(commands.keys("idempotency4j:rec:*")).isEmpty();
@@ -310,7 +313,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         for (int i = 0; i < 100; i++) {
             acquire(s, context("bounded-key-" + i, Duration.ofMillis(10), Duration.ofMillis(2)));
         }
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
 
         int total = s.purgeExpired();
         assertThat(total).isLessThan(100);
@@ -328,7 +331,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         acquire(s, context("glob-key", Duration.ofMillis(10), Duration.ofMillis(2)));
         commands.set("tenantX:unrelated", "value".getBytes());
 
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
 
         assertThat(s.purgeExpired()).isEqualTo(1);
         assertThat(commands.exists("tenantX:unrelated")).isEqualTo(1);
@@ -337,43 +340,48 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
     @Test
     void When_ExtendLockCalled_Expect_PurgeKeepsRecord() throws InterruptedException {
         IdempotencyStore s = store();
-        // TTL is shorter than the extended lock, so purge must use both timestamps.
+        // The lock now outlives the record's TTL. The holder still owns the key, so neither
+        // the native PEXPIRE nor the purge script may drop it.
         acquire(s, context("extend-rescore-key", Duration.ofMillis(10), Duration.ofMillis(10)));
         extendLock(s, "extend-rescore-key", Duration.ofSeconds(30));
 
-        Thread.sleep(50);
+        sleepFor(Duration.ofMillis(50));
 
         assertThat(s.purgeExpired()).isZero();
-        assertThat(commands.exists("idempotency4j:rec:extend-rescore-key")).isEqualTo(1);
+        assertThat(commands.exists("idempotency4j:rec:" + SCOPE_DEFAULT + ":extend-rescore-key"))
+                .isEqualTo(1);
     }
 
     @Test
-    void When_HeadersContainMultipleValues_Expect_AllReplayed() {
+    void When_AttributeValueContainsJsonSyntax_Expect_ReplayedVerbatim() {
         IdempotencyStore s = store();
-        String key = "multi-header-key";
-        Map<String, List<String>> headers = Map.of("Set-Cookie", List.of("a=1", "b=2"), "X-Trace", List.of("t-1"));
+        String key = "json-attribute-key";
+        Map<String, String> attributes = Map.of("headers", "{\"Set-Cookie\":[\"a=1\",\"b=2\"]}", "X-Trace", "t-1");
 
         acquire(s, contextFor(key));
-        complete(s, key, new StoredResponse(201, headers, "ok".getBytes(), Instant.now()), Duration.ofHours(1));
+        complete(s, key, new Payload(PAYLOAD_TYPE, "ok".getBytes(), attributes), Duration.ofHours(1));
 
         AcquireResult result = acquire(s, contextFor(key));
 
-        assertThat(storedResponseOf(result).headers()).isEqualTo(headers);
+        assertThat(payloadOf(result).attributes()).isEqualTo(attributes);
     }
 
     @Test
-    void When_StoredResponseIsMalformed_Expect_StoreExceptionInsteadOfCodecFailure() {
+    void When_StoredPayloadIsMalformed_Expect_StoreExceptionInsteadOfCodecFailure() {
         long future = Instant.now().plus(Duration.ofHours(1)).toEpochMilli();
-        String record = "idempotency4j:rec:malformed-response";
-        commands.hset(record, "owner", RedisIdempotencyStore.RECORD_OWNER.getBytes(StandardCharsets.UTF_8));
-        commands.hset(record, "formatVersion", RedisIdempotencyStore.FORMAT_VERSION.getBytes(StandardCharsets.UTF_8));
-        commands.hset(record, "status", "COMPLETE".getBytes(StandardCharsets.UTF_8));
-        commands.hset(record, "expiresAt", Long.toString(future).getBytes(StandardCharsets.US_ASCII));
-        commands.hset(record, "fingerprint", FINGERPRINT_DEFAULT.getBytes(StandardCharsets.UTF_8));
-        commands.hset(record, "code", "not-a-number".getBytes(StandardCharsets.US_ASCII));
-        commands.hset(record, "headers", "{}".getBytes(StandardCharsets.UTF_8));
-        commands.hset(record, "body", new byte[0]);
-        commands.hset(record, "completedAt", "0".getBytes(StandardCharsets.US_ASCII));
+        String idempotencyRecord = "idempotency4j:rec:" + SCOPE_DEFAULT + ":malformed-response";
+        commands.hset(idempotencyRecord, "owner", RedisIdempotencyStore.RECORD_OWNER.getBytes(StandardCharsets.UTF_8));
+        commands.hset(
+                idempotencyRecord,
+                "formatVersion",
+                RedisIdempotencyStore.FORMAT_VERSION.getBytes(StandardCharsets.UTF_8));
+        commands.hset(idempotencyRecord, "status", "COMPLETE".getBytes(StandardCharsets.UTF_8));
+        commands.hset(idempotencyRecord, "expiresAt", Long.toString(future).getBytes(StandardCharsets.US_ASCII));
+        commands.hset(idempotencyRecord, "fingerprint", FINGERPRINT_DEFAULT.getBytes(StandardCharsets.UTF_8));
+        commands.hset(idempotencyRecord, "payload_type", "test/sample".getBytes(StandardCharsets.UTF_8));
+        commands.hset(idempotencyRecord, "payload", new byte[0]);
+        commands.hset(idempotencyRecord, "attributes", "not-json".getBytes(StandardCharsets.UTF_8));
+        commands.hset(idempotencyRecord, "completedAt", "0".getBytes(StandardCharsets.US_ASCII));
 
         assertThatThrownBy(() -> store().tryAcquire(contextFor("malformed-response")))
                 .isInstanceOf(IdempotencyCorruptRecordException.class)
@@ -389,7 +397,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         AcquireResult result = s.tryAcquire(context("fixed-busy", Duration.ofHours(1), Duration.ofMillis(20)));
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 
-        assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+        assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
         assertThat(elapsedMs).isBetween(20L, 250L);
     }
 
@@ -398,27 +406,18 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         IdempotencyStore s = store();
         String key = "deadline-boundary";
         var first = (AcquireResult.Acquired) s.tryAcquire(contextFor(key));
-        var executor = Executors.newSingleThreadExecutor();
-        try {
+        try (var executor = Executors.newSingleThreadExecutor()) {
             var completion = executor.submit(() -> {
-                try {
-                    Thread.sleep(30);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                s.complete(
-                        key,
-                        first.leaseId(),
-                        new StoredResponse(200, Map.of(), new byte[0], Instant.now()),
-                        Duration.ofHours(1));
+                // Complete only after the waiter's 10ms deadline has already passed
+                sleepFor(Duration.ofMillis(30));
+                s.complete(identity(key), first.leaseId(), Payload.none(), Duration.ofHours(1));
+                return null;
             });
 
             AcquireResult result = s.tryAcquire(context(key, Duration.ofHours(1), Duration.ofMillis(10)));
 
-            assertThat(result).isInstanceOf(AcquireResult.LockTimeout.class);
+            assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
             completion.get(1, TimeUnit.SECONDS);
-        } finally {
-            executor.shutdownNow();
         }
     }
 
@@ -447,14 +446,14 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
                         .keyPrefix("uncertain:")
                         .replicaAcknowledgement(RedisReplicaAcknowledgement.require(1, Duration.ofMillis(10)))
                         .build());
-        StoredResponse response = new StoredResponse(201, Map.of(), "saved".getBytes(), Instant.now());
+        Payload payload = payloadWithBody("saved");
 
-        assertThatThrownBy(() -> acknowledged.complete(key, acquired.leaseId(), response, Duration.ofHours(1)))
+        assertThatThrownBy(() -> acknowledged.complete(identity(key), acquired.leaseId(), payload, Duration.ofHours(1)))
                 .isInstanceOf(IdempotencyDurabilityException.class);
 
         AcquireResult retry = normal.tryAcquire(contextFor(key));
         assertThat(retry).isInstanceOf(AcquireResult.Duplicate.class);
-        assertThat(storedResponseOf(retry).body()).isEqualTo("saved".getBytes());
+        assertThat(payloadOf(retry).body()).isEqualTo("saved".getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -468,7 +467,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
                 if (System.nanoTime() >= deadline) {
                     throw new AssertionError("Redis replica did not connect within 10 seconds");
                 }
-                Thread.sleep(25);
+                sleepFor(Duration.ofMillis(25));
             }
 
             IdempotencyStore s = new RedisIdempotencyStore(
@@ -516,11 +515,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
             IdempotencyStore restrictedStore = new RedisIdempotencyStore(restrictedConnection, "acl-safe:");
             String key = "lifecycle";
             var acquired = (AcquireResult.Acquired) restrictedStore.tryAcquire(contextFor(key));
-            restrictedStore.complete(
-                    key,
-                    acquired.leaseId(),
-                    new StoredResponse(200, Map.of(), "ok".getBytes(), Instant.now()),
-                    Duration.ofMillis(10));
+            restrictedStore.complete(identity(key), acquired.leaseId(), payloadWithBody("ok"), Duration.ofMillis(10));
 
             assertThat(restrictedStore.tryAcquire(contextFor(key))).isInstanceOf(AcquireResult.Duplicate.class);
             assertThatCode(restrictedStore::purgeExpired).doesNotThrowAnyException();

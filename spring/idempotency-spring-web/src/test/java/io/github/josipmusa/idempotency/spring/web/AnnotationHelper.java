@@ -15,31 +15,69 @@
  */
 package io.github.josipmusa.idempotency.spring.web;
 
+import io.github.josipmusa.idempotency.spring.Idempotent;
 import java.lang.annotation.Annotation;
 
 class AnnotationHelper {
 
     private AnnotationHelper() {}
 
-    static Idempotent annotation(boolean required) {
-        return annotation(required, "", "");
+    static Idempotent annotation() {
+        return annotation("", "", "");
     }
 
-    static Idempotent annotation(boolean required, String ttl, String lockTimeout) {
+    static Idempotent annotation(String ttl, String lease) {
+        return annotation(ttl, lease, "");
+    }
+
+    static Idempotent annotation(String ttl, String lease, String waitTimeout) {
+        return annotation(ttl, lease, waitTimeout, "");
+    }
+
+    static Idempotent annotation(String ttl, String lease, String waitTimeout, String scope) {
+        return annotation(ttl, lease, waitTimeout, scope, "", "", "");
+    }
+
+    static Idempotent methodOnlyAttributes(String key, String codec, String completion) {
+        return annotation("", "", "", "", key, codec, completion);
+    }
+
+    static Idempotent annotation(
+            String ttl, String lease, String waitTimeout, String scope, String key, String codec, String completion) {
         return new Idempotent() {
+            @Override
+            public String key() {
+                return key;
+            }
+
+            @Override
+            public String scope() {
+                return scope;
+            }
+
             @Override
             public String ttl() {
                 return ttl;
             }
 
             @Override
-            public String lockTimeout() {
-                return lockTimeout;
+            public String lease() {
+                return lease;
             }
 
             @Override
-            public boolean required() {
-                return required;
+            public String waitTimeout() {
+                return waitTimeout;
+            }
+
+            @Override
+            public String completion() {
+                return completion;
+            }
+
+            @Override
+            public String codec() {
+                return codec;
             }
 
             @Override

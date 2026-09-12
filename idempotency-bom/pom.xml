@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.github.josipmusa</groupId>
         <artifactId>idempotency4j</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
+        <version>0.3.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -43,6 +43,11 @@
             <dependency>
                 <groupId>io.github.josipmusa</groupId>
                 <artifactId>idempotency-test</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.josipmusa</groupId>
+                <artifactId>idempotency-spring</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

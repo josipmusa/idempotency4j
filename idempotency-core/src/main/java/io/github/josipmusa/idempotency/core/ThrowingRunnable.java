@@ -25,5 +25,9 @@ package io.github.josipmusa.idempotency.core;
  */
 @FunctionalInterface
 public interface ThrowingRunnable {
+
+    // S112: declaring the broad type is deliberate - this interface exists to stay transparent
+    // to whatever the caller's business logic throws, so it cannot narrow to a library type.
+    @SuppressWarnings("java:S112")
     void run() throws Exception;
 }

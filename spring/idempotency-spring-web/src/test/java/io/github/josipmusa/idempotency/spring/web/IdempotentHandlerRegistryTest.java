@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
+import io.github.josipmusa.idempotency.spring.Idempotent;
 import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.Map;
@@ -43,7 +44,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_InvalidTtl_Expect_ThrowsIllegalStateException() {
-        setupHandler(AnnotationHelper.annotation(true, "2h", ""));
+        setupHandler(AnnotationHelper.annotation("2h", ""));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
                 .isInstanceOf(IllegalStateException.class)
@@ -52,37 +53,88 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
-    void When_InvalidLockTimeout_Expect_ThrowsIllegalStateException() {
-        setupHandler(AnnotationHelper.annotation(true, "", "10s"));
+    void When_InvalidLease_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.annotation("", "10s"));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("@Idempotent(lockTimeout = \"10s\")")
+                .hasMessageContaining("@Idempotent(lease = \"10s\")")
                 .hasMessageContaining("PT");
     }
 
     @Test
+    void When_InvalidWaitTimeout_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.annotation("", "", "3s"));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(waitTimeout = \"3s\")")
+                .hasMessageContaining("PT");
+    }
+
+    @Test
+    void When_HandlerDeclaresKey_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.methodOnlyAttributes("#body.id()", "", ""));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(key = \"#body.id()\")")
+                .hasMessageContaining("the key comes from the request header");
+    }
+
+    @Test
+    void When_HandlerDeclaresCodec_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.methodOnlyAttributes("", "receiptCodec", ""));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(codec = \"receiptCodec\")");
+    }
+
+    @Test
+    void When_HandlerDeclaresCompletion_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.methodOnlyAttributes("", "", "join-transaction"));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(completion = \"join-transaction\")");
+    }
+
+    @Test
     void When_ValidAnnotation_Expect_ResolvesCorrectDurations() {
-        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "PT2H", "PT30S"));
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("PT2H", "PT30S", "PT0S"));
         registry.afterSingletonsInstantiated();
 
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
 
         assertThat(resolved).isNotNull();
         assertThat(resolved.ttl()).isEqualTo(Duration.ofHours(2));
-        assertThat(resolved.lockTimeout()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(resolved.lease()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(resolved.waitTimeout()).isZero();
+    }
+
+    @Test
+    void When_LeaseAndWaitDiffer_Expect_BothResolvedIndependently() {
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("", "PT5M", "PT2S"));
+        registry.afterSingletonsInstantiated();
+
+        ResolvedIdempotent resolved = registry.resolve(handlerMethod);
+
+        assertThat(resolved.lease()).isEqualTo(Duration.ofMinutes(5));
+        assertThat(resolved.waitTimeout()).isEqualTo(Duration.ofSeconds(2));
     }
 
     @Test
     void When_EmptyDurations_Expect_FallBackToConfigDefaults() {
-        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "", ""));
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("", ""));
         registry.afterSingletonsInstantiated();
 
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
 
         assertThat(resolved.ttl()).isEqualTo(IdempotencyConfig.defaults().defaultTtl());
-        assertThat(resolved.lockTimeout())
-                .isEqualTo(IdempotencyConfig.defaults().defaultLockTimeout());
+        assertThat(resolved.lease()).isEqualTo(IdempotencyConfig.defaults().defaultLeaseDuration());
+        assertThat(resolved.waitTimeout())
+                .isEqualTo(IdempotencyConfig.defaults().defaultWaitTimeout());
     }
 
     @Test
@@ -90,18 +142,66 @@ class IdempotentHandlerRegistryTest {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(null);
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        Method mockedMethod = mock(Method.class);
+        when(handlerMethod.getMethod()).thenReturn(mockedMethod);
 
         registry.afterSingletonsInstantiated();
 
         assertThat(registry.resolve(handlerMethod)).isNull();
     }
 
+    @Test
+    void When_Resolved_Expect_ScopeIsSimpleClassNameAndMethodName() {
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(), PaymentController.class, "create");
+        registry.afterSingletonsInstantiated();
+
+        ResolvedIdempotent resolved = registry.resolve(handlerMethod);
+
+        assertThat(resolved.scope()).isEqualTo("PaymentController.create");
+    }
+
+    @Test
+    void When_ScopeExceedsMaxLength_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.annotation(), PaymentController.class, "m".repeat(128));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scope")
+                .hasMessageContaining("128");
+    }
+
+    @Test
+    void When_ScopeSetOnAnnotation_Expect_UsedInsteadOfHandlerName() {
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("", "", "", "payments.create"));
+        registry.afterSingletonsInstantiated();
+
+        assertThat(registry.resolve(handlerMethod).scope()).isEqualTo("payments.create");
+    }
+
+    @Test
+    void When_ScopeContainsColon_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.annotation("", "", "", "payments:create"));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scope")
+                .hasMessageContaining("':'");
+    }
+
     private HandlerMethod setupHandler(Idempotent annotation) {
+        return setupHandler(annotation, PaymentController.class, "create");
+    }
+
+    private HandlerMethod setupHandler(Idempotent annotation, Class<?> beanType, String methodName) {
         HandlerMethod handlerMethod = mock(HandlerMethod.class);
         when(handlerMethod.getMethodAnnotation(Idempotent.class)).thenReturn(annotation);
         when(handlerMapping.getHandlerMethods()).thenReturn(Map.of(mock(RequestMappingInfo.class), handlerMethod));
-        when(handlerMethod.getMethod()).thenReturn(mock(Method.class));
+        Method method = mock(Method.class);
+        when(method.getName()).thenReturn(methodName);
+        when(handlerMethod.getMethod()).thenReturn(method);
+        doReturn(beanType).when(handlerMethod).getBeanType();
         return handlerMethod;
     }
+
+    static class PaymentController {}
 }

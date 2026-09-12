@@ -32,6 +32,7 @@ import java.time.Duration;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -40,8 +41,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @Testcontainers
 class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
 
+    // The image default max_allowed_packet is 1 MiB, which a payload of that size cannot fit
+    // inside once the rest of the statement is added. 64 MiB is MySQL 8's own default for a
+    // server that is not running under the image's minimal config.
     @Container
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0").withDatabaseName("idempotency_test");
+    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0")
+            .withDatabaseName("idempotency_test")
+            .withCommand("mysqld", "--max-allowed-packet=67108864");
 
     private static DataSource dataSource;
 
@@ -74,31 +80,29 @@ class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
     }
 
     @Test
-    void When_ExistingSchemaPredatesLeaseFencing_Expect_ColumnMigratedAutomatically() throws SQLException {
-        try (Connection conn = dataSource.getConnection();
-                Statement stmt = conn.createStatement()) {
-            stmt.execute("ALTER TABLE idempotency_records DROP COLUMN lease_id");
-        }
-
-        new JdbcIdempotencyStore(dataSource, true);
-
-        try (Connection conn = dataSource.getConnection();
-                Statement stmt = conn.createStatement()) {
-            assertThatCode(() -> stmt.executeQuery("SELECT lease_id FROM idempotency_records WHERE 1 = 0"))
-                    .doesNotThrowAnyException();
-        }
-    }
-
-    @Test
     void When_ConnectionExhausted_Expect_ThrowsIdempotencyStoreException() throws Exception {
         DataSource exhaustedDs = mock(DataSource.class);
         when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
 
         JdbcIdempotencyStore failingStore = new JdbcIdempotencyStore(exhaustedDs, false);
-        IdempotencyContext context =
-                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE_DEFAULT, "key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .fingerprint("a".repeat(64))
+                .build();
 
         assertThatThrownBy(() -> failingStore.tryAcquire(context))
                 .isInstanceOf(IdempotencyStoreUnavailableException.class);
+    }
+
+    /** The transactional half of the store contract, on the same container. */
+    @Nested
+    class TransactionalCompletion extends JdbcTransactionalStoreContract {
+
+        @Override
+        protected DataSource dataSource() {
+            return dataSource;
+        }
     }
 }
