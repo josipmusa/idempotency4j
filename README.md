@@ -141,7 +141,7 @@ two endpoints is two independent records.
 </picture>
 
 The blocking happens inside the store, not in the engine. A concurrent duplicate waits inside
-`tryAcquire` for the holder to finish and only surfaces as `503` once its `wait` elapses, which
+`tryAcquire` for the holder to finish and only surfaces as `409` once its `wait` elapses, which
 is why a duplicate arriving mid-flight usually gets the real response rather than an error. A
 caller that must not block - a message listener on a consumer thread - sets `wait` to zero and is
 told the record is in flight straight away.
@@ -165,8 +165,8 @@ Responsibilities are split across three layers, and the boundaries are enforced 
 
 | Layer | Module | Owns |
 |---|---|---|
-| Engine | `idempotency-core` | Orchestration, heartbeat, release on failure. No HTTP types. Never calls `complete` |
-| Adapter | `spring/idempotency-spring-web` | Servlet capture and replay, error mapping, calling `complete` with the engine's lease |
+| Engine | `idempotency-core` | The whole lifecycle: acquire, heartbeat, run, encode, complete, release on failure. No HTTP types |
+| Adapter | `spring/idempotency-spring-web` | Servlet capture and replay, error mapping, turning an `Outcome` into a response |
 | Store | `providers/*` | The SPI. All blocking, waiting, and stale-lock stealing happens inside `tryAcquire` |
 
 ## HTTP semantics
@@ -177,8 +177,8 @@ The filter stores whatever your handler returns, **including 4xx and 5xx respons
 the handler returns normally. A handler that returns `500` has that `500` replayed to every
 duplicate for the full TTL.
 
-A handler that *throws* is different: the engine releases the lock, the record is marked `FAILED`,
-and the next request with that key reclaims it and runs the handler again.
+A handler that *throws* is different: the engine releases the lease, which deletes the record, and
+the next request with that key sees a key that was never used and runs the handler again.
 
 If you want a failed request to be retriable, throw. If you return an error status, you are
 telling the library that error is the final answer for that key.
@@ -194,7 +194,7 @@ These come from the filter itself, before or instead of your handler. Each carri
 | `422 Unprocessable Entity` | Key header missing or blank while `required = true` |
 | `422 Unprocessable Entity` | Key longer than 255 characters |
 | `422 Unprocessable Entity` | Key reused with a different request body |
-| `503 Service Unavailable` | Another request still holds the key after `waitTimeout` |
+| `409 Conflict` | Another request still holds the key after `waitTimeout`; carries `Retry-After` |
 
 ### Response headers on a replay
 
@@ -322,8 +322,8 @@ idempotency:
 event handler, or anything else that needs a key to run at most once. The annotation, the filter,
 and `StoredResponse` are the Spring adapter's business, not the engine's.
 
-A caller with no request body to hash builds a context without a fingerprint, and completes with
-`Payload.none()` because there is nothing for a duplicate to replay. The first argument is the
+A caller with no request body to hash builds a context without a fingerprint, and uses the
+runnable overload because there is nothing for a duplicate to replay. The first argument is the
 scope: name the unit of work, so two listeners handling the same event id each get their own
 record.
 
@@ -336,42 +336,67 @@ IdempotencyContext context = IdempotencyContext.builder("ShipmentListener.onOrde
         .waitTimeout(Duration.ZERO)   // decline instead of parking the consumer thread
         .build();
 
-ExecutionResult result = engine.execute(context, () -> handler.handle(event));
-
-switch (result) {
-    case ExecutionResult.Executed executed ->
-            engine.complete(context, executed.leaseId(), Payload.none(), context.ttl());
-    case ExecutionResult.Duplicate ignored -> {
-        // already handled under this key, nothing to do
-    }
+switch (engine.execute(context, () -> handler.handle(event))) {
+    case Outcome.Executed<Void> ignored -> { /* ran for the first time */ }
+    case Outcome.Replayed<Void> ignored -> { /* already handled under this key */ }
+    case Outcome.InFlight<Void> inFlight ->
+            consumer.nack(inFlight.retryAfter());   // someone else has it; redeliver later
 }
 ```
 
-As in the HTTP flow, the engine acquires the lock and runs the action with a heartbeat, but calling
-`complete` is the caller's job: only the caller knows what, if anything, is worth storing for a
-duplicate. Add `.fingerprint(sha256Hex)` to the builder when the payload is worth guarding against
-key reuse.
+The engine acquires the lease, runs the action with a heartbeat, records the completion, and
+fires the [lifecycle callbacks](#lifecycle-callbacks) around all of it. Add `.fingerprint(sha256Hex)`
+to the builder when the payload is worth guarding against key reuse.
 
-When a duplicate should get a real result back, store a `Payload` instead of `Payload.none()`: a
-`type` saying how to read the bytes, the bytes themselves, and flat string `attributes` the store
-returns verbatim. That last part is what a messaging adapter uses to carry correlation data - the
-ids of the messages the first execution published, say - so a duplicate can reference them instead
-of publishing again.
+When a duplicate should get a real result back, pass a `PayloadCodec<T>` for whatever the action
+returns. A `Payload` is a `type` saying how to read the bytes, the bytes themselves, and flat string
+`attributes` the store returns verbatim. That last part is what a messaging adapter uses to carry
+correlation data - the ids of the messages the first execution published, say - so a duplicate can
+reference them instead of publishing again.
 
 ```java
-Payload payload = new Payload(
-        "shipment/handled",
-        objectMapper.writeValueAsBytes(outcome),
-        Map.of("publicationId", publication.id()));
+PayloadCodec<Handled> codec = new PayloadCodec<>() {
+    @Override
+    public Payload encode(Handled handled) {
+        return new Payload(
+                "shipment/handled",
+                objectMapper.writeValueAsBytes(handled),
+                Map.of("publicationId", handled.publicationId()));
+    }
 
-engine.complete(context, executed.leaseId(), payload, context.ttl());
+    @Override
+    public Handled decode(Payload payload) {
+        return objectMapper.readValue(payload.body(), Handled.class);
+    }
+};
+
+Outcome<Handled> outcome = engine.execute(context, () -> handler.handle(event), codec);
 ```
 
-Wrap the encoding in a `PayloadCodec<T>` when more than one call site stores the same shape; that
-is what `StoredResponseCodec` is for HTTP responses.
+`Outcome.Replayed` carries the decoded value from the original execution, so the same `switch`
+handles a first run and a duplicate without the caller knowing which it got. `StoredResponseCodec`
+is exactly this for HTTP responses.
 
-Complete through `engine.complete(...)` rather than `store.complete(...)`: it does the same store
-call but also fires the [lifecycle callbacks](#lifecycle-callbacks).
+### When the store refuses the completion
+
+The action ran and its side effects are durable, so `CompletionFailurePolicy` decides what happens
+next. The default, `PROPAGATE`, rethrows the storage failure. `LOG_AND_RETURN` logs it and returns
+`Executed` with the value anyway, which is what an HTTP adapter wants - the handler's response
+should still reach the client. The lease is not released either way; the record stays in progress
+until its lease expires, and a retry after that re-executes.
+
+```java
+IdempotencyEngine engine = new IdempotencyEngine(
+        store,
+        scheduler,
+        List.of(),
+        IdempotencyConfig.builder()
+                .completionFailurePolicy(CompletionFailurePolicy.LOG_AND_RETURN)
+                .build());
+```
+
+The starter wires the filter's engine with `LOG_AND_RETURN`; set
+`idempotency.completion-failure-policy=propagate` to change it.
 
 ## Lifecycle callbacks
 

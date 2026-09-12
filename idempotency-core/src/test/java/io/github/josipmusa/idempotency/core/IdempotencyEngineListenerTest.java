@@ -80,6 +80,18 @@ class IdempotencyEngineListenerTest {
                 .build();
     }
 
+    private static final PayloadCodec<String> STRING_CODEC = new PayloadCodec<>() {
+        @Override
+        public Payload encode(String value) {
+            return new Payload("text/plain", value.getBytes(java.nio.charset.StandardCharsets.UTF_8), Map.of());
+        }
+
+        @Override
+        public String decode(Payload payload) {
+            return new String(payload.body(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+    };
+
     private Payload anyPayload() {
         return new Payload(
                 "http/response",
@@ -90,11 +102,10 @@ class IdempotencyEngineListenerTest {
     @Test
     void When_ActionSucceedsAndCompletes_Expect_AcquiredThenCompleted() throws Exception {
         IdempotencyContext context = defaultContext("happy-key");
-        Payload payload = anyPayload();
+        Payload payload = STRING_CODEC.encode("charged");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        ExecutionResult result = engine.execute(context, () -> {});
-        engine.complete(context, ((ExecutionResult.Executed) result).leaseId(), payload, context.ttl());
+        engine.execute(context, () -> "charged", STRING_CODEC);
 
         InOrder inOrder = inOrder(listener);
         inOrder.verify(listener).onAcquired(context, LEASE_ID);
@@ -184,15 +195,13 @@ class IdempotencyEngineListenerTest {
     }
 
     @Test
-    void When_CompleteFails_Expect_FailedWithCompletionPhase() throws Exception {
+    void When_CompleteFails_Expect_FailedWithCompletionPhase() {
         IdempotencyContext context = defaultContext("completion-fail-key");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
         doThrow(failure).when(store).complete(any(), any(), any(), any());
 
-        engine.execute(context, () -> {});
-        assertThatThrownBy(() -> engine.complete(context, LEASE_ID, anyPayload(), context.ttl()))
-                .isSameAs(failure);
+        assertThatThrownBy(() -> engine.execute(context, () -> {})).isSameAs(failure);
 
         InOrder inOrder = inOrder(listener);
         inOrder.verify(listener).onAcquired(context, LEASE_ID);
@@ -231,24 +240,44 @@ class IdempotencyEngineListenerTest {
 
     @Test
     void When_DuplicateListenerThrows_Expect_DuplicateStillReturned() throws Exception {
-        Payload stored = anyPayload();
+        Payload stored = STRING_CODEC.encode("charged");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored, Instant.now()));
         doThrow(new RuntimeException("listener boom")).when(listener).onDuplicate(any(), any(), any());
 
-        ExecutionResult result = engine.execute(defaultContext("duplicate-throwing-key"), () -> {});
+        Outcome<String> outcome = engine.execute(defaultContext("duplicate-throwing-key"), () -> "fresh", STRING_CODEC);
 
-        assertThat(result).isInstanceOf(ExecutionResult.Duplicate.class);
-        assertThat(((ExecutionResult.Duplicate) result).payload()).isSameAs(stored);
+        assertThat(outcome).isInstanceOf(Outcome.Replayed.class);
+        assertThat(((Outcome.Replayed<String>) outcome).value()).isEqualTo("charged");
     }
 
     @Test
-    void When_InFlight_Expect_NoCallbacks() {
+    void When_InFlight_Expect_InFlightOutcomeAndOnInFlightFired() throws Exception {
+        IdempotencyContext context = defaultContext("in-flight-key");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.inFlight(Duration.ofSeconds(3)));
 
-        assertThatThrownBy(() -> engine.execute(defaultContext("timeout-key"), () -> {}))
-                .isNotNull();
+        Outcome<Void> outcome = engine.execute(context, () -> {});
 
-        verifyNoInteractions(listener);
+        assertThat(outcome).isEqualTo(new Outcome.InFlight<Void>(Duration.ofSeconds(3)));
+        verify(listener).onInFlight(context, Duration.ofSeconds(3));
+        verifyNoMoreInteractions(listener);
+    }
+
+    /**
+     * No lease was acquired, so the acquired/terminal pair must not fire: a listener holding
+     * per-request state would have nothing to release it.
+     */
+    @Test
+    void When_Replayed_Expect_ExactlyOneNoLeaseCallback() throws Exception {
+        IdempotencyContext context = defaultContext("replayed-single-callback-key");
+        Payload stored = STRING_CODEC.encode("charged");
+        Instant completedAt = Instant.now();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored, completedAt));
+
+        engine.execute(context, () -> "fresh", STRING_CODEC);
+
+        verify(listener).onDuplicate(context, stored, completedAt);
+        verify(listener, never()).onAcquired(any(), any());
+        verifyNoMoreInteractions(listener);
     }
 
     @Test
@@ -283,21 +312,23 @@ class IdempotencyEngineListenerTest {
         doThrow(new RuntimeException("listener boom")).when(listener).onAcquired(any(), any());
         AtomicInteger actionCalls = new AtomicInteger();
 
-        ExecutionResult result = engine.execute(defaultContext("throwing-acquired-key"), actionCalls::incrementAndGet);
+        Outcome<Void> outcome = engine.execute(defaultContext("throwing-acquired-key"), actionCalls::incrementAndGet);
 
         assertThat(actionCalls).hasValue(1);
-        assertThat(result).isInstanceOf(ExecutionResult.Executed.class);
+        assertThat(outcome).isInstanceOf(Outcome.Executed.class);
     }
 
     @Test
-    void When_CompletedListenerThrows_Expect_CompleteReturnsNormally() {
+    void When_CompletedListenerThrows_Expect_ExecuteReturnsNormally() throws Exception {
         IdempotencyContext context = defaultContext("throwing-completed-key");
-        Payload payload = anyPayload();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         doThrow(new RuntimeException("listener boom")).when(listener).onCompleted(any(), any(), any());
 
-        engine.complete(context, LEASE_ID, payload, context.ttl());
+        Outcome<String> outcome = engine.execute(context, () -> "charged", STRING_CODEC);
 
-        verify(store).complete(identity("throwing-completed-key"), LEASE_ID, payload, context.ttl());
+        assertThat(outcome).isEqualTo(new Outcome.Executed<>("charged"));
+        verify(store)
+                .complete(identity("throwing-completed-key"), LEASE_ID, STRING_CODEC.encode("charged"), context.ttl());
     }
 
     @Test
@@ -374,10 +405,10 @@ class IdempotencyEngineListenerTest {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         AtomicInteger actionCalls = new AtomicInteger();
 
-        ExecutionResult result = engine.execute(defaultContext("no-listener-key"), actionCalls::incrementAndGet);
+        Outcome<Void> outcome = engine.execute(defaultContext("no-listener-key"), actionCalls::incrementAndGet);
 
         assertThat(actionCalls).hasValue(1);
-        assertThat(result).isInstanceOf(ExecutionResult.Executed.class);
+        assertThat(outcome).isInstanceOf(Outcome.Executed.class);
     }
 
     @Test

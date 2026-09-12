@@ -17,7 +17,6 @@ package io.github.josipmusa.idempotency.core;
 
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener.FailurePhase;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -30,43 +29,47 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Orchestrates the idempotency lifecycle: acquire lock, run action, manage heartbeat.
+ * Runs an action at most once per identity: acquires the lease, executes, records the
+ * completion, and reports what happened as an {@link Outcome}.
  *
- * <p>The engine is framework-agnostic — it knows nothing about HTTP, Spring, or
- * databases. It delegates persistence to an {@link IdempotencyStore} and receives
- * a fully resolved {@link IdempotencyContext} from the adapter layer.
+ * <p>The engine is framework-agnostic - it knows nothing about HTTP, Spring, or databases.
+ * It delegates persistence to an {@link IdempotencyStore} and receives a fully resolved
+ * {@link IdempotencyContext} from the adapter layer.
  *
  * <h2>Responsibility boundaries</h2>
  * <ul>
- *   <li><strong>Engine</strong> — calls {@code tryAcquire}, runs the action with
- *       a heartbeat, calls {@code release} on failure. Does NOT decide when a key
- *       is complete: the adapter calls {@link #complete} once it knows what to store.</li>
- *   <li><strong>Adapter</strong> — builds the context, calls {@code engine.execute()},
- *       captures the HTTP response, calls {@code engine.complete()} with the lease.</li>
- *   <li><strong>Store</strong> — handles persistence, blocking, and lock-stealing.</li>
+ *   <li><strong>Engine</strong> - owns the whole lifecycle. Calls {@code tryAcquire}, runs
+ *       the action under a heartbeat, encodes its result, calls {@code complete}, and calls
+ *       {@code release} if the action throws. Nothing is left for the caller to record.</li>
+ *   <li><strong>Adapter</strong> - builds the context, supplies the action and a
+ *       {@link PayloadCodec} for whatever the action produces, and translates the returned
+ *       {@link Outcome} into its transport.</li>
+ *   <li><strong>Store</strong> - handles persistence, blocking, and lease stealing.</li>
  * </ul>
  *
  * <h2>Heartbeat</h2>
- * <p>While the action runs, a background task calls
- * {@link IdempotencyStore#extendLock} at half the lease duration
- * (e.g. every 5s for a 10s lease). This prevents the lease from being stolen
- * while the action is legitimately still running. The heartbeat is cancelled
+ * <p>While the action runs, a background task calls {@link IdempotencyStore#extendLock} at
+ * half the lease duration (e.g. every 5s for a 10s lease). This prevents the lease from
+ * being stolen while the action is legitimately still running. The heartbeat is cancelled
  * in the {@code finally} block regardless of success or failure.
  *
  * <h2>Failure handling</h2>
- * <p>If the action throws anything at all — including an {@link Error} — the
- * engine calls {@link IdempotencyStore#release} to delete the record so the key
- * can be retried, and the failed attempt leaves no trace. If {@code release}
- * itself throws (e.g. store is down), the release failure is added as a
- * suppressed exception on the original — what the action threw always
- * propagates as the primary.
+ * <p>If the action throws anything at all - including an {@link Error} - the engine calls
+ * {@link IdempotencyStore#release} to delete the record so the key can be retried, and the
+ * failed attempt leaves no trace. If {@code release} itself throws (e.g. the store is down),
+ * the release failure is added as a suppressed exception on the original - what the action
+ * threw always propagates as the primary.
+ *
+ * <p>If the action succeeded but the completion could not be recorded, the lease is
+ * <em>not</em> released: the work happened, so deleting the record would advertise a key
+ * that was never used. What the engine does next is
+ * {@link CompletionFailurePolicy the configured policy}.
  *
  * <h2>Lifecycle callbacks</h2>
- * <p>Registered {@link IdempotencyLifecycleListener}s observe each execution
- * synchronously on the calling thread. See that interface for the callback
- * contract; the engine guarantees exactly one terminal callback per acquired
- * lease and never lets a listener influence store state, the return value, or
- * the exception being propagated.
+ * <p>Registered {@link IdempotencyLifecycleListener}s observe each execution synchronously
+ * on the calling thread. See that interface for the callback contract; the engine guarantees
+ * exactly one terminal callback per acquired lease and never lets a listener influence store
+ * state, the return value, or the exception being propagated.
  */
 public final class IdempotencyEngine {
 
@@ -75,10 +78,11 @@ public final class IdempotencyEngine {
     private final IdempotencyStore store;
     private final ScheduledExecutorService scheduler;
     private final List<IdempotencyLifecycleListener> listeners;
+    private final CompletionFailurePolicy completionFailurePolicy;
 
     /**
      * @param store     the persistence backend for idempotency keys
-     * @param scheduler used to schedule heartbeat tasks — should be shared
+     * @param scheduler used to schedule heartbeat tasks - should be shared
      *                  across engine instances, not created per-request
      */
     public IdempotencyEngine(IdempotencyStore store, ScheduledExecutorService scheduler) {
@@ -94,52 +98,69 @@ public final class IdempotencyEngine {
      */
     public IdempotencyEngine(
             IdempotencyStore store, ScheduledExecutorService scheduler, List<IdempotencyLifecycleListener> listeners) {
-        this.store = Objects.requireNonNull(store, "store must not be null");
-        this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
-        this.listeners = List.copyOf(Objects.requireNonNull(listeners, "listeners must not be null"));
+        this(store, scheduler, listeners, IdempotencyConfig.defaults());
     }
 
     /**
-     * Executes the given action idempotently.
+     * @param store     the persistence backend for idempotency keys
+     * @param scheduler used to schedule heartbeat tasks - should be shared
+     *                  across engine instances, not created per-request
+     * @param listeners lifecycle observers, invoked in the given order on the
+     *                  calling thread; copied defensively
+     * @param config    application defaults; the engine reads only
+     *                  {@link IdempotencyConfig#completionFailurePolicy()} from it, because
+     *                  everything else is already resolved into the context it is handed
+     */
+    public IdempotencyEngine(
+            IdempotencyStore store,
+            ScheduledExecutorService scheduler,
+            List<IdempotencyLifecycleListener> listeners,
+            IdempotencyConfig config) {
+        this.store = Objects.requireNonNull(store, "store must not be null");
+        this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
+        this.listeners = List.copyOf(Objects.requireNonNull(listeners, "listeners must not be null"));
+        this.completionFailurePolicy =
+                Objects.requireNonNull(config, "config must not be null").completionFailurePolicy();
+    }
+
+    /**
+     * Executes the given action at most once per identity and returns what happened.
      *
-     * <p>If the key is new, acquires the lease, starts a heartbeat, and runs the
-     * action. If the key was already completed, returns the stored payload
-     * without running the action. If the key is still in-flight when the context's
-     * {@code waitTimeout} elapses, throws {@link IdempotencyLockTimeoutException}.
-     *
-     * <p>When {@link ExecutionResult.Executed} is returned, the <strong>caller</strong>
-     * (adapter) is responsible for:
-     * <ol>
-     *   <li>Capturing whatever the action produced (an HTTP response, or nothing)</li>
-     *   <li>Calling {@link #complete} with the returned lease and that payload</li>
-     * </ol>
-     * If {@code complete} throws after a successful execution, the response has
-     * already been produced and should still be sent to the client. The store's state
-     * may be indeterminate: a failure can happen before a mutation or, for example,
-     * while waiting for a Redis replica after the primary accepted it. Callers must not
-     * treat idempotency storage as a transaction around the business side effect.
+     * <p>If the key is new, the engine acquires the lease, starts the heartbeat, runs the
+     * action, encodes its result with {@code codec}, records the completion, and returns
+     * {@link Outcome.Executed}. If the key was already completed, the action does not run
+     * and the stored payload comes back decoded as {@link Outcome.Replayed}. If another
+     * caller holds the key and does not finish within the context's {@code waitTimeout},
+     * the action does not run and the engine returns {@link Outcome.InFlight}.
      *
      * @param context fully resolved idempotency context (identity, ttl, lease, wait)
-     * @param action  the business logic to execute — only runs for new keys
-     * @return {@link ExecutionResult.Executed} if the action ran, or
-     *         {@link ExecutionResult.Duplicate} with the stored payload
-     * @throws IdempotencyLockTimeoutException if the key is still in-flight when
-     *         the wait timeout elapsed
-     * @throws Exception if the action itself throws — the original exception
-     *         propagates unchanged, and the record is deleted so the key can be
-     *         retried. An {@link Error} is handled the same way and propagates too
+     * @param action  the business logic to execute - only runs for a new key
+     * @param codec   translates the action's result to and from the stored payload
+     * @param <T>     what the action produces
+     * @return what happened; never {@code null}
+     * @throws IdempotencyFingerprintMismatchException if the key was already used with a
+     *         different request body
+     * @throws Exception if the action itself throws - the original exception propagates
+     *         unchanged, and the record is deleted so the key can be retried. An
+     *         {@link Error} is handled the same way and propagates too. A failure to record
+     *         the completion propagates only under
+     *         {@link CompletionFailurePolicy#PROPAGATE}
      */
-    public ExecutionResult execute(IdempotencyContext context, ThrowingRunnable action) throws Exception {
+    public <T> Outcome<T> execute(IdempotencyContext context, ThrowingSupplier<T> action, PayloadCodec<T> codec)
+            throws Exception {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(action, "action must not be null");
+        Objects.requireNonNull(codec, "codec must not be null");
         return switch (store.tryAcquire(context)) {
-            case AcquireResult.Acquired(String leaseId) -> runWithHeartbeat(context, leaseId, action);
+            case AcquireResult.Acquired(String leaseId) -> runWithHeartbeat(context, leaseId, action, codec);
             case AcquireResult.Duplicate(Payload payload, Instant completedAt) -> {
                 notify("onDuplicate", context, listener -> listener.onDuplicate(context, payload, completedAt));
-                yield ExecutionResult.duplicate(payload, completedAt);
+                yield new Outcome.Replayed<>(codec.decode(payload), completedAt);
             }
-            case AcquireResult.InFlight ignored ->
-                throw new IdempotencyLockTimeoutException(context.identity(), context.waitTimeout());
+            case AcquireResult.InFlight(Duration retryAfter) -> {
+                notify("onInFlight", context, listener -> listener.onInFlight(context, retryAfter));
+                yield new Outcome.InFlight<>(retryAfter);
+            }
             case AcquireResult.FingerprintMismatch(String storedFingerprint, String receivedFingerprint) ->
                 throw new IdempotencyFingerprintMismatchException(
                         context.identity(), storedFingerprint, receivedFingerprint);
@@ -147,45 +168,35 @@ public final class IdempotencyEngine {
     }
 
     /**
-     * Records the completion of an executed action, closing the idempotent boundary.
+     * Executes an action with nothing to replay.
      *
-     * <p>Delegates to {@link IdempotencyStore#complete} and adds the lifecycle
-     * callback the store SPI knows nothing about: {@link IdempotencyLifecycleListener#onCompleted}
-     * once the store has confirmed the transition, or
-     * {@link IdempotencyLifecycleListener#onFailed} with
-     * {@link FailurePhase#COMPLETION} if it did not. Store exceptions are rethrown
-     * unchanged, so callers keep whatever handling they already had around
-     * {@code store.complete}.
+     * <p>Equivalent to
+     * {@link #execute(IdempotencyContext, ThrowingSupplier, PayloadCodec)} with
+     * {@link PayloadCodec#none()}: a duplicate is still recognised and the action still runs
+     * at most once, but {@link Payload#none()} is what gets stored and
+     * {@link Outcome.Replayed#value()} is always {@code null}.
      *
-     * <p>Call this exactly once per {@link ExecutionResult.Executed}, passing that
-     * result's lease. The engine does not extend the lock here - {@link #execute}
-     * already did so after the action returned.
-     *
-     * @param context the context the execution ran under
-     * @param leaseId the lease from the {@link ExecutionResult.Executed} being completed
-     * @param payload what to store for a duplicate to replay
-     * @param ttl     how long to keep the completed entry before expiry
-     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException
-     *         if this execution no longer owns the key
-     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException
-     *         if the mutation was accepted but requested durability could not be confirmed
+     * @param context fully resolved idempotency context (identity, ttl, lease, wait)
+     * @param action  the business logic to execute - only runs for a new key
+     * @return what happened; never {@code null}
+     * @throws IdempotencyFingerprintMismatchException if the key was already used with a
+     *         different request body
+     * @throws Exception if the action itself throws, or if the completion could not be
+     *         recorded under {@link CompletionFailurePolicy#PROPAGATE}
      */
-    public void complete(IdempotencyContext context, String leaseId, Payload payload, Duration ttl) {
-        Objects.requireNonNull(context, "context must not be null");
-        Objects.requireNonNull(leaseId, "leaseId must not be null");
-        Objects.requireNonNull(payload, "payload must not be null");
-        Objects.requireNonNull(ttl, "ttl must not be null");
-        try {
-            store.complete(context.identity(), leaseId, payload, ttl);
-        } catch (Exception e) {
-            notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
-            throw e;
-        }
-        notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload));
+    public Outcome<Void> execute(IdempotencyContext context, ThrowingRunnable action) throws Exception {
+        Objects.requireNonNull(action, "action must not be null");
+        return execute(
+                context,
+                () -> {
+                    action.run();
+                    return null;
+                },
+                PayloadCodec.none());
     }
 
     /**
-     * Runs the action with an active heartbeat and releases the lock if the action throws.
+     * Runs the action with an active heartbeat, then records the completion.
      *
      * <p>The {@link ScheduledExecutorService} is intentionally <em>not</em> owned by the engine.
      * Callers should share a single scheduler across all engine instances and shut it down when
@@ -198,49 +209,82 @@ public final class IdempotencyEngine {
      * that never happens would leave a listener holding per-request state with no
      * terminal callback to release it.
      */
-    private ExecutionResult runWithHeartbeat(IdempotencyContext context, String leaseId, ThrowingRunnable action)
+    private <T> Outcome<T> runWithHeartbeat(
+            IdempotencyContext context, String leaseId, ThrowingSupplier<T> action, PayloadCodec<T> codec)
             throws Exception {
         ScheduledFuture<?> heartbeat;
         try {
             heartbeat = startHeartbeat(context, leaseId);
         } catch (Throwable schedulingFailure) {
-            try {
-                store.release(context.identity(), leaseId);
-            } catch (Throwable releaseFailure) {
-                schedulingFailure.addSuppressed(releaseFailure);
-            }
+            releaseQuietly(context, leaseId, schedulingFailure);
             throw schedulingFailure;
         }
+        T value;
         try {
             notify("onAcquired", context, listener -> listener.onAcquired(context, leaseId));
-            action.run();
+            value = action.get();
             extendLeaseForCompletion(context, leaseId);
-            return ExecutionResult.executed(leaseId);
         } catch (Throwable t) {
-            try {
-                store.release(context.identity(), leaseId);
-            } catch (Throwable releaseFailure) {
-                t.addSuppressed(releaseFailure);
-            }
+            releaseQuietly(context, leaseId, t);
             notifyFailed(context, leaseId, t, FailurePhase.ACTION);
             throw t;
         } finally {
             heartbeat.cancel(false);
         }
+        return complete(context, leaseId, value, codec);
+    }
+
+    /**
+     * Encodes the action's result and records the completion, closing the idempotent boundary.
+     *
+     * <p>The lease is deliberately not released when this fails: the action ran and its side
+     * effects are durable, so deleting the record would advertise a key that was never used.
+     * The record stays IN_PROGRESS until its lease expires, at which point a retry can steal
+     * it and run the action again - which is the honest outcome, because nothing was recorded.
+     */
+    private <T> Outcome<T> complete(IdempotencyContext context, String leaseId, T value, PayloadCodec<T> codec) {
+        Payload payload;
+        try {
+            payload = codec.encode(value);
+            store.complete(context.identity(), leaseId, payload, context.ttl());
+        } catch (Exception e) {
+            notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
+            if (completionFailurePolicy == CompletionFailurePolicy.PROPAGATE) {
+                throw e;
+            }
+            log.error(
+                    "Action for {} succeeded but its completion could not be recorded; storage state is indeterminate and a later duplicate will re-execute",
+                    context.identity(),
+                    e);
+            return new Outcome.Executed<>(value);
+        } catch (Throwable t) {
+            notifyFailed(context, leaseId, t, FailurePhase.COMPLETION);
+            throw t;
+        }
+        notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload));
+        return new Outcome.Executed<>(value);
     }
 
     /**
      * Best-effort final lease extension, run once the action has returned.
      *
-     * <p>This only buys the adapter time to call {@code complete()}. The lease is still
-     * valid, and {@code complete()} fences on it anyway, so a failure here must not turn
-     * a successful action into a failed one.
+     * <p>This only buys the engine time to encode the result and record the completion. The
+     * lease is still valid, and {@code complete()} fences on it anyway, so a failure here
+     * must not turn a successful action into a failed one.
      */
     private void extendLeaseForCompletion(IdempotencyContext context, String leaseId) {
         try {
             store.extendLock(context.identity(), leaseId, context.leaseDuration());
         } catch (Exception ignored) {
             // see above - deliberately swallowed
+        }
+    }
+
+    private void releaseQuietly(IdempotencyContext context, String leaseId, Throwable primary) {
+        try {
+            store.release(context.identity(), leaseId);
+        } catch (Throwable releaseFailure) {
+            primary.addSuppressed(releaseFailure);
         }
     }
 

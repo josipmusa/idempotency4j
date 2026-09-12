@@ -23,11 +23,12 @@ import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -91,40 +92,133 @@ class IdempotencyEngineTest {
         scheduler.schedule(() -> {}, delay.toMillis(), TimeUnit.MILLISECONDS).get(5, TimeUnit.SECONDS);
     }
 
-    private Payload anyPayload() {
-        return new Payload(
-                "http/response",
-                "{\"id\":\"123\"}".getBytes(),
-                Map.of("status", "200", "Content-Type", "application/json"));
-    }
+    /** A codec for a plain string result, so the payload the engine stores is inspectable. */
+    private static final PayloadCodec<String> STRING_CODEC = new PayloadCodec<>() {
+        @Override
+        public Payload encode(String value) {
+            return new Payload("text/plain", value.getBytes(StandardCharsets.UTF_8), Map.of());
+        }
+
+        @Override
+        public String decode(Payload payload) {
+            return new String(payload.body(), StandardCharsets.UTF_8);
+        }
+    };
 
     @Test
     void When_NewKey_Expect_ReturnsExecuted() throws Exception {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        ExecutionResult result = engine.execute(defaultContext("new-key"), () -> {});
+        Outcome<Void> outcome = engine.execute(defaultContext("new-key"), () -> {});
 
-        assertThat(result).isInstanceOf(ExecutionResult.Executed.class);
-        assertThat(((ExecutionResult.Executed) result).leaseId()).isEqualTo(LEASE_ID);
+        assertThat(outcome).isEqualTo(new Outcome.Executed<Void>(null));
     }
 
     @Test
-    void When_CompletedKey_Expect_ReturnsDuplicate() throws Exception {
-        Payload payload = anyPayload();
+    void When_ActionReturnsValue_Expect_ExecutedWithValueAndRecordComplete() throws Exception {
+        IdempotencyContext context = defaultContext("value-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+
+        Outcome<String> outcome = engine.execute(context, () -> "charged", STRING_CODEC);
+
+        assertThat(outcome).isEqualTo(new Outcome.Executed<>("charged"));
+        verify(store).complete(identity("value-key"), LEASE_ID, STRING_CODEC.encode("charged"), context.ttl());
+    }
+
+    @Test
+    void When_Duplicate_Expect_ReplayedWithDecodedValue() throws Exception {
         Instant completedAt = Instant.now();
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(payload, completedAt));
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(STRING_CODEC.encode("charged"), completedAt));
 
-        ExecutionResult result = engine.execute(defaultContext("done-key"), () -> {});
+        Outcome<String> outcome = engine.execute(defaultContext("done-key"), () -> "fresh", STRING_CODEC);
 
-        assertThat(result).isInstanceOf(ExecutionResult.Duplicate.class);
-        ExecutionResult.Duplicate duplicate = (ExecutionResult.Duplicate) result;
-        assertThat(duplicate.payload()).isEqualTo(payload);
-        assertThat(duplicate.completedAt()).isEqualTo(completedAt);
+        assertThat(outcome).isEqualTo(new Outcome.Replayed<>("charged", completedAt));
+        verify(store, never()).complete(any(), any(), any(), any());
+    }
+
+    @Test
+    void When_RunnableOverload_Expect_NonePayloadStored() throws Exception {
+        IdempotencyContext context = defaultContext("runnable-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+
+        engine.execute(context, () -> {});
+
+        verify(store).complete(identity("runnable-key"), LEASE_ID, Payload.none(), context.ttl());
+    }
+
+    @Test
+    void When_CompletionFailsWithPropagate_Expect_ExceptionAndOnFailedCompletion() {
+        IdempotencyContext context = defaultContext("propagate-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
+        doThrow(failure).when(store).complete(any(), any(), any(), any());
+        IdempotencyLifecycleListener listener = mock(IdempotencyLifecycleListener.class);
+        IdempotencyEngine propagating = new IdempotencyEngine(
+                store,
+                scheduler,
+                List.of(listener),
+                IdempotencyConfig.builder()
+                        .completionFailurePolicy(CompletionFailurePolicy.PROPAGATE)
+                        .build());
+
+        assertThatThrownBy(() -> propagating.execute(context, () -> "charged", STRING_CODEC))
+                .isSameAs(failure);
+
+        verify(listener).onFailed(context, LEASE_ID, failure, IdempotencyLifecycleListener.FailurePhase.COMPLETION);
+        verify(listener, never()).onCompleted(any(), any(), any());
+        verify(store, never()).release(any(), any());
+    }
+
+    @Test
+    void When_CompletionFailsWithLogAndReturn_Expect_ExecutedAndOnFailedCompletion() throws Exception {
+        IdempotencyContext context = defaultContext("log-and-return-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
+        doThrow(failure).when(store).complete(any(), any(), any(), any());
+        IdempotencyLifecycleListener listener = mock(IdempotencyLifecycleListener.class);
+        IdempotencyEngine lenient = new IdempotencyEngine(
+                store,
+                scheduler,
+                List.of(listener),
+                IdempotencyConfig.builder()
+                        .completionFailurePolicy(CompletionFailurePolicy.LOG_AND_RETURN)
+                        .build());
+
+        Outcome<String> outcome = lenient.execute(context, () -> "charged", STRING_CODEC);
+
+        assertThat(outcome).isEqualTo(new Outcome.Executed<>("charged"));
+        verify(listener).onFailed(context, LEASE_ID, failure, IdempotencyLifecycleListener.FailurePhase.COMPLETION);
+        verify(listener, never()).onCompleted(any(), any(), any());
+        verify(store, never()).release(any(), any());
+    }
+
+    @Test
+    void When_EncodingFails_Expect_TreatedAsCompletionFailure() {
+        IdempotencyContext context = defaultContext("encode-fail-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IllegalStateException failure = new IllegalStateException("cannot encode");
+        PayloadCodec<String> broken = new PayloadCodec<>() {
+            @Override
+            public Payload encode(String value) {
+                throw failure;
+            }
+
+            @Override
+            public String decode(Payload payload) {
+                throw new UnsupportedOperationException();
+            }
+        };
+
+        assertThatThrownBy(() -> engine.execute(context, () -> "charged", broken))
+                .isSameAs(failure);
+
+        verify(store, never()).complete(any(), any(), any(), any());
+        verify(store, never()).release(any(), any());
     }
 
     @Test
     void When_CompletedKey_Expect_ActionNotCalled() throws Exception {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(anyPayload(), Instant.now()));
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(Payload.none(), Instant.now()));
         AtomicInteger counter = new AtomicInteger(0);
 
         engine.execute(defaultContext("dup-key"), counter::incrementAndGet);
@@ -167,15 +261,14 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void When_InFlight_Expect_ThrowsLockTimeoutException() {
+    void When_InFlight_Expect_InFlightOutcomeAndActionNotRun() throws Exception {
         when(store.tryAcquire(any())).thenReturn(AcquireResult.inFlight(Duration.ofSeconds(3)));
+        AtomicInteger actionCalls = new AtomicInteger();
 
-        assertThatThrownBy(() -> engine.execute(defaultContext("test-key"), () -> {}))
-                .isInstanceOf(IdempotencyLockTimeoutException.class)
-                .satisfies(e -> {
-                    IdempotencyLockTimeoutException ex = (IdempotencyLockTimeoutException) e;
-                    assertThat(ex.getIdentity()).isEqualTo(identity("test-key"));
-                });
+        Outcome<Void> outcome = engine.execute(defaultContext("test-key"), actionCalls::incrementAndGet);
+
+        assertThat(outcome).isEqualTo(new Outcome.InFlight<Void>(Duration.ofSeconds(3)));
+        assertThat(actionCalls).hasValue(0);
     }
 
     @Test
@@ -372,50 +465,36 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void When_Complete_Expect_DelegatesToStoreWithContextKey() {
+    void When_ActionSucceeds_Expect_CompleteUsesContextTtlAndLease() throws Exception {
         IdempotencyContext context = defaultContext("complete-key");
-        Payload payload = anyPayload();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
-        engine.complete(context, LEASE_ID, payload, context.ttl());
+        engine.execute(context, () -> "charged", STRING_CODEC);
 
-        verify(store).complete(identity("complete-key"), LEASE_ID, payload, context.ttl());
-    }
-
-    @Test
-    void When_CompleteWithNonePayload_Expect_PayloadForwardedUnchanged() {
-        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "no-payload-key")
-                .ttl(Duration.ofHours(1))
-                .leaseDuration(Duration.ofSeconds(5))
-                .build();
-        Payload payload = Payload.none();
-
-        engine.complete(context, LEASE_ID, payload, context.ttl());
-
-        verify(store).complete(identity("no-payload-key"), LEASE_ID, payload, context.ttl());
+        verify(store).complete(identity("complete-key"), LEASE_ID, STRING_CODEC.encode("charged"), context.ttl());
     }
 
     @Test
     void When_StoreCompleteThrows_Expect_ExceptionPropagatesUnchanged() {
         IdempotencyContext context = defaultContext("durability-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
         IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
         doThrow(failure).when(store).complete(any(), any(), any(), any());
 
-        assertThatThrownBy(() -> engine.complete(context, LEASE_ID, anyPayload(), context.ttl()))
+        assertThatThrownBy(() -> engine.execute(context, () -> "charged", STRING_CODEC))
                 .isSameAs(failure);
     }
 
     @Test
-    void When_Complete_Expect_LockNotExtendedAgain() {
-        IdempotencyContext context = defaultContext("no-extend-key");
-
-        engine.complete(context, LEASE_ID, anyPayload(), context.ttl());
-
-        verify(store, never()).extendLock(any(), any(), any());
+    void When_NullCodec_Expect_Rejected() {
+        assertThatThrownBy(() -> engine.execute(defaultContext("null-codec-key"), () -> "x", null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("codec");
     }
 
     @Test
     void When_NullListeners_Expect_Rejected() {
-        assertThatThrownBy(() -> new IdempotencyEngine(store, scheduler, null))
+        assertThatThrownBy(() -> new IdempotencyEngine(store, scheduler, (List<IdempotencyLifecycleListener>) null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessageContaining("listeners");
     }

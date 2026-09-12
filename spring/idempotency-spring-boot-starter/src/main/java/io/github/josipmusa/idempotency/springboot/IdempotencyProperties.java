@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.springboot;
 
+import io.github.josipmusa.idempotency.core.CompletionFailurePolicy;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -25,6 +26,14 @@ public class IdempotencyProperties {
     private Duration defaultTtl = Duration.ofHours(24);
     private Duration defaultLease = Duration.ofSeconds(30);
     private Duration defaultWait = Duration.ofSeconds(10);
+
+    /**
+     * The web filter's default: a response the handler already produced should still reach the
+     * client when the store could not record it. The idempotency guarantee is lost for that
+     * key - a later duplicate re-executes - but the request itself succeeds.
+     */
+    private CompletionFailurePolicy completionFailurePolicy = CompletionFailurePolicy.LOG_AND_RETURN;
+
     private int filterOrder = 0;
     private long maxBodyBytes = 1_048_576L; // 1 MiB
     private Purge purge = new Purge();
@@ -59,6 +68,14 @@ public class IdempotencyProperties {
 
     public void setDefaultWait(Duration defaultWait) {
         this.defaultWait = defaultWait;
+    }
+
+    public CompletionFailurePolicy getCompletionFailurePolicy() {
+        return completionFailurePolicy;
+    }
+
+    public void setCompletionFailurePolicy(CompletionFailurePolicy completionFailurePolicy) {
+        this.completionFailurePolicy = completionFailurePolicy;
     }
 
     public int getFilterOrder() {

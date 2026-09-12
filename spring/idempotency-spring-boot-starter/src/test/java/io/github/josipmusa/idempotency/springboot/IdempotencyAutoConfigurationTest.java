@@ -21,6 +21,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
+import io.github.josipmusa.idempotency.core.CompletionFailurePolicy;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
@@ -113,6 +114,7 @@ class IdempotencyAutoConfigurationTest {
             assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(24));
             assertThat(config.defaultLeaseDuration()).isEqualTo(Duration.ofSeconds(30));
             assertThat(config.defaultWaitTimeout()).isEqualTo(Duration.ofSeconds(10));
+            assertThat(config.completionFailurePolicy()).isEqualTo(CompletionFailurePolicy.LOG_AND_RETURN);
             assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader()).isEqualTo("Idempotency-Key");
         });
     }
@@ -124,12 +126,14 @@ class IdempotencyAutoConfigurationTest {
                         "idempotency.key-header=X-Request-Id",
                         "idempotency.default-ttl=PT2H",
                         "idempotency.default-lease=PT5M",
-                        "idempotency.default-wait=PT0S")
+                        "idempotency.default-wait=PT0S",
+                        "idempotency.completion-failure-policy=propagate")
                 .run(context -> {
                     IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
                     assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(2));
                     assertThat(config.defaultLeaseDuration()).isEqualTo(Duration.ofMinutes(5));
                     assertThat(config.defaultWaitTimeout()).isZero();
+                    assertThat(config.completionFailurePolicy()).isEqualTo(CompletionFailurePolicy.PROPAGATE);
                     assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader())
                             .isEqualTo("X-Request-Id");
                 });

@@ -32,9 +32,13 @@ public final class WebIdempotencyConfig {
 
     private static final Pattern HEADER_TOKEN = Pattern.compile("[!#$%&'*+\\-.0-9A-Za-z^_`|~]+");
 
-    private final String keyHeader;
+    /** The status a request rejected because another caller holds the key gets. */
+    public static final int DEFAULT_IN_FLIGHT_STATUS = 409;
 
-    private WebIdempotencyConfig(String keyHeader) {
+    private final String keyHeader;
+    private final int inFlightStatus;
+
+    private WebIdempotencyConfig(String keyHeader, int inFlightStatus) {
         if (keyHeader == null || keyHeader.isBlank()) {
             throw new IllegalArgumentException("keyHeader must not be blank");
         }
@@ -42,7 +46,20 @@ public final class WebIdempotencyConfig {
             throw new IllegalArgumentException("keyHeader '" + keyHeader
                     + "' contains characters not permitted in an HTTP header name (RFC 7230 token)");
         }
+        if (inFlightStatus < 400 || inFlightStatus > 599) {
+            throw new IllegalArgumentException("inFlightStatus must be a 4xx or 5xx status, got: " + inFlightStatus);
+        }
         this.keyHeader = keyHeader;
+        this.inFlightStatus = inFlightStatus;
+    }
+
+    /**
+     * Returns a builder with all defaults applied.
+     *
+     * @return a builder for constructing {@link WebIdempotencyConfig}
+     */
+    public static Builder builder() {
+        return new Builder();
     }
 
     /**
@@ -51,7 +68,7 @@ public final class WebIdempotencyConfig {
      * @return a default config instance
      */
     public static WebIdempotencyConfig defaults() {
-        return new WebIdempotencyConfig(DEFAULT_KEY_HEADER);
+        return builder().build();
     }
 
     /**
@@ -65,7 +82,7 @@ public final class WebIdempotencyConfig {
      * @throws IllegalArgumentException if {@code keyHeader} is blank or is not a valid header name
      */
     public static WebIdempotencyConfig withKeyHeader(String keyHeader) {
-        return new WebIdempotencyConfig(keyHeader);
+        return builder().keyHeader(keyHeader).build();
     }
 
     /**
@@ -77,18 +94,74 @@ public final class WebIdempotencyConfig {
         return keyHeader;
     }
 
+    /**
+     * The status returned when another caller holds the key and did not finish within the
+     * wait timeout.
+     *
+     * <p>409 by default: the request conflicts with one already in progress, and the client
+     * is told when to try again through {@code Retry-After} rather than being told the
+     * server is down.
+     *
+     * @return the HTTP status for an in-flight rejection
+     */
+    public int inFlightStatus() {
+        return inFlightStatus;
+    }
+
     @Override
     public boolean equals(Object other) {
-        return other instanceof WebIdempotencyConfig that && keyHeader.equals(that.keyHeader);
+        return other instanceof WebIdempotencyConfig that
+                && keyHeader.equals(that.keyHeader)
+                && inFlightStatus == that.inFlightStatus;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(keyHeader);
+        return Objects.hash(keyHeader, inFlightStatus);
     }
 
     @Override
     public String toString() {
-        return "WebIdempotencyConfig{keyHeader='" + keyHeader + "'}";
+        return "WebIdempotencyConfig{keyHeader='" + keyHeader + "', inFlightStatus=" + inFlightStatus + "}";
+    }
+
+    /** Builds a {@link WebIdempotencyConfig}, overriding only what differs from the defaults. */
+    public static final class Builder {
+
+        private String keyHeader = DEFAULT_KEY_HEADER;
+        private int inFlightStatus = DEFAULT_IN_FLIGHT_STATUS;
+
+        /**
+         * Sets the header carrying the idempotency key.
+         *
+         * @param keyHeader the header name; must be a non-blank RFC 7230 token
+         * @return this builder
+         */
+        public Builder keyHeader(String keyHeader) {
+            this.keyHeader = keyHeader;
+            return this;
+        }
+
+        /**
+         * Sets the status for a request rejected because another caller holds the key.
+         *
+         * @param inFlightStatus a 4xx or 5xx status; defaults to {@value WebIdempotencyConfig#DEFAULT_IN_FLIGHT_STATUS}
+         * @return this builder
+         */
+        public Builder inFlightStatus(int inFlightStatus) {
+            this.inFlightStatus = inFlightStatus;
+            return this;
+        }
+
+        /**
+         * Constructs the {@link WebIdempotencyConfig} with the configured values.
+         *
+         * @return a new immutable config instance
+         * @throws IllegalArgumentException if the key header is blank or not a valid header
+         *         name, or the in-flight status is outside 400-599
+         */
+        public WebIdempotencyConfig build() {
+            return new WebIdempotencyConfig(keyHeader, inFlightStatus);
+        }
     }
 }

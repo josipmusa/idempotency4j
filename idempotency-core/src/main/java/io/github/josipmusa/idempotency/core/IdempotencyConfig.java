@@ -22,8 +22,9 @@ import java.util.Objects;
  * Application-level defaults for idempotency behavior.
  *
  * <p>Used by the adapter layer to resolve {@link IdempotencyContext} when
- * per-operation values are not specified. The engine itself never reads this
- * class — it only sees the fully resolved context.
+ * per-operation values are not specified. The engine reads only
+ * {@link #completionFailurePolicy()} from it; everything else it sees has already been
+ * resolved into the context it is handed.
  *
  * <p>Transport-specific settings do not live here. The HTTP header carrying
  * the key, for instance, is configured on
@@ -34,6 +35,8 @@ import java.util.Objects;
  *   <li>{@code defaultTtl} = 24 hours — how long completed payloads are kept</li>
  *   <li>{@code defaultLeaseDuration} = 30 seconds — how long an acquisition is protected</li>
  *   <li>{@code defaultWaitTimeout} = 10 seconds — how long a second caller blocks</li>
+ *   <li>{@code completionFailurePolicy} = {@link CompletionFailurePolicy#PROPAGATE} — what
+ *       happens when the action ran but its completion could not be recorded</li>
  * </ul>
  */
 public final class IdempotencyConfig {
@@ -41,11 +44,13 @@ public final class IdempotencyConfig {
     private final Duration defaultTtl;
     private final Duration defaultLeaseDuration;
     private final Duration defaultWaitTimeout;
+    private final CompletionFailurePolicy completionFailurePolicy;
 
     private IdempotencyConfig(Builder builder) {
         this.defaultTtl = builder.defaultTtl;
         this.defaultLeaseDuration = builder.defaultLeaseDuration;
         this.defaultWaitTimeout = builder.defaultWaitTimeout;
+        this.completionFailurePolicy = builder.completionFailurePolicy;
     }
 
     /**
@@ -79,10 +84,20 @@ public final class IdempotencyConfig {
         return defaultWaitTimeout;
     }
 
+    /**
+     * What the engine does when the action ran but its completion could not be recorded.
+     *
+     * @return the configured policy; never {@code null}
+     */
+    public CompletionFailurePolicy completionFailurePolicy() {
+        return completionFailurePolicy;
+    }
+
     @Override
     public String toString() {
         return "IdempotencyConfig{defaultTtl=" + defaultTtl + ", defaultLeaseDuration=" + defaultLeaseDuration
-                + ", defaultWaitTimeout=" + defaultWaitTimeout + "}";
+                + ", defaultWaitTimeout=" + defaultWaitTimeout + ", completionFailurePolicy="
+                + completionFailurePolicy + "}";
     }
 
     public static final class Builder {
@@ -90,6 +105,7 @@ public final class IdempotencyConfig {
         private Duration defaultTtl = Duration.ofHours(24);
         private Duration defaultLeaseDuration = Duration.ofSeconds(30);
         private Duration defaultWaitTimeout = Duration.ofSeconds(10);
+        private CompletionFailurePolicy completionFailurePolicy = CompletionFailurePolicy.PROPAGATE;
 
         /**
          * Sets the default TTL for completed idempotency records.
@@ -144,6 +160,23 @@ public final class IdempotencyConfig {
         public Builder defaultWaitTimeout(Duration waitTimeout) {
             Objects.requireNonNull(waitTimeout, "defaultWaitTimeout must not be null");
             this.defaultWaitTimeout = waitTimeout;
+            return this;
+        }
+
+        /**
+         * Sets what the engine does when the action ran but its completion could not be
+         * recorded.
+         *
+         * <p>Defaults to {@link CompletionFailurePolicy#PROPAGATE}. An HTTP adapter
+         * normally wants {@link CompletionFailurePolicy#LOG_AND_RETURN} instead, so a
+         * response the handler already produced still reaches the client.
+         *
+         * @param completionFailurePolicy the policy to apply
+         * @return this builder
+         */
+        public Builder completionFailurePolicy(CompletionFailurePolicy completionFailurePolicy) {
+            this.completionFailurePolicy =
+                    Objects.requireNonNull(completionFailurePolicy, "completionFailurePolicy must not be null");
             return this;
         }
 
