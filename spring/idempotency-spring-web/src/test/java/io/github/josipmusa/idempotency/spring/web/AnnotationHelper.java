@@ -15,7 +15,6 @@
  */
 package io.github.josipmusa.idempotency.spring.web;
 
-import io.github.josipmusa.idempotency.core.CompletionMode;
 import io.github.josipmusa.idempotency.spring.Idempotent;
 import java.lang.annotation.Annotation;
 
@@ -63,8 +62,8 @@ class AnnotationHelper {
             }
 
             @Override
-            public CompletionMode completion() {
-                return CompletionMode.AUTONOMOUS;
+            public String completion() {
+                return "";
             }
 
             @Override

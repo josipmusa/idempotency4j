@@ -171,6 +171,20 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     /**
+     * Builds a store with the default poll interval whose connections come from the given
+     * resolver.
+     *
+     * @param dataSource  the database, used for schema initialisation and as the default source
+     *                    of connections
+     * @param initSchema  whether to create the table and index on construction
+     * @param connections decides which connection each operation runs on; {@code null} means
+     *                    {@link ConnectionResolver#forDataSource(DataSource)}
+     */
+    public JdbcIdempotencyStore(DataSource dataSource, boolean initSchema, ConnectionResolver connections) {
+        this(dataSource, initSchema, DEFAULT_POLL_INTERVAL_MS, connections);
+    }
+
+    /**
      * Builds a store whose connections come from the given resolver.
      *
      * <p>The {@code DataSource} is still required: schema initialisation uses it directly, and

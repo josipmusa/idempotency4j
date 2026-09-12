@@ -106,13 +106,19 @@ public @interface Idempotent {
      * Whether the record is written on its own or inside the transaction the method is
      * already running in.
      *
-     * <p>{@link CompletionMode#JOIN_TRANSACTION} needs an active transaction when the method
-     * is entered - put {@code @Transactional} outside this annotation's interceptor - and a
-     * store that supports it.
+     * <p>One of {@code "autonomous"} or {@code "join-transaction"}, matching
+     * {@link CompletionMode} case-insensitively and treating {@code '-'} and {@code '_'} as
+     * interchangeable. Empty means "use {@link IdempotencyConfig#defaultCompletionMode()}",
+     * the same convention the durations above follow, so an application whose idempotent work
+     * is all transactional sets the mode once in configuration rather than on every method.
      *
-     * @return the completion mode
+     * <p>{@code "join-transaction"} needs an active transaction when the method is entered -
+     * put {@code @Transactional} outside this annotation's interceptor - and a store that
+     * supports it. An unrecognised value is rejected at startup.
+     *
+     * @return the completion mode, or empty for {@link IdempotencyConfig#defaultCompletionMode()}
      */
-    CompletionMode completion() default CompletionMode.AUTONOMOUS;
+    String completion() default "";
 
     /**
      * Name of the {@link PayloadCodec} bean that turns this method's return value into a

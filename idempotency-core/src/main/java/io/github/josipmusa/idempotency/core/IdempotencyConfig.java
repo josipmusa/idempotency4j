@@ -37,6 +37,9 @@ import java.util.Objects;
  *   <li>{@code defaultWaitTimeout} = 10 seconds — how long a second caller blocks</li>
  *   <li>{@code completionFailurePolicy} = {@link CompletionFailurePolicy#PROPAGATE} — what
  *       happens when the action ran but its completion could not be recorded</li>
+ *   <li>{@code defaultCompletionMode} = {@link CompletionMode#AUTONOMOUS} — whether an
+ *       operation that does not choose for itself records its completion on its own or
+ *       inside the caller's transaction</li>
  * </ul>
  */
 public final class IdempotencyConfig {
@@ -45,12 +48,14 @@ public final class IdempotencyConfig {
     private final Duration defaultLeaseDuration;
     private final Duration defaultWaitTimeout;
     private final CompletionFailurePolicy completionFailurePolicy;
+    private final CompletionMode defaultCompletionMode;
 
     private IdempotencyConfig(Builder builder) {
         this.defaultTtl = builder.defaultTtl;
         this.defaultLeaseDuration = builder.defaultLeaseDuration;
         this.defaultWaitTimeout = builder.defaultWaitTimeout;
         this.completionFailurePolicy = builder.completionFailurePolicy;
+        this.defaultCompletionMode = builder.defaultCompletionMode;
     }
 
     /**
@@ -93,11 +98,26 @@ public final class IdempotencyConfig {
         return completionFailurePolicy;
     }
 
+    /**
+     * The completion mode an operation gets when it does not choose one for itself.
+     *
+     * <p>Read by the adapter layer while it builds an {@link IdempotencyContext}, not by the
+     * engine: the engine only ever sees the mode already resolved onto the context it is
+     * handed. Setting it to {@link CompletionMode#JOIN_TRANSACTION} makes joined completion
+     * the application-wide answer, which is what an application whose idempotent work is all
+     * transactional wants to say once rather than on every method.
+     *
+     * @return the default completion mode; never {@code null}
+     */
+    public CompletionMode defaultCompletionMode() {
+        return defaultCompletionMode;
+    }
+
     @Override
     public String toString() {
         return "IdempotencyConfig{defaultTtl=" + defaultTtl + ", defaultLeaseDuration=" + defaultLeaseDuration
                 + ", defaultWaitTimeout=" + defaultWaitTimeout + ", completionFailurePolicy="
-                + completionFailurePolicy + "}";
+                + completionFailurePolicy + ", defaultCompletionMode=" + defaultCompletionMode + "}";
     }
 
     public static final class Builder {
@@ -106,6 +126,7 @@ public final class IdempotencyConfig {
         private Duration defaultLeaseDuration = Duration.ofSeconds(30);
         private Duration defaultWaitTimeout = Duration.ofSeconds(10);
         private CompletionFailurePolicy completionFailurePolicy = CompletionFailurePolicy.PROPAGATE;
+        private CompletionMode defaultCompletionMode = CompletionMode.AUTONOMOUS;
 
         /**
          * Sets the default TTL for completed idempotency records.
@@ -177,6 +198,23 @@ public final class IdempotencyConfig {
         public Builder completionFailurePolicy(CompletionFailurePolicy completionFailurePolicy) {
             this.completionFailurePolicy =
                     Objects.requireNonNull(completionFailurePolicy, "completionFailurePolicy must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the completion mode for an operation that does not choose one for itself.
+         *
+         * <p>Defaults to {@link CompletionMode#AUTONOMOUS}.
+         * {@link CompletionMode#JOIN_TRANSACTION} requires a store whose
+         * {@link IdempotencyStore#supportsTransactionalCompletion()} is {@code true}, and every
+         * operation that falls back to it must be entered inside an active transaction.
+         *
+         * @param defaultCompletionMode the mode to apply where none is specified
+         * @return this builder
+         */
+        public Builder defaultCompletionMode(CompletionMode defaultCompletionMode) {
+            this.defaultCompletionMode =
+                    Objects.requireNonNull(defaultCompletionMode, "defaultCompletionMode must not be null");
             return this;
         }
 

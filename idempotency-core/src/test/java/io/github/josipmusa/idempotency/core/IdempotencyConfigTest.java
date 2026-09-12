@@ -97,4 +97,18 @@ class IdempotencyConfigTest {
 
         assertThat(config.completionFailurePolicy()).isEqualTo(CompletionFailurePolicy.LOG_AND_RETURN);
     }
+
+    @Test
+    void When_NoCompletionModeSet_Expect_AutonomousByDefault() {
+        assertThat(IdempotencyConfig.defaults().defaultCompletionMode()).isEqualTo(CompletionMode.AUTONOMOUS);
+    }
+
+    @Test
+    void When_CompletionModeSet_Expect_Retained() {
+        IdempotencyConfig config = IdempotencyConfig.builder()
+                .defaultCompletionMode(CompletionMode.JOIN_TRANSACTION)
+                .build();
+
+        assertThat(config.defaultCompletionMode()).isEqualTo(CompletionMode.JOIN_TRANSACTION);
+    }
 }

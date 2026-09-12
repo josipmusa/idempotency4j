@@ -1,2 +1,5 @@
+io.github.josipmusa.idempotency.springboot.IdempotencyStoreAutoConfiguration
 io.github.josipmusa.idempotency.springboot.IdempotencyAutoConfiguration
+io.github.josipmusa.idempotency.springboot.IdempotencyWebAutoConfiguration
+io.github.josipmusa.idempotency.springboot.IdempotencyMethodAutoConfiguration
 io.github.josipmusa.idempotency.springboot.IdempotencyPurgeAutoConfiguration
