@@ -85,4 +85,15 @@ class WebIdempotencyConfigTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("inFlightStatus");
     }
+
+    @Test
+    void When_DefaultsUsed_Expect_KeyRequired() {
+        assertThat(WebIdempotencyConfig.defaults().required()).isTrue();
+    }
+
+    @Test
+    void When_RequiredDisabled_Expect_Retained() {
+        assertThat(WebIdempotencyConfig.builder().required(false).build().required())
+                .isFalse();
+    }
 }

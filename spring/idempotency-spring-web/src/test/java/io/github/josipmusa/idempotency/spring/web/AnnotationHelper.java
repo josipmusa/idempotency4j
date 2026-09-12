@@ -15,22 +15,38 @@
  */
 package io.github.josipmusa.idempotency.spring.web;
 
+import io.github.josipmusa.idempotency.core.CompletionMode;
+import io.github.josipmusa.idempotency.spring.Idempotent;
 import java.lang.annotation.Annotation;
 
 class AnnotationHelper {
 
     private AnnotationHelper() {}
 
-    static Idempotent annotation(boolean required) {
-        return annotation(required, "", "", "");
+    static Idempotent annotation() {
+        return annotation("", "", "");
     }
 
-    static Idempotent annotation(boolean required, String ttl, String lease) {
-        return annotation(required, ttl, lease, "");
+    static Idempotent annotation(String ttl, String lease) {
+        return annotation(ttl, lease, "");
     }
 
-    static Idempotent annotation(boolean required, String ttl, String lease, String waitTimeout) {
+    static Idempotent annotation(String ttl, String lease, String waitTimeout) {
+        return annotation(ttl, lease, waitTimeout, "");
+    }
+
+    static Idempotent annotation(String ttl, String lease, String waitTimeout, String scope) {
         return new Idempotent() {
+            @Override
+            public String key() {
+                return "";
+            }
+
+            @Override
+            public String scope() {
+                return scope;
+            }
+
             @Override
             public String ttl() {
                 return ttl;
@@ -47,8 +63,13 @@ class AnnotationHelper {
             }
 
             @Override
-            public boolean required() {
-                return required;
+            public CompletionMode completion() {
+                return CompletionMode.AUTONOMOUS;
+            }
+
+            @Override
+            public String codec() {
+                return "";
             }
 
             @Override

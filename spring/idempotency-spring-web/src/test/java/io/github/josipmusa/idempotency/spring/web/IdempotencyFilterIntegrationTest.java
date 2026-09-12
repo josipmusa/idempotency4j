@@ -26,6 +26,7 @@ import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.Payload;
+import io.github.josipmusa.idempotency.spring.Idempotent;
 import jakarta.servlet.Filter;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;

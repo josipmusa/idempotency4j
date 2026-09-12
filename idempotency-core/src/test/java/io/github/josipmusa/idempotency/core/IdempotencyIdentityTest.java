@@ -69,6 +69,20 @@ class IdempotencyIdentityTest {
     }
 
     @Test
+    void When_ScopeContainsColon_Expect_Rejected() {
+        assertThatThrownBy(() -> new IdempotencyIdentity("orders:create", "key"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("scope must not contain ':'");
+    }
+
+    @Test
+    void When_KeyContainsColon_Expect_Constructs() {
+        IdempotencyIdentity identity = new IdempotencyIdentity("scope", "urn:msg:42");
+
+        assertThat(identity.key()).isEqualTo("urn:msg:42");
+    }
+
+    @Test
     void When_KeyTooLong_Expect_Rejected() {
         assertThatThrownBy(() -> new IdempotencyIdentity("scope", "k".repeat(256)))
                 .isInstanceOf(IllegalArgumentException.class)
