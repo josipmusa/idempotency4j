@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** Completion can join the caller's transaction. `IdempotencyContext` gains
+  `completionMode()` - `CompletionMode.AUTONOMOUS` (the default) or `JOIN_TRANSACTION` - and
+  `IdempotencyEngine` gains a fifth constructor argument, a `TransactionParticipation`
+  (`TransactionParticipation.none()` by default). Under `JOIN_TRANSACTION` the engine records the
+  completion inside the transaction the action is already running in, so the inbox record and the
+  business writes commit together: a crash before the commit leaves neither, a crash after it
+  leaves both. The terminal callback moves with the record - `onCompleted` fires after the commit,
+  and a rollback releases the lease and fires the new `FailurePhase.ROLLBACK` instead. A joined
+  context without an active transaction is an `IllegalStateException`, and giving a real
+  `TransactionParticipation` to a store that cannot support it is an `IllegalArgumentException` at
+  construction.
+- `IdempotencyStore` gains `supportsTransactionalCompletion()`, default `false`. `JdbcIdempotencyStore`
+  returns `true`; the in-memory and Redis stores return `false`, Redis permanently.
+- The JDBC store takes an optional `ConnectionResolver`, which decides the connection each
+  operation runs on. Only `COMPLETE` is ever expected to get a transaction-bound one, and the store
+  hands every connection back through the resolver instead of closing it, so it never closes or
+  commits a connection it did not open. Without a resolver the store behaves exactly as before.
+- `idempotency-test` gains `TransactionalStoreContract`, the second store contract. Only stores that
+  report support for transactional completion extend it, and they must pass both contracts.
+
 - **Breaking.** The engine owns completion. `IdempotencyEngine.execute` now takes the action as a
   `ThrowingSupplier<T>` plus a `PayloadCodec<T>` and returns a sealed
   `Outcome<T>` - `Executed(value)`, `Replayed(value, completedAt)`, or `InFlight(retryAfter)` -

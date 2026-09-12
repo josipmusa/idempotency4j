@@ -171,6 +171,25 @@ public interface IdempotencyStore {
     void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension);
 
     /**
+     * Reports whether {@link #complete} can run inside a transaction the caller already
+     * opened, so the record and the caller's own writes commit together.
+     *
+     * <p>A store returns {@code true} only when it can be handed the caller's transactional
+     * resource - a JDBC store with a transaction-aware connection resolver can; an in-memory
+     * map and Redis cannot, and never will. Defaults to {@code false}, so a store that says
+     * nothing is assumed not to support it.
+     *
+     * <p>When this is {@code false}, an {@link IdempotencyEngine} configured with a real
+     * {@link TransactionParticipation} is rejected at construction rather than failing on the
+     * first request.
+     *
+     * @return {@code true} if {@link CompletionMode#JOIN_TRANSACTION} is supported
+     */
+    default boolean supportsTransactionalCompletion() {
+        return false;
+    }
+
+    /**
      * Purges all expired records from the store.
      *
      * <p>A record is eligible for purging when its {@code expires_at} is in the

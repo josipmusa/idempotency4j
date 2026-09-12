@@ -304,6 +304,17 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         replicaAcknowledgement = config.replicaAcknowledgement();
     }
 
+    /**
+     * Reports {@code false}, and always will: Redis has no transaction a JDBC caller's business
+     * writes could also be enrolled in, so a completion here can never commit with them.
+     *
+     * @return {@code false}
+     */
+    @Override
+    public boolean supportsTransactionalCompletion() {
+        return false;
+    }
+
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
         Objects.requireNonNull(context, "context must not be null");

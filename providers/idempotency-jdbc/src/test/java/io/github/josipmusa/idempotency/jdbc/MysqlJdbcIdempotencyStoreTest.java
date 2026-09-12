@@ -32,6 +32,7 @@ import java.time.Duration;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -93,5 +94,15 @@ class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
 
         assertThatThrownBy(() -> failingStore.tryAcquire(context))
                 .isInstanceOf(IdempotencyStoreUnavailableException.class);
+    }
+
+    /** The transactional half of the store contract, on the same container. */
+    @Nested
+    class TransactionalCompletion extends JdbcTransactionalStoreContract {
+
+        @Override
+        protected DataSource dataSource() {
+            return dataSource;
+        }
     }
 }

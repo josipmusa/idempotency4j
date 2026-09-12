@@ -17,6 +17,7 @@ package io.github.josipmusa.idempotency.core;
 
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener.FailurePhase;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyRollbackException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -65,6 +66,16 @@ import org.slf4j.LoggerFactory;
  * that was never used. What the engine does next is
  * {@link CompletionFailurePolicy the configured policy}.
  *
+ * <h2>Completion modes</h2>
+ * <p>By default the completion is recorded on its own, the moment the action returns. A
+ * context asking for {@link CompletionMode#JOIN_TRANSACTION} instead has the engine call
+ * {@code complete} inside the transaction the action is already running in, so the record and
+ * the action's writes commit together and a crash in between leaves neither. That mode needs
+ * an active transaction at entry - the engine throws {@link IllegalStateException} otherwise -
+ * and a store that supports it, which the constructor checks. The terminal callback moves with
+ * the record: {@code onCompleted} after the commit, or a release plus
+ * {@link FailurePhase#ROLLBACK} after a rollback.
+ *
  * <h2>Lifecycle callbacks</h2>
  * <p>Registered {@link IdempotencyLifecycleListener}s observe each execution synchronously
  * on the calling thread. See that interface for the callback contract; the engine guarantees
@@ -79,6 +90,7 @@ public final class IdempotencyEngine {
     private final ScheduledExecutorService scheduler;
     private final List<IdempotencyLifecycleListener> listeners;
     private final CompletionFailurePolicy completionFailurePolicy;
+    private final TransactionParticipation transactions;
 
     /**
      * @param store     the persistence backend for idempotency keys
@@ -116,11 +128,42 @@ public final class IdempotencyEngine {
             ScheduledExecutorService scheduler,
             List<IdempotencyLifecycleListener> listeners,
             IdempotencyConfig config) {
+        this(store, scheduler, listeners, config, TransactionParticipation.none());
+    }
+
+    /**
+     * @param store        the persistence backend for idempotency keys
+     * @param scheduler    used to schedule heartbeat tasks - should be shared
+     *                     across engine instances, not created per-request
+     * @param listeners    lifecycle observers, invoked in the given order on the
+     *                     calling thread; copied defensively
+     * @param config       application defaults; the engine reads only
+     *                     {@link IdempotencyConfig#completionFailurePolicy()} from it, because
+     *                     everything else is already resolved into the context it is handed
+     * @param transactions how the engine sees the caller's transaction, for contexts asking
+     *                     for {@link CompletionMode#JOIN_TRANSACTION};
+     *                     {@link TransactionParticipation#none()} disables joined completion
+     * @throws IllegalArgumentException if a real {@code transactions} is supplied for a store
+     *         whose {@link IdempotencyStore#supportsTransactionalCompletion()} is {@code false}
+     */
+    public IdempotencyEngine(
+            IdempotencyStore store,
+            ScheduledExecutorService scheduler,
+            List<IdempotencyLifecycleListener> listeners,
+            IdempotencyConfig config,
+            TransactionParticipation transactions) {
         this.store = Objects.requireNonNull(store, "store must not be null");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
         this.listeners = List.copyOf(Objects.requireNonNull(listeners, "listeners must not be null"));
         this.completionFailurePolicy =
                 Objects.requireNonNull(config, "config must not be null").completionFailurePolicy();
+        this.transactions = Objects.requireNonNull(transactions, "transactions must not be null");
+        if (transactions != TransactionParticipation.none() && !store.supportsTransactionalCompletion()) {
+            throw new IllegalArgumentException("Store " + store.getClass().getName()
+                    + " does not support transactional completion, so it cannot be given a "
+                    + "TransactionParticipation. Use TransactionParticipation.none(), or a store whose "
+                    + "supportsTransactionalCompletion() is true.");
+        }
     }
 
     /**
@@ -151,6 +194,7 @@ public final class IdempotencyEngine {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(action, "action must not be null");
         Objects.requireNonNull(codec, "codec must not be null");
+        requireTransactionForJoinedMode(context);
         return switch (store.tryAcquire(context)) {
             case AcquireResult.Acquired(String leaseId) -> runWithHeartbeat(context, leaseId, action, codec);
             case AcquireResult.Duplicate(Payload payload, Instant completedAt) -> {
@@ -261,8 +305,51 @@ public final class IdempotencyEngine {
             notifyFailed(context, leaseId, t, FailurePhase.COMPLETION);
             throw t;
         }
-        notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload));
+        if (context.completionMode() == CompletionMode.JOIN_TRANSACTION) {
+            deferTerminalToTransaction(context, leaseId, payload);
+        } else {
+            notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload));
+        }
         return new Outcome.Executed<>(value);
+    }
+
+    /**
+     * Rejects a joined-mode context that arrives without a transaction to join.
+     *
+     * <p>Checked before the lease is acquired, so the caller's mistake costs nothing and
+     * leaves no record behind. Running the action autonomously instead would silently give up
+     * the guarantee the context asked for, which is the one thing worse than failing.
+     */
+    private void requireTransactionForJoinedMode(IdempotencyContext context) {
+        if (context.completionMode() == CompletionMode.JOIN_TRANSACTION && !transactions.active()) {
+            throw new IllegalStateException("Context for " + context.identity()
+                    + " asks for CompletionMode.JOIN_TRANSACTION but no transaction is active on this thread. "
+                    + "Start the transaction around the engine call, or use CompletionMode.AUTONOMOUS.");
+        }
+    }
+
+    /**
+     * Hands the terminal callback to the caller's transaction.
+     *
+     * <p>{@code store.complete} has already run, but inside the caller's transaction, so
+     * nothing is durable yet: the record becomes COMPLETE on commit and vanishes back to
+     * IN_PROGRESS on rollback. Announcing {@code onCompleted} now would be a lie a rollback
+     * could not take back, so both terminals wait for the outcome and exactly one of them
+     * fires - the invariant is preserved, just later.
+     *
+     * <p>On rollback the record is left IN_PROGRESS with a live lease, so the engine releases
+     * it. That call runs after the transaction has finished, so it reaches the store on a
+     * connection of the store's own - the same autonomous path the action-failure release
+     * takes.
+     */
+    private void deferTerminalToTransaction(IdempotencyContext context, String leaseId, Payload payload) {
+        transactions.afterCommit(
+                () -> notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload)));
+        transactions.afterRollback(() -> {
+            IdempotencyRollbackException rollback = new IdempotencyRollbackException(context.identity());
+            releaseQuietly(context, leaseId, rollback);
+            notifyFailed(context, leaseId, rollback, FailurePhase.ROLLBACK);
+        });
     }
 
     /**

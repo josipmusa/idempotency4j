@@ -65,6 +65,7 @@ public final class IdempotencyContext {
     private final Duration leaseDuration;
     private final Duration waitTimeout;
     private final String requestFingerprint;
+    private final CompletionMode completionMode;
 
     private IdempotencyContext(Builder builder) {
         this.identity = builder.identity;
@@ -72,6 +73,7 @@ public final class IdempotencyContext {
         this.leaseDuration = builder.leaseDuration;
         this.waitTimeout = builder.waitTimeout;
         this.requestFingerprint = builder.requestFingerprint;
+        this.completionMode = builder.completionMode;
     }
 
     /**
@@ -149,6 +151,16 @@ public final class IdempotencyContext {
     }
 
     /**
+     * Returns how the completion is recorded relative to the caller's transaction.
+     *
+     * @return the completion mode; never {@code null}, {@link CompletionMode#AUTONOMOUS}
+     *         unless the caller asked for something else
+     */
+    public CompletionMode completionMode() {
+        return completionMode;
+    }
+
+    /**
      * Returns the scope of this operation's {@link #identity()}.
      *
      * @return the scope
@@ -187,18 +199,20 @@ public final class IdempotencyContext {
                 && ttl.equals(other.ttl)
                 && leaseDuration.equals(other.leaseDuration)
                 && waitTimeout.equals(other.waitTimeout)
-                && Objects.equals(requestFingerprint, other.requestFingerprint);
+                && Objects.equals(requestFingerprint, other.requestFingerprint)
+                && completionMode == other.completionMode;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(identity, ttl, leaseDuration, waitTimeout, requestFingerprint);
+        return Objects.hash(identity, ttl, leaseDuration, waitTimeout, requestFingerprint, completionMode);
     }
 
     @Override
     public String toString() {
         return "IdempotencyContext{identity=" + identity + ", ttl=" + ttl + ", leaseDuration=" + leaseDuration
-                + ", waitTimeout=" + waitTimeout + ", requestFingerprint=" + requestFingerprint + "}";
+                + ", waitTimeout=" + waitTimeout + ", requestFingerprint=" + requestFingerprint + ", completionMode="
+                + completionMode + "}";
     }
 
     /** Builds {@link IdempotencyContext} instances. */
@@ -209,6 +223,7 @@ public final class IdempotencyContext {
         private Duration leaseDuration = Duration.ofSeconds(30);
         private Duration waitTimeout = Duration.ofSeconds(10);
         private String requestFingerprint;
+        private CompletionMode completionMode = CompletionMode.AUTONOMOUS;
 
         private Builder(IdempotencyIdentity identity) {
             this.identity = Objects.requireNonNull(identity, "identity must not be null");
@@ -256,6 +271,19 @@ public final class IdempotencyContext {
          */
         public Builder fingerprint(String fingerprint) {
             this.requestFingerprint = fingerprint;
+            return this;
+        }
+
+        /**
+         * Sets how the completion is recorded relative to the caller's transaction.
+         *
+         * @param completionMode {@link CompletionMode#JOIN_TRANSACTION} to commit the record
+         *                       together with the action's own writes; defaults to
+         *                       {@link CompletionMode#AUTONOMOUS}
+         * @return this builder
+         */
+        public Builder completionMode(CompletionMode completionMode) {
+            this.completionMode = Objects.requireNonNull(completionMode, "completionMode must not be null");
             return this;
         }
 
