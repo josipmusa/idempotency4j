@@ -47,8 +47,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     private enum Status {
         IN_PROGRESS,
-        COMPLETE,
-        FAILED
+        COMPLETE
     }
 
     /**
@@ -126,12 +125,10 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                 return AcquireResult.duplicate(existing.payload(), existing.completedAt());
             }
 
-            // FAILED or expired lease — attempt to claim the entry atomically.
-            // An expired lease is claimable by any caller, regardless of that caller's
-            // own leaseDuration or waitTimeout. This matches JDBC behavior.
-            if (existing.status() == Status.FAILED
-                    || (existing.leaseExpiresAt() != null
-                            && existing.leaseExpiresAt().isBefore(now))) {
+            // Expired lease — attempt to claim the entry atomically. An expired lease is
+            // claimable by any caller, regardless of that caller's own leaseDuration or
+            // waitTimeout. This matches JDBC behavior.
+            if (existing.leaseExpiresAt() != null && existing.leaseExpiresAt().isBefore(now)) {
                 if (store.replace(identity, existing, newEntry)) {
                     return AcquireResult.acquired(leaseId);
                 }
@@ -195,10 +192,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
                         "Cannot release " + identity + ": entry is " + existing.status() + ", expected IN_PROGRESS");
             }
             requireLease(existing, leaseId, identity, "release");
-            // expiresAt is carried over untouched: a FAILED entry is re-acquirable at once,
-            // and its original TTL is what keeps a purge from dropping it before a retry.
-            return new Entry(
-                    Status.FAILED, null, null, null, existing.expiresAt(), existing.requestFingerprint(), null);
+            // Removing the entry leaves no trace of the failed attempt: the key is free
+            // again and the next tryAcquire sees it as new.
+            return null;
         });
     }
 
@@ -242,16 +238,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     /**
      * Purges all expired entries from the in-memory store.
      *
-     * <p>An entry is eligible for purging based on its status:
-     * <ul>
-     *   <li>{@code COMPLETE} and {@code FAILED} — removed when
-     *       {@code expiresAt} is in the past</li>
-     *   <li>{@code IN_PROGRESS} — removed only when <em>both</em>
-     *       {@code leaseExpiresAt} and {@code expiresAt} are in the past.
-     *       Entries whose lease has expired but whose TTL has not are
-     *       intentionally kept — they remain eligible for stealing
-     *       by the next {@link #tryAcquire} caller.</li>
-     * </ul>
+     * <p>An entry is eligible for purging when its {@code expiresAt} is in the past
+     * and nobody owns it: an IN_PROGRESS entry also needs an expired lease. A live
+     * lease protects the entry however old it is, so a purge can never delete an
+     * acquisition that is still running. An expired lease on its own keeps the entry
+     * too: it is stealable by the next {@link #tryAcquire} caller, not garbage.
      *
      * <p>This method does not self-schedule. In Spring Boot applications,
      * the starter drives the purge via {@code @Scheduled}. In standalone
@@ -282,14 +273,10 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     private static boolean isExpired(Entry entry, Instant now) {
-        return switch (entry.status()) {
-            case COMPLETE, FAILED ->
-                entry.expiresAt() != null && entry.expiresAt().isBefore(now);
-            case IN_PROGRESS ->
-                entry.leaseExpiresAt() != null
-                        && entry.leaseExpiresAt().isBefore(now)
-                        && entry.expiresAt() != null
-                        && entry.expiresAt().isBefore(now);
-        };
+        if (entry.expiresAt() == null || !entry.expiresAt().isBefore(now)) {
+            return false;
+        }
+        return entry.status() != Status.IN_PROGRESS
+                || (entry.leaseExpiresAt() != null && entry.leaseExpiresAt().isBefore(now));
     }
 }

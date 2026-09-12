@@ -36,6 +36,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -101,24 +102,21 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                     + "fingerprint = ?, lease_id = ?, "
                     + "payload_type = NULL, payload = NULL, attributes = NULL, completed_at = NULL "
                     + "WHERE scope = ? AND idempotency_key = ? "
-                    + "AND (status = 'FAILED' OR (status = 'IN_PROGRESS' AND lease_expires_at < ?))";
+                    + "AND status = 'IN_PROGRESS' AND lease_expires_at < ?";
 
     private static final String COMPLETE =
             "UPDATE idempotency_records SET status = 'COMPLETE', payload_type = ?, payload = ?, "
                     + "attributes = ?, completed_at = ?, lease_expires_at = NULL, lease_id = NULL, expires_at = ? "
                     + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
-    private static final String RELEASE = "UPDATE idempotency_records SET status = 'FAILED', lease_expires_at = NULL, "
-            + "lease_id = NULL, payload_type = NULL, payload = NULL, attributes = NULL "
+    private static final String RELEASE = "DELETE FROM idempotency_records "
             + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
     private static final String EXTEND_LEASE = "UPDATE idempotency_records SET lease_expires_at = ? "
             + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
-    private static final String PURGE_EXPIRED = "DELETE FROM idempotency_records WHERE "
-            + "(status = 'COMPLETE' AND expires_at < ?) OR "
-            + "(status = 'FAILED' AND expires_at < ?) OR "
-            + "(status = 'IN_PROGRESS' AND lease_expires_at < ? AND expires_at < ?)";
+    private static final String PURGE_EXPIRED = "DELETE FROM idempotency_records WHERE expires_at < ? "
+            + "AND (status <> 'IN_PROGRESS' OR lease_expires_at < ?)";
 
     /**
      * Outcome of inspecting a locked row during the poll loop.
@@ -229,34 +227,12 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         if (!dialect.contains("postgresql")) {
             createMysqlIndex();
         }
-        ensureLeaseColumn();
-    }
-
-    private void ensureLeaseColumn() {
-        try (Connection conn = dataSource.getConnection()) {
-            try (ResultSet columns =
-                    conn.getMetaData().getColumns(conn.getCatalog(), null, "idempotency_records", "lease_id")) {
-                if (columns.next()) {
-                    return;
-                }
-            }
-            try (Statement stmt = conn.createStatement()) {
-                stmt.execute("ALTER TABLE idempotency_records ADD COLUMN lease_id VARCHAR(36) NULL");
-            } catch (SQLException e) {
-                if (e.getErrorCode() != 1060 && !"42701".equals(e.getSQLState())) {
-                    throw e;
-                }
-            }
-        } catch (SQLException e) {
-            throw new IdempotencyStoreUnavailableException("Failed to add lease fencing column", e);
-        }
     }
 
     private void createMysqlIndex() {
         try (Connection conn = dataSource.getConnection();
                 Statement stmt = conn.createStatement()) {
-            stmt.execute("CREATE INDEX idx_idempotency_status_expires "
-                    + "ON idempotency_records (status, expires_at, lease_expires_at)");
+            stmt.execute("CREATE INDEX idx_idempotency_expires ON idempotency_records (expires_at)");
         } catch (SQLException e) {
             // MySQL error 1061 = duplicate key name (index already exists)
             if (e.getErrorCode() != 1061) {
@@ -356,29 +332,34 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         Objects.requireNonNull(identity, "identity must not be null");
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
-            try {
-                // expires_at is left as the row was created with: a FAILED record is
-                // re-acquirable at once, and its original TTL is what keeps a purge from
-                // dropping it before the retry arrives.
-                try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
-                    bindIdentity(ps, 1, identity);
-                    ps.setString(3, leaseId);
-                    if (ps.executeUpdate() == 0) {
-                        throw diagnoseMissingInProgress(conn, identity, leaseId, "release");
-                    }
-                }
-                conn.commit();
-            } catch (IdempotencyStoreException e) {
-                rollbackQuietly(conn);
-                throw e;
-            } catch (SQLException e) {
-                rollbackQuietly(conn);
-                throw unavailable("release " + identity, e);
-            } finally {
-                resetAutoCommit(conn);
-            }
+            deleteInTransaction(conn, identity, leaseId);
         } catch (SQLException e) {
             throw unavailable("release " + identity, e);
+        }
+    }
+
+    /**
+     * Deletes the row outright: a failed attempt leaves no trace, and the next
+     * {@code tryAcquire} for this identity inserts a fresh row.
+     */
+    private void deleteInTransaction(Connection conn, IdempotencyIdentity identity, String leaseId) {
+        try {
+            try (PreparedStatement ps = conn.prepareStatement(RELEASE)) {
+                bindIdentity(ps, 1, identity);
+                ps.setString(3, leaseId);
+                if (ps.executeUpdate() == 0) {
+                    throw diagnoseMissingInProgress(conn, identity, leaseId, "release");
+                }
+            }
+            conn.commit();
+        } catch (IdempotencyStoreException e) {
+            rollbackQuietly(conn);
+            throw e;
+        } catch (SQLException e) {
+            rollbackQuietly(conn);
+            throw unavailable("release " + identity, e);
+        } finally {
+            resetAutoCommit(conn);
         }
     }
 
@@ -403,9 +384,14 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     /**
      * Deletes stale records from the database in a single query.
      *
-     * <p>Removes COMPLETE and FAILED rows whose {@code expires_at} is in
-     * the past, and IN_PROGRESS rows where both {@code lease_expires_at}
-     * and {@code expires_at} are in the past.
+     * <p>Removes every row whose {@code expires_at} is in the past and that nobody
+     * owns: an IN_PROGRESS row also needs an expired {@code lease_expires_at}. A row
+     * whose lease is still being heartbeated is never deleted, however old it is.
+     * An expired lease on its own is not a reason to delete a row either: that row
+     * is stealable by the next {@code tryAcquire} caller.
+     *
+     * <p>{@code idx_idempotency_expires} drives the scan; the ownership clause is a
+     * filter on the rows it returns.
      *
      * @return the number of rows deleted
      */
@@ -416,8 +402,6 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             try (PreparedStatement ps = conn.prepareStatement(PURGE_EXPIRED)) {
                 setTimestamp(ps, 1, now);
                 setTimestamp(ps, 2, now);
-                setTimestamp(ps, 3, now);
-                setTimestamp(ps, 4, now);
                 return ps.executeUpdate();
             }
         } catch (SQLException e) {
@@ -441,22 +425,39 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 setTimestamp(del, 3, now);
                 del.executeUpdate();
             }
-            try (PreparedStatement ins = conn.prepareStatement(INSERT)) {
-                bindIdentity(ins, 1, identity);
-                setTimestamp(ins, 3, now.plus(context.leaseDuration()));
-                setTimestamp(ins, 4, now.plus(context.ttl()));
-                ins.setString(5, context.requestFingerprint());
-                ins.setString(6, leaseId);
-                ins.executeUpdate();
-                return true;
-            } catch (SQLException e) {
-                if (!isDuplicateKeyViolation(e)) {
-                    throw unavailable("insert record for " + identity, e);
-                }
-                return false; // duplicate key — row already exists
-            }
+            return insertRow(conn, context, leaseId, now);
         } catch (SQLException e) {
+            if (isTransientRollback(e)) {
+                return false;
+            }
             throw unavailable("perform initial acquire for " + identity, e);
+        }
+    }
+
+    /**
+     * Inserts the fresh IN_PROGRESS row.
+     *
+     * <p>A failure here is not automatically a broken store. A duplicate key means another
+     * caller inserted first, and a transient rollback means this insert lost a race against a
+     * concurrent delete of the same primary key. Both are a lost race, reported as
+     * {@code false} so the poll loop re-inspects the row within the caller's wait timeout.
+     *
+     * @return {@code true} if the row was inserted, {@code false} if the race was lost
+     */
+    private boolean insertRow(Connection conn, IdempotencyContext context, String leaseId, Instant now) {
+        try (PreparedStatement ins = conn.prepareStatement(INSERT)) {
+            bindIdentity(ins, 1, context.identity());
+            setTimestamp(ins, 3, now.plus(context.leaseDuration()));
+            setTimestamp(ins, 4, now.plus(context.ttl()));
+            ins.setString(5, context.requestFingerprint());
+            ins.setString(6, leaseId);
+            ins.executeUpdate();
+            return true;
+        } catch (SQLException e) {
+            if (!isDuplicateKeyViolation(e) && !isTransientRollback(e)) {
+                throw unavailable("insert record for " + context.identity(), e);
+            }
+            return false;
         }
     }
 
@@ -467,21 +468,33 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private RowInspection inspectRow(IdempotencyContext context, String leaseId) {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
-            try {
-                RowInspection inspection = doInspectRow(conn, context, leaseId);
-                conn.commit();
-                return inspection;
-            } catch (IdempotencyStoreException e) {
-                rollbackQuietly(conn);
-                throw e;
-            } catch (SQLException e) {
-                rollbackQuietly(conn);
-                throw unavailable("poll " + context.identity(), e);
-            } finally {
-                resetAutoCommit(conn);
-            }
+            return inspectRowInTransaction(conn, context, leaseId);
         } catch (SQLException e) {
             throw unavailable("get connection for " + context.identity(), e);
+        }
+    }
+
+    /**
+     * Runs the inspection and commits it, translating a failure of the transaction itself. A
+     * transient rollback (a deadlock or lock-wait timeout against a concurrent writer) is a
+     * lost race rather than a broken store, so the caller simply polls again.
+     */
+    private RowInspection inspectRowInTransaction(Connection conn, IdempotencyContext context, String leaseId) {
+        try {
+            RowInspection inspection = doInspectRow(conn, context, leaseId);
+            conn.commit();
+            return inspection;
+        } catch (IdempotencyStoreException e) {
+            rollbackQuietly(conn);
+            throw e;
+        } catch (SQLException e) {
+            rollbackQuietly(conn);
+            if (isTransientRollback(e)) {
+                return RowInspection.keepPolling(Duration.ZERO);
+            }
+            throw unavailable("poll " + context.identity(), e);
+        } finally {
+            resetAutoCommit(conn);
         }
     }
 
@@ -507,7 +520,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 }
 
                 Instant now = currentTime(conn);
-                if ("FAILED".equals(status) || isStale(leaseExpiresTs, now)) {
+                if (isStale(leaseExpiresTs, now)) {
                     boolean stolen = tryStealLease(conn, context, leaseId, now);
                     return stolen
                             ? RowInspection.resolved(AcquireResult.acquired(leaseId))
@@ -613,6 +626,22 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         return storedFingerprint != null
                 && incomingFingerprint != null
                 && !storedFingerprint.equals(incomingFingerprint);
+    }
+
+    /**
+     * Whether the database rolled this statement back and expects the caller to try again -
+     * a deadlock or a lock-wait timeout, reported as SQL state class 40.
+     *
+     * <p>{@code release} deletes the record, so the acquire path races an INSERT against
+     * another caller's DELETE on the same primary key, and InnoDB breaks some of those races
+     * by rolling one side back. That is a lost race, not an unreachable store, and the poll
+     * loop already knows what to do with a lost race - it does the same thing for a duplicate
+     * key. Surfacing it would also break the SPI contract that {@code tryAcquire} does its own
+     * waiting and retrying and reports only an acquisition outcome.
+     */
+    private static boolean isTransientRollback(SQLException e) {
+        return e instanceof SQLTransactionRollbackException
+                || (e.getSQLState() != null && e.getSQLState().startsWith("40"));
     }
 
     private boolean isDuplicateKeyViolation(SQLException e) {
