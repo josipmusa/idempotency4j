@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** New `idempotency-spring` module holding the Spring integration that is not about
+  HTTP: `SpringTransactionParticipation`, a `TransactionAwareConnectionResolver` that runs
+  `COMPLETE` on the caller's transaction and everything else on a connection of its own, a
+  method-level `@Idempotent`, and the AOP interceptor behind it. An event listener, a
+  `@KafkaListener` method, and a plain service method now get the same integration without pulling
+  in Servlet.
+- **Breaking.** `@Idempotent` moves from `io.github.josipmusa.idempotency.spring.web` to
+  `io.github.josipmusa.idempotency.spring` and gains `key` (a SpEL expression over the method's
+  parameters, required for method-level use), `scope` (empty means `<simple class
+  name>.<method name>`), `completion`, and `codec` (the name of a `PayloadCodec` bean, required for
+  a method that returns a value). `required` leaves the annotation.
+- **Breaking.** Whether a request without an idempotency key is rejected is now
+  `WebIdempotencyConfig.required()`, an application-wide setting defaulting to `true`, rather than a
+  per-handler annotation attribute. `IdempotentHandlerRegistry.ResolvedIdempotent` loses its
+  `required` component.
+- **Breaking.** A scope may not contain `':'`. Stores compose scope and key into one string, and the
+  composition is only unambiguous while the scope has no separator in it - without the restriction a
+  client-controlled key could reach across scopes. Keys may still contain colons.
+- An intercepted method that finds the key already in flight throws the new
+  `IdempotencyInFlightException`, which carries `retryAfter`, so a broker redelivers instead of a
+  consumer thread blocking. `OutcomeMapper` is the seam for callers that want a different answer.
+
 - **Breaking.** Completion can join the caller's transaction. `IdempotencyContext` gains
   `completionMode()` - `CompletionMode.AUTONOMOUS` (the default) or `JOIN_TRANSACTION` - and
   `IdempotencyEngine` gains a fifth constructor argument, a `TransactionParticipation`

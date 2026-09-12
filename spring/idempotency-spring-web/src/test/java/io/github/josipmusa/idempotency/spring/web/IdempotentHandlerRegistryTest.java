@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
+import io.github.josipmusa.idempotency.spring.Idempotent;
 import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.Map;
@@ -43,7 +44,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_InvalidTtl_Expect_ThrowsIllegalStateException() {
-        setupHandler(AnnotationHelper.annotation(true, "2h", ""));
+        setupHandler(AnnotationHelper.annotation("2h", ""));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
                 .isInstanceOf(IllegalStateException.class)
@@ -53,7 +54,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_InvalidLease_Expect_ThrowsIllegalStateException() {
-        setupHandler(AnnotationHelper.annotation(true, "", "10s"));
+        setupHandler(AnnotationHelper.annotation("", "10s"));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
                 .isInstanceOf(IllegalStateException.class)
@@ -63,7 +64,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_InvalidWaitTimeout_Expect_ThrowsIllegalStateException() {
-        setupHandler(AnnotationHelper.annotation(true, "", "", "3s"));
+        setupHandler(AnnotationHelper.annotation("", "", "3s"));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
                 .isInstanceOf(IllegalStateException.class)
@@ -73,7 +74,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_ValidAnnotation_Expect_ResolvesCorrectDurations() {
-        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "PT2H", "PT30S", "PT0S"));
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("PT2H", "PT30S", "PT0S"));
         registry.afterSingletonsInstantiated();
 
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
@@ -86,7 +87,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_LeaseAndWaitDiffer_Expect_BothResolvedIndependently() {
-        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "", "PT5M", "PT2S"));
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("", "PT5M", "PT2S"));
         registry.afterSingletonsInstantiated();
 
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
@@ -97,7 +98,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_EmptyDurations_Expect_FallBackToConfigDefaults() {
-        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(true, "", ""));
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("", ""));
         registry.afterSingletonsInstantiated();
 
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
@@ -123,8 +124,7 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_Resolved_Expect_ScopeIsSimpleClassNameAndMethodName() {
-        HandlerMethod handlerMethod =
-                setupHandler(AnnotationHelper.annotation(true), PaymentController.class, "create");
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation(), PaymentController.class, "create");
         registry.afterSingletonsInstantiated();
 
         ResolvedIdempotent resolved = registry.resolve(handlerMethod);
@@ -134,12 +134,30 @@ class IdempotentHandlerRegistryTest {
 
     @Test
     void When_ScopeExceedsMaxLength_Expect_ThrowsIllegalStateException() {
-        setupHandler(AnnotationHelper.annotation(true), PaymentController.class, "m".repeat(128));
+        setupHandler(AnnotationHelper.annotation(), PaymentController.class, "m".repeat(128));
 
         assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("scope")
                 .hasMessageContaining("128");
+    }
+
+    @Test
+    void When_ScopeSetOnAnnotation_Expect_UsedInsteadOfHandlerName() {
+        HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("", "", "", "payments.create"));
+        registry.afterSingletonsInstantiated();
+
+        assertThat(registry.resolve(handlerMethod).scope()).isEqualTo("payments.create");
+    }
+
+    @Test
+    void When_ScopeContainsColon_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.annotation("", "", "", "payments:create"));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scope")
+                .hasMessageContaining("':'");
     }
 
     private HandlerMethod setupHandler(Idempotent annotation) {

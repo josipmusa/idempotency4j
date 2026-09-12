@@ -19,6 +19,7 @@ import static io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegist
 
 import io.github.josipmusa.idempotency.core.*;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
+import io.github.josipmusa.idempotency.spring.Idempotent;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -126,7 +127,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
         String key = request.getHeader(config.keyHeader());
         if (key == null || key.isBlank()) {
-            if (resolvedIdempotent.required()) {
+            if (config.required()) {
                 HttpIdempotencyMapper.writeJsonError(response, 422, ERROR_MISSING_KEY);
                 return;
             }

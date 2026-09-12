@@ -30,8 +30,16 @@ import java.util.Objects;
  *
  * <p>Serializable so that exceptions carrying an identity stay serializable.
  *
+ * <p>A scope may not contain {@code ':'}. Stores compose the two halves into a single
+ * string - the Redis layout is {@code <prefix>rec:<scope>:<key>} - and that composition is
+ * only unambiguous while the scope has no separator in it. Without the restriction, scope
+ * {@code a:b} with key {@code c} and scope {@code a} with key {@code b:c} would share one
+ * record, which would let a client-controlled key reach across scopes. Keys may contain
+ * colons: once the scope cannot, the first colon after the scope always ends it.
+ *
  * @param scope names the unit of work, for example {@code PaymentController.create}.
- *              Non-blank, at most {@value #MAX_SCOPE_LENGTH} characters.
+ *              Non-blank, at most {@value #MAX_SCOPE_LENGTH} characters, and free of
+ *              {@code ':'}.
  * @param key   names the occurrence within that scope, typically a client-supplied
  *              header value or a message identifier. Non-blank, at most
  *              {@value #MAX_KEY_LENGTH} characters.
@@ -52,6 +60,9 @@ public record IdempotencyIdentity(String scope, String key) implements Serializa
         }
         if (scope.length() > MAX_SCOPE_LENGTH) {
             throw new IllegalArgumentException("scope length must not exceed " + MAX_SCOPE_LENGTH + " characters");
+        }
+        if (scope.indexOf(':') >= 0) {
+            throw new IllegalArgumentException("scope must not contain ':', got: " + scope);
         }
         if (key.isBlank()) {
             throw new IllegalArgumentException("key must not be blank");

@@ -35,10 +35,14 @@ public final class WebIdempotencyConfig {
     /** The status a request rejected because another caller holds the key gets. */
     public static final int DEFAULT_IN_FLIGHT_STATUS = 409;
 
+    /** Whether a request to an idempotent endpoint must carry a key. */
+    public static final boolean DEFAULT_REQUIRED = true;
+
     private final String keyHeader;
     private final int inFlightStatus;
+    private final boolean required;
 
-    private WebIdempotencyConfig(String keyHeader, int inFlightStatus) {
+    private WebIdempotencyConfig(String keyHeader, int inFlightStatus, boolean required) {
         if (keyHeader == null || keyHeader.isBlank()) {
             throw new IllegalArgumentException("keyHeader must not be blank");
         }
@@ -51,6 +55,7 @@ public final class WebIdempotencyConfig {
         }
         this.keyHeader = keyHeader;
         this.inFlightStatus = inFlightStatus;
+        this.required = required;
     }
 
     /**
@@ -108,21 +113,38 @@ public final class WebIdempotencyConfig {
         return inFlightStatus;
     }
 
+    /**
+     * Whether a request to an idempotent endpoint is rejected with 422 when it carries no key.
+     *
+     * <p>An application-wide answer rather than a per-endpoint one: whether clients must send
+     * a key is a question about the API's contract as a whole, and an API that answers it
+     * differently per endpoint is one clients cannot reason about. {@code false} lets a
+     * request without a key through unprotected, for an API where idempotency is offered
+     * rather than demanded.
+     *
+     * @return {@code true} when a missing key is an error
+     */
+    public boolean required() {
+        return required;
+    }
+
     @Override
     public boolean equals(Object other) {
         return other instanceof WebIdempotencyConfig that
                 && keyHeader.equals(that.keyHeader)
-                && inFlightStatus == that.inFlightStatus;
+                && inFlightStatus == that.inFlightStatus
+                && required == that.required;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(keyHeader, inFlightStatus);
+        return Objects.hash(keyHeader, inFlightStatus, required);
     }
 
     @Override
     public String toString() {
-        return "WebIdempotencyConfig{keyHeader='" + keyHeader + "', inFlightStatus=" + inFlightStatus + "}";
+        return "WebIdempotencyConfig{keyHeader='" + keyHeader + "', inFlightStatus=" + inFlightStatus + ", required="
+                + required + "}";
     }
 
     /** Builds a {@link WebIdempotencyConfig}, overriding only what differs from the defaults. */
@@ -130,6 +152,7 @@ public final class WebIdempotencyConfig {
 
         private String keyHeader = DEFAULT_KEY_HEADER;
         private int inFlightStatus = DEFAULT_IN_FLIGHT_STATUS;
+        private boolean required = DEFAULT_REQUIRED;
 
         /**
          * Sets the header carrying the idempotency key.
@@ -154,6 +177,18 @@ public final class WebIdempotencyConfig {
         }
 
         /**
+         * Sets whether a request without an idempotency key is rejected.
+         *
+         * @param required {@code false} to let unkeyed requests through unprotected;
+         *                 defaults to {@value WebIdempotencyConfig#DEFAULT_REQUIRED}
+         * @return this builder
+         */
+        public Builder required(boolean required) {
+            this.required = required;
+            return this;
+        }
+
+        /**
          * Constructs the {@link WebIdempotencyConfig} with the configured values.
          *
          * @return a new immutable config instance
@@ -161,7 +196,7 @@ public final class WebIdempotencyConfig {
          *         name, or the in-flight status is outside 400-599
          */
         public WebIdempotencyConfig build() {
-            return new WebIdempotencyConfig(keyHeader, inFlightStatus);
+            return new WebIdempotencyConfig(keyHeader, inFlightStatus, required);
         }
     }
 }

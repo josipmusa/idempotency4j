@@ -16,6 +16,7 @@
 package io.github.josipmusa.idempotency.core.exception;
 
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
+import java.io.Serial;
 
 /**
  * The completion was recorded inside the caller's transaction and that transaction rolled
@@ -30,6 +31,7 @@ import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
  */
 public class IdempotencyRollbackException extends IdempotencyException {
 
+    @Serial
     private static final long serialVersionUID = 1L;
 
     private final transient IdempotencyIdentity identity;

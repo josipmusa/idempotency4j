@@ -17,6 +17,7 @@ package io.github.josipmusa.idempotency.spring.web;
 
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
+import io.github.josipmusa.idempotency.spring.Idempotent;
 import java.lang.reflect.Method;
 import java.time.DateTimeException;
 import java.time.Duration;
@@ -66,9 +67,8 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
             Duration lease = parseDuration(annotation.lease(), "lease", config.defaultLeaseDuration(), handlerMethod);
             Duration waitTimeout =
                     parseDuration(annotation.waitTimeout(), "waitTimeout", config.defaultWaitTimeout(), handlerMethod);
-            String scope = scopeOf(handlerMethod);
-            builtAnnotationCache.put(
-                    method, new ResolvedIdempotent(annotation.required(), ttl, lease, waitTimeout, scope));
+            String scope = scopeOf(annotation, handlerMethod);
+            builtAnnotationCache.put(method, new ResolvedIdempotent(ttl, lease, waitTimeout, scope));
         });
         this.cache = Map.copyOf(builtAnnotationCache);
     }
@@ -93,24 +93,29 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
         }
     }
 
-    private static String scopeOf(HandlerMethod handlerMethod) {
-        String scope = handlerMethod.getBeanType().getSimpleName() + "."
-                + handlerMethod.getMethod().getName();
-        if (scope.length() > IdempotencyIdentity.MAX_SCOPE_LENGTH) {
+    private static String scopeOf(Idempotent annotation, HandlerMethod handlerMethod) {
+        String scope = annotation.scope().isEmpty()
+                ? handlerMethod.getBeanType().getSimpleName() + "."
+                        + handlerMethod.getMethod().getName()
+                : annotation.scope();
+        try {
+            // The identity is the authority on what a scope may be; build one to borrow its rules.
+            new IdempotencyIdentity(scope, "probe");
+        } catch (IllegalArgumentException e) {
             throw new IllegalStateException(
-                    "Idempotency scope '" + scope + "' for " + handlerMethod.getShortLogMessage() + " exceeds "
-                            + IdempotencyIdentity.MAX_SCOPE_LENGTH + " characters");
+                    "Invalid idempotency scope '" + scope + "' for " + handlerMethod.getShortLogMessage() + ": "
+                            + e.getMessage(),
+                    e);
         }
         return scope;
     }
 
     /**
-     * @param required whether a request without a key is rejected
      * @param ttl      how long the completed response is kept
      * @param lease    how long this request's acquisition is protected before it can be stolen
      * @param waitTimeout how long a concurrent duplicate blocks for the in-flight request
-     * @param scope    the handler's idempotency scope, {@code <simple class name>.<method name>}
+     * @param scope    the handler's idempotency scope, the annotation's own or
+     *                 {@code <simple class name>.<method name>}
      */
-    public record ResolvedIdempotent(
-            boolean required, Duration ttl, Duration lease, Duration waitTimeout, String scope) {}
+    public record ResolvedIdempotent(Duration ttl, Duration lease, Duration waitTimeout, String scope) {}
 }
