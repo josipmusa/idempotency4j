@@ -17,6 +17,7 @@ package io.github.josipmusa.idempotency.spring.web;
 
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -99,6 +100,26 @@ final class HttpIdempotencyMapper {
     static void replayEmpty(HttpServletResponse response) {
         response.setStatus(HttpServletResponse.SC_NO_CONTENT);
         markReplayed(response);
+    }
+
+    /**
+     * Rejects a request whose key another caller is still holding.
+     *
+     * <p>{@code Retry-After} carries the holder's remaining lease in whole seconds, rounded
+     * up so a client never retries before the key could possibly be free, and floored at 1
+     * so a store that cannot tell still gets a usable hint rather than an immediate retry.
+     *
+     * @param response   the response to write to
+     * @param status     the configured in-flight status
+     * @param retryAfter the holder's remaining lease
+     * @param message    the human-readable error message
+     * @throws IOException if the body cannot be written
+     */
+    static void writeInFlight(HttpServletResponse response, int status, Duration retryAfter, String message)
+            throws IOException {
+        long seconds = Math.max(1, (retryAfter.toMillis() + 999) / 1000);
+        response.setHeader("Retry-After", Long.toString(seconds));
+        writeJsonError(response, status, message);
     }
 
     /**

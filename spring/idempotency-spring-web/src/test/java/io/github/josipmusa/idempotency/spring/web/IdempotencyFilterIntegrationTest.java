@@ -26,6 +26,7 @@ import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.Payload;
+import jakarta.servlet.Filter;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -42,6 +43,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockServletContext;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -70,6 +72,9 @@ class IdempotencyFilterIntegrationTest {
 
     private static final AtomicReference<Thread> controllerThread = new AtomicReference<>();
 
+    /** The real response object, captured by a filter sitting outside the idempotency filter. */
+    private static final AtomicReference<MockHttpServletResponse> outerResponse = new AtomicReference<>();
+
     private ScheduledExecutorService scheduler;
     private RecordingStore store;
     private RecordingListener listener;
@@ -79,6 +84,7 @@ class IdempotencyFilterIntegrationTest {
         invocations.set(0);
         events.clear();
         controllerThread.set(null);
+        outerResponse.set(null);
         scheduler = Executors.newSingleThreadScheduledExecutor();
         store = new RecordingStore();
         listener = new RecordingListener();
@@ -244,6 +250,61 @@ class IdempotencyFilterIntegrationTest {
         assertThat(store.completed).containsKey(new IdempotencyIdentity(ECHO_SCOPE, "listener-4"));
     }
 
+    /**
+     * The engine records the completion before {@code execute} returns, so the handler's body is
+     * still sitting in the caching wrapper when the store is written. Nothing reaches the client
+     * until the record is durable.
+     */
+    @Test
+    void When_HandlerRuns_Expect_RecordCompleteBeforeBodyFlushed() throws Exception {
+        MockMvc mockMvc = mockMvc(null);
+
+        MvcResult result = mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "flush-order")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("hello-body"))
+                .andReturn();
+
+        assertThat(result.getResponse().getContentAsString()).isEqualTo("echo:hello-body");
+        assertThat(store.bodyLengthAtCompletion)
+                .as("the client must not see the body before the record is stored")
+                .hasValue(0);
+    }
+
+    @Test
+    void When_Replayed_Expect_ReplayHeaderPresent() throws Exception {
+        MockMvc mockMvc = mockMvc(null);
+        mockMvc.perform(post("/echo")
+                .header(KEY_HEADER, "replay-header")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("hello-body"));
+
+        MvcResult replay = mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "replay-header")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("hello-body"))
+                .andReturn();
+
+        assertThat(replay.getResponse().getHeader("Idempotent-Replayed")).isEqualTo("true");
+    }
+
+    @Test
+    void When_InFlight_Expect_409WithRetryAfter() throws Exception {
+        MockMvc mockMvc = mockMvc(null);
+        store.inFlight.set(Duration.ofMillis(4200));
+
+        MvcResult result = mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "in-flight")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("hello-body"))
+                .andReturn();
+
+        assertThat(result.getResponse().getStatus()).isEqualTo(409);
+        assertThat(result.getResponse().getHeader("Retry-After")).isEqualTo("5");
+        assertThat(invocations).hasValue(0);
+        assertThat(events).containsExactly("onInFlight:in-flight");
+    }
+
     private MockMvc mockMvc(Long maxBodyBytes) {
         return mockMvc(maxBodyBytes, List.of(listener));
     }
@@ -264,7 +325,13 @@ class IdempotencyFilterIntegrationTest {
                 ? new IdempotencyFilter(engine, webConfig, mapping, registry)
                 : new IdempotencyFilter(engine, webConfig, mapping, registry, maxBodyBytes);
 
-        return MockMvcBuilders.webAppContextSetup(wac).addFilters(filter).build();
+        Filter capture = (servletRequest, servletResponse, chain) -> {
+            outerResponse.set((MockHttpServletResponse) servletResponse);
+            chain.doFilter(servletRequest, servletResponse);
+        };
+        return MockMvcBuilders.webAppContextSetup(wac)
+                .addFilters(capture, filter)
+                .build();
     }
 
     @EnableWebMvc
@@ -318,6 +385,11 @@ class IdempotencyFilterIntegrationTest {
             events.add("onDuplicate:" + ctx.key());
             duplicates.add(payload);
         }
+
+        @Override
+        public void onInFlight(IdempotencyContext ctx, Duration retryAfter) {
+            events.add("onInFlight:" + ctx.key());
+        }
     }
 
     private static final class ThrowingListener implements IdempotencyLifecycleListener {
@@ -337,8 +409,18 @@ class IdempotencyFilterIntegrationTest {
         private final Map<IdempotencyIdentity, Payload> completed = new ConcurrentHashMap<>();
         private final Map<IdempotencyIdentity, Instant> completedAt = new ConcurrentHashMap<>();
 
+        /** When set, every acquisition is answered as in-flight with this much lease left. */
+        private final AtomicReference<Duration> inFlight = new AtomicReference<>();
+
+        /** How much of the response had reached the client when the record was written. */
+        private final AtomicInteger bodyLengthAtCompletion = new AtomicInteger(-1);
+
         @Override
         public AcquireResult tryAcquire(IdempotencyContext context) {
+            Duration remaining = inFlight.get();
+            if (remaining != null) {
+                return AcquireResult.inFlight(remaining);
+            }
             Payload stored = completed.get(context.identity());
             return stored != null
                     ? AcquireResult.duplicate(stored, completedAt.get(context.identity()))
@@ -347,6 +429,10 @@ class IdempotencyFilterIntegrationTest {
 
         @Override
         public void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
+            MockHttpServletResponse response = outerResponse.get();
+            if (response != null) {
+                bodyLengthAtCompletion.set(response.getContentAsByteArray().length);
+            }
             completed.put(identity, payload);
             completedAt.put(identity, Instant.now());
         }

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** The engine owns completion. `IdempotencyEngine.execute` now takes the action as a
+  `ThrowingSupplier<T>` plus a `PayloadCodec<T>` and returns a sealed
+  `Outcome<T>` - `Executed(value)`, `Replayed(value, completedAt)`, or `InFlight(retryAfter)` -
+  having already encoded the result and recorded the completion. The `execute(ctx,
+  ThrowingRunnable)` overload stays for an action with nothing to replay. `IdempotencyEngine.complete`
+  and `ExecutionResult` are deleted, and so is `IdempotencyLockTimeoutException`: an in-flight key is
+  an outcome to switch on, not an exception to catch.
+- **Breaking.** `IdempotencyConfig` gains `completionFailurePolicy`, a
+  `CompletionFailurePolicy` of `PROPAGATE` (the default) or `LOG_AND_RETURN`, which decides what the
+  engine does when the action ran but the store refused the completion. The lease is not released
+  either way - the work happened, so the record must not be erased. `IdempotencyEngine` takes the
+  config as an optional fourth constructor argument.
+- **Breaking.** A request rejected because another caller holds the key now gets 409 with
+  `Retry-After` in whole seconds (rounded up, minimum 1) instead of a bare 503. The status is
+  configurable through the new `WebIdempotencyConfig.inFlightStatus()`, built with
+  `WebIdempotencyConfig.builder()`.
+- `IdempotencyLifecycleListener` gains `onInFlight(ctx, retryAfter)`, which fires without a lease
+  like `onDuplicate`. The one-terminal-per-acquired-lease invariant is unchanged.
+- The web filter stores the response before the body reaches the client, so a client that sees a
+  response can rely on the record being durable. The starter configures its engine with
+  `LOG_AND_RETURN` - overridable through `idempotency.completion-failure-policy` - so a storage
+  failure still lets the handler's response through.
+
 - **Breaking.** A failed attempt now leaves no trace. The `FAILED` state is gone, so a record is
   absent, `IN_PROGRESS` or `COMPLETE`, and `IdempotencyStore.release` deletes the record instead of
   relabelling it: the next `tryAcquire` for that identity sees a key that was never used. The engine

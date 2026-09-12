@@ -19,12 +19,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import io.github.josipmusa.idempotency.core.*;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.http.HttpServletResponse;
 import java.lang.reflect.Method;
@@ -32,6 +30,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -43,8 +42,6 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 
 class IdempotencyFilterTest {
 
-    private static final String LEASE_ID = "test-lease-id";
-
     private IdempotencyEngine engine;
     private RequestMappingHandlerMapping handlerMapping;
     private IdempotentHandlerRegistry registry;
@@ -53,6 +50,9 @@ class IdempotencyFilterTest {
     private MockHttpServletRequest request;
     private MockHttpServletResponse response;
     private FilterChain filterChain;
+
+    /** What the codec the filter handed the engine turned the captured response into. */
+    private final AtomicReference<Payload> encoded = new AtomicReference<>();
 
     @BeforeEach
     void setUp() {
@@ -65,6 +65,7 @@ class IdempotencyFilterTest {
         request = new MockHttpServletRequest();
         response = new MockHttpServletResponse();
         filterChain = mock(FilterChain.class);
+        encoded.set(null);
     }
 
     @Test
@@ -144,68 +145,36 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_ExecutedResult_Expect_StoresResponseAndCopiesBody() throws Exception {
+    void When_Executed_Expect_CapturedResponseEncodedAndBodyCopied() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
-
-        doAnswer(invocation -> {
-                    HttpServletResponse resp = invocation.getArgument(1);
-                    resp.setStatus(201);
-                    resp.setContentType("application/json");
-                    resp.getWriter().write("{\"id\":\"1\"}");
-                    return null;
-                })
-                .when(filterChain)
-                .doFilter(any(), any());
+        stubExecuted();
+        handlerWrites(201, "application/json", "{\"id\":\"1\"}");
 
         filter.doFilter(request, response, filterChain);
 
-        verify(engine)
-                .complete(
-                        argThat(context -> "test-key".equals(context.key())),
-                        eq(LEASE_ID),
-                        any(Payload.class),
-                        any(Duration.class));
+        assertThat(decodeEncoded().statusCode()).isEqualTo(201);
+        assertThat(new String(decodeEncoded().body())).isEqualTo("{\"id\":\"1\"}");
         assertThat(response.getContentAsString()).isEqualTo("{\"id\":\"1\"}");
         assertThat(response.getStatus()).isEqualTo(201);
     }
 
     @Test
-    void When_AnnotationTtlOverride_Expect_CustomTtlPassedToStore() throws Exception {
+    void When_AnnotationTtlOverride_Expect_CustomTtlOnContext() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true, "PT2H", ""));
         request.addHeader("Idempotency-Key", "test-key");
-
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
+        stubExecuted();
 
         filter.doFilter(request, response, filterChain);
 
-        verify(engine)
-                .complete(
-                        argThat(context -> "test-key".equals(context.key())),
-                        eq(LEASE_ID),
-                        any(Payload.class),
-                        eq(Duration.ofHours(2)));
+        verify(engine).execute(argThat(context -> context.ttl().equals(Duration.ofHours(2))), any(), any());
     }
 
     @Test
-    void When_DuplicateResult_Expect_StoredResponseReplayed() throws Exception {
+    void When_Replayed_Expect_StoredResponseWritten() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
+        stubReplayed(storedResponse());
 
         filter.doFilter(request, response, filterChain);
 
@@ -214,10 +183,10 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_DuplicateResult_Expect_ReplayedHeaderSet() throws Exception {
+    void When_Replayed_Expect_ReplayHeaderPresent() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
+        stubReplayed(storedResponse());
 
         filter.doFilter(request, response, filterChain);
 
@@ -225,12 +194,11 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_DuplicateResponseReplayed_Expect_ContentLengthSet() throws Exception {
+    void When_Replayed_Expect_ContentLengthSet() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         byte[] body = "hello".getBytes();
-        StoredResponse stored = new StoredResponse(200, Map.of("Content-Type", List.of("application/json")), body);
-        when(engine.execute(any(), any())).thenReturn(duplicateOf(stored));
+        stubReplayed(new StoredResponse(200, Map.of("Content-Type", List.of("application/json")), body));
 
         filter.doFilter(request, response, filterChain);
 
@@ -238,11 +206,11 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_DuplicateContainsTransportHeaders_Expect_NotReplayedAndLengthRecalculated() throws Exception {
+    void When_ReplayedContainsTransportHeaders_Expect_NotReplayedAndLengthRecalculated() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         byte[] body = "hello".getBytes();
-        StoredResponse stored = new StoredResponse(
+        stubReplayed(new StoredResponse(
                 200,
                 Map.of(
                         "Connection", List.of("keep-alive, X-Hop"),
@@ -251,8 +219,7 @@ class IdempotencyFilterTest {
                         "Keep-Alive", List.of("timeout=5"),
                         "X-Hop", List.of("not-end-to-end"),
                         "X-End-To-End", List.of("kept")),
-                body);
-        when(engine.execute(any(), any())).thenReturn(duplicateOf(stored));
+                body));
 
         filter.doFilter(request, response, filterChain);
 
@@ -265,58 +232,67 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_LockTimeoutException_Expect_Returns503() throws Exception {
+    void When_InFlight_Expect_409WithRetryAfter() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any()))
-                .thenThrow(new IdempotencyLockTimeoutException(
-                        new IdempotencyIdentity("PaymentController.create", "test-key"), Duration.ofSeconds(10)));
+        when(engine.execute(any(), any(), any())).thenReturn(new Outcome.InFlight<>(Duration.ofMillis(2400)));
 
         filter.doFilter(request, response, filterChain);
 
-        assertThat(response.getStatus()).isEqualTo(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+        assertThat(response.getStatus()).isEqualTo(409);
+        assertThat(response.getHeader("Retry-After")).isEqualTo("3");
         assertThat(response.getContentAsString())
                 .isEqualTo("{\"error\": \"Request with this key is already being processed\"}");
         assertThat(response.getContentType()).isEqualTo("application/json;charset=UTF-8");
+        verify(filterChain, never()).doFilter(any(), any());
     }
 
     @Test
-    void When_ActionThrows_Expect_ReleaseCalledByEngine() throws Exception {
+    void When_InFlightWithNoRemainingLease_Expect_RetryAfterAtLeastOneSecond() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any(), any())).thenReturn(new Outcome.InFlight<>(Duration.ZERO));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getHeader("Retry-After")).isEqualTo("1");
+    }
+
+    @Test
+    void When_InFlightStatusConfigured_Expect_ConfiguredStatusUsed() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        IdempotencyFilter configured = new IdempotencyFilter(
+                engine, WebIdempotencyConfig.builder().inFlightStatus(503).build(), handlerMapping, registry);
+        when(engine.execute(any(), any(), any())).thenReturn(new Outcome.InFlight<>(Duration.ofSeconds(5)));
+
+        configured.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(503);
+    }
+
+    @Test
+    void When_ActionThrows_Expect_ExceptionPropagates() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
         RuntimeException actionException = new RuntimeException("action failed");
-        when(engine.execute(any(), any())).thenThrow(actionException);
+        when(engine.execute(any(), any(), any())).thenThrow(actionException);
 
         assertThatThrownBy(() -> filter.doFilter(request, response, filterChain))
                 .isSameAs(actionException);
-
-        verify(engine, never()).complete(any(), any(), any(), any());
     }
 
+    /**
+     * The engine is configured with {@code LOG_AND_RETURN} by the starter, so a completion the
+     * store refused still comes back as {@code Executed} and the handler's response reaches the
+     * client.
+     */
     @Test
-    void When_StoreCompleteThrows_Expect_BodyStillWritten() throws Exception {
+    void When_CompletionFailedButOutcomeExecuted_Expect_BodyStillWritten() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
-
-        doAnswer(invocation -> {
-                    HttpServletResponse resp = invocation.getArgument(1);
-                    resp.setStatus(200);
-                    resp.setContentType("application/json");
-                    resp.getWriter().write("{\"id\":\"1\"}");
-                    return null;
-                })
-                .when(filterChain)
-                .doFilter(any(), any());
-
-        doThrow(new RuntimeException("store unavailable")).when(engine).complete(any(), any(), any(), any());
+        stubExecuted();
+        handlerWrites(200, "application/json", "{\"id\":\"1\"}");
 
         filter.doFilter(request, response, filterChain);
 
@@ -325,44 +301,24 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_StoreCompleteThrowsAndRetryBeforeLockExpiry_Expect_Returns503() throws Exception {
+    void When_CompletionFailedAndRetriedBeforeLeaseExpiry_Expect_InFlightStatus() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
-
-        doAnswer(invocation -> {
-                    HttpServletResponse resp = invocation.getArgument(1);
-                    resp.setStatus(200);
-                    resp.getWriter().write("{}");
-                    return null;
-                })
-                .when(filterChain)
-                .doFilter(any(), any());
-
-        doThrow(new RuntimeException("store down")).when(engine).complete(any(), any(), any(), any());
+        stubExecuted();
+        handlerWrites(200, null, "{}");
 
         filter.doFilter(request, response, filterChain);
         assertThat(response.getStatus()).isEqualTo(200);
 
         // The storage outcome is indeterminate. This retry models the backend reporting that the
-        // key is still in flight.
-        MockHttpServletResponse response2 = new MockHttpServletResponse();
-        doThrow(new IdempotencyLockTimeoutException(
-                        new IdempotencyIdentity("PaymentController.create", "test-key"), Duration.ofSeconds(10)))
-                .when(engine)
-                .execute(any(), any());
+        // key is still in flight, because the failed attempt's lease has not expired yet.
+        MockHttpServletResponse retry = new MockHttpServletResponse();
+        doReturn(new Outcome.InFlight<>(Duration.ofSeconds(10))).when(engine).execute(any(), any(), any());
 
-        filter.doFilter(request, response2, filterChain);
+        filter.doFilter(request, retry, filterChain);
 
-        assertThat(response2.getStatus()).isEqualTo(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
-        assertThat(response2.getContentAsString())
+        assertThat(retry.getStatus()).isEqualTo(409);
+        assertThat(retry.getContentAsString())
                 .isEqualTo("{\"error\": \"Request with this key is already being processed\"}");
     }
 
@@ -396,10 +352,10 @@ class IdempotencyFilterTest {
     }
 
     @Test
-    void When_DuplicateResult_Expect_CacheControlNoStoreSet() throws Exception {
+    void When_Replayed_Expect_CacheControlNoStoreSet() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
+        stubReplayed(storedResponse());
 
         filter.doFilter(request, response, filterChain);
 
@@ -413,18 +369,12 @@ class IdempotencyFilterTest {
         request.setContent("0123456789".getBytes()); // exactly 10 bytes
         IdempotencyFilter limitedFilter =
                 new IdempotencyFilter(engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, 10);
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
+        stubExecuted();
 
         limitedFilter.doFilter(request, response, filterChain);
 
         assertThat(response.getStatus()).isNotEqualTo(413);
-        verify(engine).execute(any(), any());
+        verify(engine).execute(any(), any(), any());
     }
 
     @Test
@@ -432,7 +382,7 @@ class IdempotencyFilterTest {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "key-1");
         request.setContent("{\"amount\":100}".getBytes());
-        when(engine.execute(any(), any()))
+        when(engine.execute(any(), any(), any()))
                 .thenThrow(new IdempotencyFingerprintMismatchException(
                         new IdempotencyIdentity("PaymentController.create", "key-1"), "stored-hash", "received-hash"));
 
@@ -447,10 +397,8 @@ class IdempotencyFilterTest {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "key-1");
         request.setContent("{\"amount\":100}".getBytes());
-
-        StoredResponse storedResponse = new StoredResponse(
-                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes());
-        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse));
+        stubReplayed(new StoredResponse(
+                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes()));
 
         filter.doFilter(request, response, filterChain);
 
@@ -472,15 +420,7 @@ class IdempotencyFilterTest {
 
         IdempotencyFilter filterWithSanitizer = new IdempotencyFilter(
                 engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, sanitizer);
-
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
-
+        stubExecuted();
         doAnswer(invocation -> {
                     HttpServletResponse resp = invocation.getArgument(1);
                     resp.setStatus(200);
@@ -494,14 +434,7 @@ class IdempotencyFilterTest {
 
         filterWithSanitizer.doFilter(request, response, filterChain);
 
-        var captor = org.mockito.ArgumentCaptor.forClass(Payload.class);
-        verify(engine)
-                .complete(
-                        argThat(context -> "test-key".equals(context.key())),
-                        eq(LEASE_ID),
-                        captor.capture(),
-                        any(Duration.class));
-        assertThat(storedBy(captor).headers()).doesNotContainKey("X-Secret");
+        assertThat(decodeEncoded().headers()).doesNotContainKey("X-Secret");
     }
 
     @Test
@@ -512,40 +445,21 @@ class IdempotencyFilterTest {
                 engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1L, ignored -> {
                     throw new IllegalStateException("sanitizer failed");
                 });
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
-        doAnswer(invocation -> {
-                    HttpServletResponse resp = invocation.getArgument(1);
-                    resp.setStatus(201);
-                    resp.getWriter().write("created");
-                    return null;
-                })
-                .when(filterChain)
-                .doFilter(any(), any());
+        stubExecutedToleratingEncodingFailure();
+        handlerWrites(201, null, "created");
 
         filterWithFailingSanitizer.doFilter(request, response, filterChain);
 
         assertThat(response.getStatus()).isEqualTo(201);
         assertThat(response.getContentAsString()).isEqualTo("created");
-        verify(engine, never()).complete(any(), any(), any(), any());
+        assertThat(encoded).hasValue(null);
     }
 
     @Test
     void When_ResponseContainsTransportHeaders_Expect_NotStored() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        doAnswer(invocation -> {
-                    ThrowingRunnable action = invocation.getArgument(1);
-                    action.run();
-                    return ExecutionResult.executed(LEASE_ID);
-                })
-                .when(engine)
-                .execute(any(), any());
+        stubExecuted();
         doAnswer(invocation -> {
                     HttpServletResponse resp = invocation.getArgument(1);
                     resp.setHeader("Connection", "keep-alive");
@@ -559,14 +473,7 @@ class IdempotencyFilterTest {
 
         filter.doFilter(request, response, filterChain);
 
-        var captor = org.mockito.ArgumentCaptor.forClass(Payload.class);
-        verify(engine)
-                .complete(
-                        argThat(context -> "test-key".equals(context.key())),
-                        eq(LEASE_ID),
-                        captor.capture(),
-                        any(Duration.class));
-        assertThat(storedBy(captor).headers())
+        assertThat(decodeEncoded().headers())
                 .containsEntry("X-End-To-End", List.of("kept"))
                 .doesNotContainKeys("Connection", "Transfer-Encoding", "Content-Length");
     }
@@ -575,7 +482,7 @@ class IdempotencyFilterTest {
     void When_AnnotatedHandler_Expect_ScopeIsHandlerClassAndMethod() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation(true));
         request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(duplicateOf(storedResponse()));
+        stubReplayed(storedResponse());
 
         filter.doFilter(request, response, filterChain);
 
@@ -583,7 +490,22 @@ class IdempotencyFilterTest {
                 .execute(
                         argThat(context -> context.identity()
                                 .equals(new IdempotencyIdentity("PaymentController.create", "test-key"))),
+                        any(),
                         any());
+    }
+
+    @Test
+    void When_ReplayedCarriesNonHttpPayload_Expect_NoContentMarkedAsReplayed() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation(true));
+        request.addHeader("Idempotency-Key", "test-key");
+        stubReplayedFrom(Payload.none());
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(204);
+        assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
+        assertThat(response.getContentAsByteArray()).isEmpty();
+        verify(filterChain, never()).doFilter(any(), any());
     }
 
     private void setupAnnotatedHandler(Idempotent annotation) throws Exception {
@@ -602,18 +524,68 @@ class IdempotencyFilterTest {
 
     static class PaymentController {}
 
-    @Test
-    void When_DuplicateCarriesNonHttpPayload_Expect_NoContentMarkedAsReplayed() throws Exception {
-        setupAnnotatedHandler(AnnotationHelper.annotation(true));
-        request.addHeader("Idempotency-Key", "test-key");
-        when(engine.execute(any(), any())).thenReturn(ExecutionResult.duplicate(Payload.none(), Instant.now()));
+    /**
+     * Stands in for an engine that acquired the lease: it runs the supplier, encodes the captured
+     * response with the codec the filter supplied, and reports {@code Executed}.
+     */
+    @SuppressWarnings("unchecked")
+    private void stubExecuted() throws Exception {
+        doAnswer(invocation -> {
+                    ThrowingSupplier<StoredResponse> action = invocation.getArgument(1);
+                    PayloadCodec<StoredResponse> codec = invocation.getArgument(2);
+                    StoredResponse captured = action.get();
+                    encoded.set(codec.encode(captured));
+                    return new Outcome.Executed<>(captured);
+                })
+                .when(engine)
+                .execute(any(), any(), any());
+    }
 
-        filter.doFilter(request, response, filterChain);
+    /** The same, under {@code LOG_AND_RETURN}: an encoding failure is logged and swallowed. */
+    @SuppressWarnings("unchecked")
+    private void stubExecutedToleratingEncodingFailure() throws Exception {
+        doAnswer(invocation -> {
+                    ThrowingSupplier<StoredResponse> action = invocation.getArgument(1);
+                    PayloadCodec<StoredResponse> codec = invocation.getArgument(2);
+                    StoredResponse captured = action.get();
+                    try {
+                        encoded.set(codec.encode(captured));
+                    } catch (RuntimeException encodingFailure) {
+                        // the engine logs and returns Executed anyway
+                    }
+                    return new Outcome.Executed<>(captured);
+                })
+                .when(engine)
+                .execute(any(), any(), any());
+    }
 
-        assertThat(response.getStatus()).isEqualTo(204);
-        assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
-        assertThat(response.getContentAsByteArray()).isEmpty();
-        verify(filterChain, never()).doFilter(any(), any());
+    private void stubReplayed(StoredResponse stored) throws Exception {
+        stubReplayedFrom(new StoredResponseCodec().encode(stored));
+    }
+
+    /** Replays through the filter's own codec, so payload decoding is part of what is tested. */
+    @SuppressWarnings("unchecked")
+    private void stubReplayedFrom(Payload stored) throws Exception {
+        doAnswer(invocation -> {
+                    PayloadCodec<StoredResponse> codec = invocation.getArgument(2);
+                    return new Outcome.Replayed<>(codec.decode(stored), Instant.now());
+                })
+                .when(engine)
+                .execute(any(), any(), any());
+    }
+
+    private void handlerWrites(int status, String contentType, String body) throws Exception {
+        doAnswer(invocation -> {
+                    HttpServletResponse resp = invocation.getArgument(1);
+                    resp.setStatus(status);
+                    if (contentType != null) {
+                        resp.setContentType(contentType);
+                    }
+                    resp.getWriter().write(body);
+                    return null;
+                })
+                .when(filterChain)
+                .doFilter(any(), any());
     }
 
     private StoredResponse storedResponse() {
@@ -621,13 +593,8 @@ class IdempotencyFilterTest {
                 200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"1\"}".getBytes());
     }
 
-    /** What the engine hands back for a duplicate whose record holds this response. */
-    private static ExecutionResult duplicateOf(StoredResponse stored) {
-        return ExecutionResult.duplicate(new StoredResponseCodec().encode(stored), Instant.now());
-    }
-
-    /** The response the filter actually stored, decoded back out of the captured payload. */
-    private static StoredResponse storedBy(org.mockito.ArgumentCaptor<Payload> captor) {
-        return new StoredResponseCodec().decode(captor.getValue());
+    /** The response the filter actually handed the store, decoded back out of the payload. */
+    private StoredResponse decodeEncoded() {
+        return new StoredResponseCodec().decode(encoded.get());
     }
 }

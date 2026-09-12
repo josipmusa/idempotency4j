@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.time.Duration;
 import java.time.Instant;
 
 /**
@@ -101,8 +102,8 @@ public interface IdempotencyLifecycleListener {
     /**
      * The store recorded the completion; the idempotent boundary closed cleanly.
      *
-     * <p>Fires from {@link IdempotencyEngine#complete}, after the store confirmed
-     * the transition to COMPLETE. Nothing more will happen under this lease.
+     * <p>Fires after the store confirmed the transition to COMPLETE. Nothing more will
+     * happen under this lease.
      *
      * @param ctx     the context this execution ran under
      * @param leaseId the lease that was completed
@@ -137,6 +138,18 @@ public interface IdempotencyLifecycleListener {
      * @param completedAt when the store recorded the original completion
      */
     default void onDuplicate(IdempotencyContext ctx, Payload payload, Instant completedAt) {}
+
+    /**
+     * Another caller holds the key and did not finish in time, so the action was skipped.
+     *
+     * <p>Fires instead of the {@code onAcquired}/terminal pair: no lease was acquired, and
+     * nothing follows this callback. The key is neither complete nor free - the holder is
+     * still working, or died and left a lease that has not expired yet.
+     *
+     * @param ctx        the context the second caller arrived under
+     * @param retryAfter how much of the holder's lease was left when the store gave up
+     */
+    default void onInFlight(IdempotencyContext ctx, Duration retryAfter) {}
 
     /** Where an execution failed, and therefore what a retry under the same key will do. */
     enum FailurePhase {

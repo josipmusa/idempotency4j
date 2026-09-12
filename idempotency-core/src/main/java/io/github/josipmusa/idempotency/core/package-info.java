@@ -17,10 +17,14 @@
  *   <li>{@link io.github.josipmusa.idempotency.core.AcquireResult} — sealed outcome of
  *       {@code IdempotencyStore.tryAcquire}: {@code Acquired}, {@code Duplicate},
  *       {@code InFlight}, or {@code FingerprintMismatch}.</li>
- *   <li>{@link io.github.josipmusa.idempotency.core.ExecutionResult} — sealed outcome of
- *       {@code IdempotencyEngine.execute}: {@code Executed} or {@code Duplicate}.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.Outcome} — sealed outcome of
+ *       {@code IdempotencyEngine.execute}: {@code Executed}, {@code Replayed}, or
+ *       {@code InFlight}.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.CompletionFailurePolicy} — whether a
+ *       completion the store refused is rethrown or logged and swallowed.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener} - observes
- *       acquisition, completion, failure, and duplicate detection on the calling thread.</li>
+ *       acquisition, completion, failure, duplicate detection, and in-flight rejection on
+ *       the calling thread.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.Payload} — the transport-neutral
  *       envelope a completed operation left behind: a type, a body, and flat string
  *       attributes, stored verbatim and handed back on a duplicate.

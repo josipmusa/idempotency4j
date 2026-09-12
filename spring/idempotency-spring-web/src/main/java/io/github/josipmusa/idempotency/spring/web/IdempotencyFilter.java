@@ -18,15 +18,13 @@ package io.github.josipmusa.idempotency.spring.web;
 import static io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry.*;
 
 import io.github.josipmusa.idempotency.core.*;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
-import io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import org.slf4j.Logger;
@@ -43,9 +41,16 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
  * Spring MVC filter that enforces idempotency for handler methods annotated with {@link Idempotent}.
  *
  * <p>Uses {@link RequestMappingHandlerMapping} to resolve the handler for each request, then checks
- * for the {@link Idempotent} annotation. If present, it delegates to {@link IdempotencyEngine} and
- * either stores the new response or replays the stored one for duplicates. All Servlet-level
+ * for the {@link Idempotent} annotation. If present, it hands the engine a supplier that runs the
+ * rest of the chain into a buffering wrapper and returns what the handler wrote. The engine owns
+ * the record from there; the filter only turns the {@link Outcome} back into a Servlet response -
+ * flush the fresh body, replay the stored one, or reject an in-flight duplicate. All Servlet-level
  * translation lives in {@link HttpIdempotencyMapper}.
+ *
+ * <p>Because the engine records the completion before {@code execute} returns, the response body
+ * reaches the client only once the record is durable. Configure the engine with
+ * {@link io.github.josipmusa.idempotency.core.CompletionFailurePolicy#LOG_AND_RETURN} - the
+ * starter does - so a storage failure still lets the handler's response through.
  *
  * <p>The record's scope is the resolved handler method, {@code <simple class name>.<method name>},
  * so the same {@code Idempotency-Key} sent to two endpoints is two independent records. See
@@ -150,14 +155,17 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                 .build();
 
         ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
-        ExecutionResult result;
+        Outcome<StoredResponse> outcome;
         try {
-            result = engine.execute(context, () -> chain.doFilter(wrappedRequest, wrappedResponse));
+            outcome = engine.execute(
+                    context,
+                    () -> {
+                        chain.doFilter(wrappedRequest, wrappedResponse);
+                        return HttpIdempotencyMapper.capture(wrappedResponse);
+                    },
+                    replayCodec(context));
         } catch (IdempotencyFingerprintMismatchException e) {
             HttpIdempotencyMapper.writeJsonError(response, 422, ERROR_FINGERPRINT_MISMATCH);
-            return;
-        } catch (IdempotencyLockTimeoutException e) {
-            HttpIdempotencyMapper.writeJsonError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, ERROR_IN_FLIGHT);
             return;
         } catch (ServletException | IOException | RuntimeException e) {
             throw e;
@@ -165,68 +173,56 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             throw new ServletException(e);
         }
 
-        switch (result) {
-            case ExecutionResult.Executed(String leaseId) -> storeAndFlush(context, leaseId, wrappedResponse);
-            case ExecutionResult.Duplicate(Payload payload, Instant ignoredCompletedAt) ->
-                replay(context, payload, response);
+        switch (outcome) {
+            case Outcome.Executed<StoredResponse> ignored -> wrappedResponse.copyBodyToResponse();
+            case Outcome.Replayed(StoredResponse stored, Instant ignoredCompletedAt) -> replay(stored, response);
+            case Outcome.InFlight(Duration retryAfter) ->
+                HttpIdempotencyMapper.writeInFlight(response, config.inFlightStatus(), retryAfter, ERROR_IN_FLIGHT);
         }
     }
 
     /**
-     * Replays a stored payload to a duplicate caller.
+     * The codec the engine uses for this request, tolerant of a record this filter did not write.
      *
      * <p>A payload of any other type was stored under this identity by a non-HTTP caller, so
-     * it cannot have come from a record this filter created and there is no response in it to
-     * send. Answering 204 still honours the idempotency guarantee - the action does not run
-     * a second time - which is better than failing a request the caller cannot fix.
+     * there is no response in it to send. Decoding to {@code null} lets the filter answer 204,
+     * which still honours the idempotency guarantee - the action does not run a second time -
+     * and is better than failing a request the caller cannot fix. A payload that claims to be
+     * an HTTP response but cannot be read is a different matter and still throws.
      */
-    private void replay(IdempotencyContext context, Payload payload, HttpServletResponse response) throws IOException {
-        if (!StoredResponseCodec.TYPE.equals(payload.type())) {
-            log.warn(
-                    "Idempotency record {} holds a '{}' payload with no HTTP response to replay; answering 204",
-                    context.identity(),
-                    payload.type());
+    private PayloadCodec<StoredResponse> replayCodec(IdempotencyContext context) {
+        return new PayloadCodec<>() {
+            @Override
+            public Payload encode(StoredResponse response) {
+                return codec.encode(response);
+            }
+
+            @Override
+            public StoredResponse decode(Payload payload) {
+                if (!StoredResponseCodec.TYPE.equals(payload.type())) {
+                    log.warn(
+                            "Idempotency record {} holds a '{}' payload with no HTTP response to replay; answering 204",
+                            context.identity(),
+                            payload.type());
+                    return null;
+                }
+                return codec.decode(payload);
+            }
+        };
+    }
+
+    /**
+     * Replays a stored response to a duplicate caller.
+     *
+     * @param stored what the original execution stored, or {@code null} when the record holds
+     *               no HTTP response to replay
+     */
+    private void replay(StoredResponse stored, HttpServletResponse response) throws IOException {
+        if (stored == null) {
             HttpIdempotencyMapper.replayEmpty(response);
             return;
         }
-        HttpIdempotencyMapper.replay(codec.decode(payload), response);
-    }
-
-    /**
-     * Stores the captured response and flushes the buffered body to the client.
-     *
-     * <p>The action already ran and its side effects are durable, so a storage failure must
-     * not fail the request: it is logged and the response is returned as normal. A duplicate
-     * arriving later will re-execute rather than replay.
-     */
-    private void storeAndFlush(IdempotencyContext context, String leaseId, ContentCachingResponseWrapper wrapped)
-            throws IOException {
-        StoredResponse captured = HttpIdempotencyMapper.capture(wrapped);
-        try {
-            Payload payload = codec.encode(captured);
-            try {
-                engine.complete(context, leaseId, payload, context.ttl());
-            } catch (IdempotencyDurabilityException e) {
-                log.error(
-                        "Stored idempotency response for {}, but requested durability was not confirmed; storage state is indeterminate",
-                        context.identity(),
-                        e);
-            } catch (IdempotencyLeaseLostException e) {
-                log.error(
-                        "Could not store idempotency response for {} because this execution no longer owns the lease",
-                        context.identity(),
-                        e);
-            } catch (Exception e) {
-                log.error(
-                        "Failed while storing idempotency response for {}; storage state is indeterminate",
-                        context.identity(),
-                        e);
-            }
-        } catch (Exception e) {
-            log.error("Failed to encode idempotency response for {}; response was not stored", context.identity(), e);
-        } finally {
-            wrapped.copyBodyToResponse();
-        }
+        HttpIdempotencyMapper.replay(stored, response);
     }
 
     @Nullable

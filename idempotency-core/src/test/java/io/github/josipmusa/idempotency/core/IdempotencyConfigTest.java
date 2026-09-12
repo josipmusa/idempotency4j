@@ -83,4 +83,18 @@ class IdempotencyConfigTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("defaultWaitTimeout must not be negative");
     }
+
+    @Test
+    void When_NoPolicySet_Expect_PropagateByDefault() {
+        assertThat(IdempotencyConfig.defaults().completionFailurePolicy()).isEqualTo(CompletionFailurePolicy.PROPAGATE);
+    }
+
+    @Test
+    void When_PolicySet_Expect_Retained() {
+        IdempotencyConfig config = IdempotencyConfig.builder()
+                .completionFailurePolicy(CompletionFailurePolicy.LOG_AND_RETURN)
+                .build();
+
+        assertThat(config.completionFailurePolicy()).isEqualTo(CompletionFailurePolicy.LOG_AND_RETURN);
+    }
 }

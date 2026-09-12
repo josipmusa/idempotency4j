@@ -16,18 +16,27 @@
 package io.github.josipmusa.idempotency.core;
 
 /**
- * A {@link Runnable} that can throw checked exceptions.
+ * A supplier that can throw checked exceptions.
  *
- * <p>Used as the action parameter in {@link IdempotencyEngine#execute}
- * because business logic commonly throws checked exceptions (e.g.
- * {@code IOException}) that should propagate to the caller unchanged,
- * not wrapped in {@code RuntimeException}.
+ * <p>Used as the action parameter in
+ * {@link IdempotencyEngine#execute(IdempotencyContext, ThrowingSupplier, PayloadCodec)}
+ * because business logic commonly throws checked exceptions (e.g. {@code IOException})
+ * that should propagate to the caller unchanged, not wrapped in {@code RuntimeException}.
+ *
+ * @param <T> what the action produces, and what a {@link PayloadCodec} turns into a
+ *            {@link Payload} the store keeps
  */
 @FunctionalInterface
-public interface ThrowingRunnable {
+public interface ThrowingSupplier<T> {
 
+    /**
+     * Runs the action and returns whatever it produced.
+     *
+     * @return the action's result; may be {@code null} when there is nothing to replay
+     * @throws Exception whatever the action throws, propagated unchanged
+     */
     // S112: declaring the broad type is deliberate - this interface exists to stay transparent
     // to whatever the caller's business logic throws, so it cannot narrow to a library type.
     @SuppressWarnings("java:S112")
-    void run() throws Exception;
+    T get() throws Exception;
 }

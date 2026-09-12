@@ -25,6 +25,12 @@
       "defaultValue": "10s"
     },
     {
+      "name": "idempotency.completion-failure-policy",
+      "type": "io.github.josipmusa.idempotency.core.CompletionFailurePolicy",
+      "description": "What happens when the guarded action succeeded but its completion could not be recorded. LOG_AND_RETURN logs the failure and returns the response anyway; PROPAGATE rethrows and the caller sees the storage error.",
+      "defaultValue": "log_and_return"
+    },
+    {
       "name": "idempotency.filter-order",
       "type": "java.lang.Integer",
       "description": "Order of the idempotency servlet filter in the filter chain. Lower values execute earlier.",

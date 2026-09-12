@@ -66,4 +66,23 @@ class WebIdempotencyConfigTest {
         assertThat(WebIdempotencyConfig.withKeyHeader("X-Idempotency-Key").keyHeader())
                 .isEqualTo("X-Idempotency-Key");
     }
+
+    @Test
+    void When_DefaultsUsed_Expect_InFlightStatusIs409() {
+        assertThat(WebIdempotencyConfig.defaults().inFlightStatus()).isEqualTo(409);
+    }
+
+    @Test
+    void When_InFlightStatusConfigured_Expect_Retained() {
+        assertThat(WebIdempotencyConfig.builder().inFlightStatus(503).build().inFlightStatus())
+                .isEqualTo(503);
+    }
+
+    @Test
+    void When_InFlightStatusNotAnErrorStatus_Expect_Rejected() {
+        assertThatThrownBy(
+                        () -> WebIdempotencyConfig.builder().inFlightStatus(200).build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("inFlightStatus");
+    }
 }

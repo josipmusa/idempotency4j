@@ -50,6 +50,7 @@ public class IdempotencyAutoConfiguration {
                 .defaultTtl(idempotencyProperties.getDefaultTtl())
                 .defaultLeaseDuration(idempotencyProperties.getDefaultLease())
                 .defaultWaitTimeout(idempotencyProperties.getDefaultWait())
+                .completionFailurePolicy(idempotencyProperties.getCompletionFailurePolicy())
                 .build();
     }
 
@@ -83,11 +84,13 @@ public class IdempotencyAutoConfiguration {
     IdempotencyEngine idempotencyEngine(
             IdempotencyStore idempotencyStore,
             ScheduledExecutorService idempotencyScheduler,
-            ObjectProvider<IdempotencyLifecycleListener> lifecycleListeners) {
+            ObjectProvider<IdempotencyLifecycleListener> lifecycleListeners,
+            IdempotencyConfig idempotencyConfig) {
         return new IdempotencyEngine(
                 idempotencyStore,
                 idempotencyScheduler,
-                lifecycleListeners.orderedStream().toList());
+                lifecycleListeners.orderedStream().toList(),
+                idempotencyConfig);
     }
 
     @Bean
