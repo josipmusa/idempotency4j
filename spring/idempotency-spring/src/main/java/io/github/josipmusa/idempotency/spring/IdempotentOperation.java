@@ -21,7 +21,10 @@ import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import java.lang.reflect.Method;
 import java.time.DateTimeException;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.stream.Collectors;
 import org.springframework.expression.Expression;
 import org.springframework.expression.ParseException;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
@@ -68,7 +71,7 @@ record IdempotentOperation(
                 parseDuration(annotation.ttl(), "ttl", defaults.defaultTtl(), method),
                 parseDuration(annotation.lease(), "lease", defaults.defaultLeaseDuration(), method),
                 parseDuration(annotation.waitTimeout(), "waitTimeout", defaults.defaultWaitTimeout(), method),
-                annotation.completion(),
+                parseCompletionMode(annotation.completion(), defaults.defaultCompletionMode(), method),
                 resolveCodec(annotation, method));
     }
 
@@ -119,6 +122,28 @@ record IdempotentOperation(
                     + "encodes it, or make the method void");
         }
         return codec;
+    }
+
+    /**
+     * Resolves {@code completion} against the application default, accepting the enum's own
+     * spelling as well as the kebab-case one configuration uses.
+     */
+    private static CompletionMode parseCompletionMode(String raw, CompletionMode defaultValue, Method method) {
+        if (raw.isEmpty()) {
+            return defaultValue;
+        }
+        String normalised = raw.trim().replace('-', '_').toUpperCase(Locale.ROOT);
+        try {
+            return CompletionMode.valueOf(normalised);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                    "Invalid @Idempotent(completion = \"" + raw + "\") on " + describe(method) + ": expected one of "
+                            + Arrays.stream(CompletionMode.values())
+                                    .map(mode ->
+                                            mode.name().toLowerCase(Locale.ROOT).replace('_', '-'))
+                                    .collect(Collectors.joining(", ")),
+                    e);
+        }
     }
 
     private static Duration parseDuration(String raw, String attribute, Duration defaultValue, Method method) {

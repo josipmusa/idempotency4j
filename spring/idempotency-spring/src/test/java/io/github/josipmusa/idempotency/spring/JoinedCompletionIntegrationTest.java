@@ -18,7 +18,6 @@ package io.github.josipmusa.idempotency.spring;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
-import io.github.josipmusa.idempotency.core.CompletionMode;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
@@ -192,14 +191,14 @@ class JoinedCompletionIntegrationTest {
         }
 
         @Transactional
-        @Idempotent(key = "#orderId", scope = SCOPE, completion = CompletionMode.JOIN_TRANSACTION, waitTimeout = "PT0S")
+        @Idempotent(key = "#orderId", scope = SCOPE, completion = "join-transaction", waitTimeout = "PT0S")
         public void handle(String orderId) {
             handled.add(orderId);
             jdbc.update("INSERT INTO orders (id) VALUES (?)", orderId);
         }
 
         @Transactional
-        @Idempotent(key = "#orderId", scope = SCOPE, completion = CompletionMode.JOIN_TRANSACTION, waitTimeout = "PT0S")
+        @Idempotent(key = "#orderId", scope = SCOPE, completion = "join-transaction", waitTimeout = "PT0S")
         public void handleThenRollBack(String orderId) {
             jdbc.update("INSERT INTO orders (id) VALUES (?)", orderId);
             TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();

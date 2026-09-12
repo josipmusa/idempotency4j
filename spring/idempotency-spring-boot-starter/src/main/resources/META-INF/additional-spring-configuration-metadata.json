@@ -1,58 +1,88 @@
 {
   "properties": [
     {
-      "name": "idempotency.key-header",
-      "type": "java.lang.String",
-      "description": "HTTP header name used to carry the idempotency key.",
-      "defaultValue": "Idempotency-Key"
-    },
-    {
       "name": "idempotency.default-ttl",
       "type": "java.time.Duration",
-      "description": "Default time-to-live for stored idempotency records. After this duration, records become eligible for purging.",
+      "description": "How long a completed record stays replayable before the key can be reused. This is the deduplication window; make it at least as long as the slowest client retries for.",
       "defaultValue": "24h"
     },
     {
       "name": "idempotency.default-lease",
       "type": "java.time.Duration",
-      "description": "Default duration an acquisition is protected before another caller may steal it. The heartbeat extends it at half this interval.",
+      "description": "How long an acquisition is protected before another caller may steal it. The heartbeat extends it at half this interval, so it is also how long a crashed holder blocks the key.",
       "defaultValue": "30s"
     },
     {
       "name": "idempotency.default-wait",
       "type": "java.time.Duration",
-      "description": "Default duration a concurrent caller blocks waiting for an in-flight idempotency key before giving up. Zero means do not block.",
+      "description": "How long a second caller blocks waiting for an in-flight key before being told to come back later. Zero means do not block, which is what a message listener wants.",
       "defaultValue": "10s"
+    },
+    {
+      "name": "idempotency.completion-mode",
+      "type": "io.github.josipmusa.idempotency.core.CompletionMode",
+      "description": "Whether an operation that does not choose for itself records its completion on its own (autonomous) or inside the transaction it is already running in (join-transaction). Joined completion requires a store whose supportsTransactionalCompletion() is true - JDBC yes, in-memory and Redis no.",
+      "defaultValue": "autonomous"
     },
     {
       "name": "idempotency.completion-failure-policy",
       "type": "io.github.josipmusa.idempotency.core.CompletionFailurePolicy",
-      "description": "What happens when the guarded action succeeded but its completion could not be recorded. LOG_AND_RETURN logs the failure and returns the response anyway; PROPAGATE rethrows and the caller sees the storage error.",
+      "description": "What happens when the action succeeded but the store refused the completion. log-and-return logs the failure and returns the result anyway, losing the guarantee for that one key; propagate rethrows and the caller sees the storage error.",
       "defaultValue": "log_and_return"
     },
     {
-      "name": "idempotency.filter-order",
+      "name": "idempotency.store-type",
+      "type": "io.github.josipmusa.idempotency.springboot.IdempotencyProperties$StoreType",
+      "description": "Which store the starter builds. auto detects a JDBC store from the provider plus a single DataSource; jdbc and in-memory demand that backend and fail at startup if it cannot be built; none builds nothing. A store bean the application declares itself always wins.",
+      "defaultValue": "auto"
+    },
+    {
+      "name": "idempotency.jdbc.initialize-schema",
+      "type": "org.springframework.boot.sql.init.DatabaseInitializationMode",
+      "description": "Whether the starter creates the idempotency_records table on startup. embedded creates it only on an embedded database, so a real one never gets DDL from a library; use the idempotency-schema-postgresql.sql or idempotency-schema-mysql.sql shipped in the provider jar instead.",
+      "defaultValue": "embedded"
+    },
+    {
+      "name": "idempotency.web.key-header",
+      "type": "java.lang.String",
+      "description": "HTTP header carrying the idempotency key.",
+      "defaultValue": "Idempotency-Key"
+    },
+    {
+      "name": "idempotency.web.required",
+      "type": "java.lang.Boolean",
+      "description": "Whether a request to an idempotent endpoint that carries no key is rejected with 422. One answer for the whole API rather than a per-endpoint one; false lets unkeyed requests through unprotected.",
+      "defaultValue": true
+    },
+    {
+      "name": "idempotency.web.in-flight-status",
       "type": "java.lang.Integer",
-      "description": "Order of the idempotency servlet filter in the filter chain. Lower values execute earlier.",
+      "description": "Status returned when another caller holds the key and did not finish within the wait timeout. The response carries Retry-After in whole seconds.",
+      "defaultValue": 409
+    },
+    {
+      "name": "idempotency.web.max-body-bytes",
+      "type": "java.lang.Long",
+      "description": "Largest request body the filter will buffer for fingerprinting. A request over the limit receives HTTP 413. Set to -1 to disable the limit.",
+      "defaultValue": 1048576
+    },
+    {
+      "name": "idempotency.web.filter-order",
+      "type": "java.lang.Integer",
+      "description": "Order of the idempotency servlet filter. Lower values execute earlier; the default runs it after Spring Security.",
       "defaultValue": 0
     },
     {
       "name": "idempotency.purge.enabled",
       "type": "java.lang.Boolean",
-      "description": "Whether automatic purging of expired idempotency records is enabled.",
+      "description": "Whether expired records are deleted on a schedule. Requires @EnableScheduling on the application.",
       "defaultValue": true
     },
     {
       "name": "idempotency.purge.cron",
       "type": "java.lang.String",
-      "description": "Cron expression controlling how often expired idempotency records are purged.",
+      "description": "Cron expression controlling how often expired records are purged.",
       "defaultValue": "0 0 * * * *"
-    },
-    {
-      "name": "idempotency.max-body-bytes",
-      "type": "java.lang.Long",
-      "description": "Maximum allowed request body size in bytes for idempotency processing. Requests exceeding this limit receive HTTP 413. Set to -1 to disable the limit.",
-      "defaultValue": 1048576
     }
   ]
 }

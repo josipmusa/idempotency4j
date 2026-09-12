@@ -15,14 +15,13 @@
  */
 package io.github.josipmusa.idempotency.springboot;
 
+import io.github.josipmusa.idempotency.core.CompletionMode;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
-import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
-import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
-import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
+import io.github.josipmusa.idempotency.core.TransactionParticipation;
+import io.github.josipmusa.idempotency.spring.SpringTransactionParticipation;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -31,39 +30,33 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
-import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
-@AutoConfiguration
-@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
-@ConditionalOnClass({IdempotencyFilter.class, RequestMappingHandlerMapping.class})
+/**
+ * The transport-neutral half of the starter: the configuration, the heartbeat scheduler, and
+ * the engine every adapter runs through.
+ *
+ * <p>Nothing here knows about HTTP or about AOP. The filter comes from
+ * {@link IdempotencyWebAutoConfiguration} and the method interceptor from
+ * {@link IdempotencyMethodAutoConfiguration}, each conditional on its own trigger, so a
+ * message-driven application gets an engine without a servlet filter and a web application
+ * gets both.
+ */
+@AutoConfiguration(after = IdempotencyStoreAutoConfiguration.class)
 @EnableConfigurationProperties(IdempotencyProperties.class)
 public class IdempotencyAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    IdempotencyConfig idempotencyConfig(IdempotencyProperties idempotencyProperties) {
+    IdempotencyConfig idempotencyConfig(IdempotencyProperties properties) {
         return IdempotencyConfig.builder()
-                .defaultTtl(idempotencyProperties.getDefaultTtl())
-                .defaultLeaseDuration(idempotencyProperties.getDefaultLease())
-                .defaultWaitTimeout(idempotencyProperties.getDefaultWait())
-                .completionFailurePolicy(idempotencyProperties.getCompletionFailurePolicy())
+                .defaultTtl(properties.getDefaultTtl())
+                .defaultLeaseDuration(properties.getDefaultLease())
+                .defaultWaitTimeout(properties.getDefaultWait())
+                .completionFailurePolicy(properties.getCompletionFailurePolicy())
+                .defaultCompletionMode(properties.getCompletionMode())
                 .build();
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    WebIdempotencyConfig webIdempotencyConfig(IdempotencyProperties idempotencyProperties) {
-        return WebIdempotencyConfig.withKeyHeader(idempotencyProperties.getKeyHeader());
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    ResponseSanitizer responseSanitizer() {
-        return response -> response;
     }
 
     @Bean(destroyMethod = "shutdownNow")
@@ -78,6 +71,31 @@ public class IdempotencyAutoConfiguration {
         });
     }
 
+    /**
+     * Lets the engine see the caller's transaction, so {@code completion-mode=join-transaction}
+     * and {@code @Idempotent(completion = "join-transaction")} can commit the record with the
+     * business writes.
+     *
+     * <p>Supplied only for a store that can actually use it. Handing one to a store whose
+     * {@link IdempotencyStore#supportsTransactionalCompletion()} is {@code false} is an
+     * {@link IllegalArgumentException} from the engine's own constructor - which is exactly
+     * what should happen when the application asked for joined completion, and exactly what
+     * should not happen when it did not. So the participation is created when the store
+     * supports it, or when the application asked for joined completion and is therefore owed
+     * the engine's explanation of why that cannot work here.
+     */
+    @Bean
+    @ConditionalOnClass(SpringTransactionParticipation.class)
+    @ConditionalOnMissingBean(TransactionParticipation.class)
+    @ConditionalOnBean(IdempotencyStore.class)
+    TransactionParticipation idempotencyTransactionParticipation(
+            IdempotencyStore store, IdempotencyProperties properties) {
+        boolean joinedRequested = properties.getCompletionMode() == CompletionMode.JOIN_TRANSACTION;
+        return store.supportsTransactionalCompletion() || joinedRequested
+                ? new SpringTransactionParticipation()
+                : TransactionParticipation.none();
+    }
+
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnBean(IdempotencyStore.class)
@@ -85,42 +103,13 @@ public class IdempotencyAutoConfiguration {
             IdempotencyStore idempotencyStore,
             ScheduledExecutorService idempotencyScheduler,
             ObjectProvider<IdempotencyLifecycleListener> lifecycleListeners,
-            IdempotencyConfig idempotencyConfig) {
+            IdempotencyConfig idempotencyConfig,
+            ObjectProvider<TransactionParticipation> transactions) {
         return new IdempotencyEngine(
                 idempotencyStore,
                 idempotencyScheduler,
                 lifecycleListeners.orderedStream().toList(),
-                idempotencyConfig);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public IdempotentHandlerRegistry idempotentHandlerRegistry(
-            RequestMappingHandlerMapping handlerMapping, IdempotencyConfig config) {
-        return new IdempotentHandlerRegistry(handlerMapping, config);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnBean(IdempotencyEngine.class)
-    public IdempotencyFilter idempotencyFilter(
-            IdempotencyEngine engine,
-            WebIdempotencyConfig webConfig,
-            RequestMappingHandlerMapping handlerMapping,
-            IdempotentHandlerRegistry registry,
-            IdempotencyProperties properties,
-            ResponseSanitizer sanitizer) {
-        return new IdempotencyFilter(
-                engine, webConfig, handlerMapping, registry, properties.getMaxBodyBytes(), sanitizer);
-    }
-
-    @Bean
-    @ConditionalOnBean(IdempotencyFilter.class)
-    public FilterRegistrationBean<IdempotencyFilter> idempotencyFilterRegistration(
-            IdempotencyFilter idempotencyFilter, IdempotencyProperties properties) {
-        FilterRegistrationBean<IdempotencyFilter> registration = new FilterRegistrationBean<>(idempotencyFilter);
-        registration.setOrder(properties.getFilterOrder());
-        registration.addUrlPatterns("/*");
-        return registration;
+                idempotencyConfig,
+                transactions.getIfAvailable(TransactionParticipation::none));
     }
 }

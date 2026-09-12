@@ -22,14 +22,14 @@ import static org.mockito.Mockito.when;
 
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.CompletionFailurePolicy;
+import io.github.josipmusa.idempotency.core.CompletionMode;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
-import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
-import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
+import io.github.josipmusa.idempotency.core.TransactionParticipation;
+import io.github.josipmusa.idempotency.spring.SpringTransactionParticipation;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -37,20 +37,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
-import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
+/** The transport-neutral autoconfiguration: config, scheduler, engine. */
 class IdempotencyAutoConfigurationTest {
 
     private static final List<String> listenerCalls = new CopyOnWriteArrayList<>();
 
-    private final WebApplicationContextRunner contextRunner = new WebApplicationContextRunner()
-            .withConfiguration(AutoConfigurations.of(IdempotencyAutoConfiguration.class))
-            .withBean(RequestMappingHandlerMapping.class, () -> mock(RequestMappingHandlerMapping.class));
+    private final ApplicationContextRunner contextRunner =
+            new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(IdempotencyAutoConfiguration.class));
 
     @BeforeEach
     void resetListenerCalls() {
@@ -58,23 +55,18 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void When_NoStoreBeanPresent_Expect_EngineAndFilterNotCreated() {
+    void When_NoStoreBeanPresent_Expect_EngineNotCreated() {
         contextRunner.run(context -> {
             assertThat(context).doesNotHaveBean(IdempotencyEngine.class);
-            assertThat(context).doesNotHaveBean(IdempotencyFilter.class);
-            assertThat(context).doesNotHaveBean(FilterRegistrationBean.class);
+            assertThat(context).hasSingleBean(IdempotencyConfig.class);
         });
     }
 
     @Test
-    void When_StoreBeanPresent_Expect_EngineAndFilterCreated() {
+    void When_StoreBeanPresent_Expect_EngineCreated() {
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
-                .run(context -> {
-                    assertThat(context).hasSingleBean(IdempotencyEngine.class);
-                    assertThat(context).hasSingleBean(IdempotencyFilter.class);
-                    assertThat(context).hasSingleBean(FilterRegistrationBean.class);
-                });
+                .run(context -> assertThat(context).hasSingleBean(IdempotencyEngine.class));
     }
 
     @Test
@@ -100,14 +92,6 @@ class IdempotencyAutoConfigurationTest {
     }
 
     @Test
-    void When_CustomFilterBeanPresent_Expect_AutoConfiguredFilterSkipped() {
-        contextRunner
-                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
-                .withBean(IdempotencyFilter.class, () -> mock(IdempotencyFilter.class))
-                .run(context -> assertThat(context).hasSingleBean(IdempotencyFilter.class));
-    }
-
-    @Test
     void When_DefaultProperties_Expect_AppliedToConfig() {
         contextRunner.run(context -> {
             IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
@@ -115,7 +99,7 @@ class IdempotencyAutoConfigurationTest {
             assertThat(config.defaultLeaseDuration()).isEqualTo(Duration.ofSeconds(30));
             assertThat(config.defaultWaitTimeout()).isEqualTo(Duration.ofSeconds(10));
             assertThat(config.completionFailurePolicy()).isEqualTo(CompletionFailurePolicy.LOG_AND_RETURN);
-            assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader()).isEqualTo("Idempotency-Key");
+            assertThat(config.defaultCompletionMode()).isEqualTo(CompletionMode.AUTONOMOUS);
         });
     }
 
@@ -123,89 +107,56 @@ class IdempotencyAutoConfigurationTest {
     void When_CustomProperties_Expect_AppliedToConfig() {
         contextRunner
                 .withPropertyValues(
-                        "idempotency.key-header=X-Request-Id",
                         "idempotency.default-ttl=PT2H",
                         "idempotency.default-lease=PT5M",
                         "idempotency.default-wait=PT0S",
-                        "idempotency.completion-failure-policy=propagate")
+                        "idempotency.completion-failure-policy=propagate",
+                        "idempotency.completion-mode=join-transaction")
                 .run(context -> {
                     IdempotencyConfig config = context.getBean(IdempotencyConfig.class);
                     assertThat(config.defaultTtl()).isEqualTo(Duration.ofHours(2));
                     assertThat(config.defaultLeaseDuration()).isEqualTo(Duration.ofMinutes(5));
                     assertThat(config.defaultWaitTimeout()).isZero();
                     assertThat(config.completionFailurePolicy()).isEqualTo(CompletionFailurePolicy.PROPAGATE);
-                    assertThat(context.getBean(WebIdempotencyConfig.class).keyHeader())
-                            .isEqualTo("X-Request-Id");
+                    assertThat(config.defaultCompletionMode()).isEqualTo(CompletionMode.JOIN_TRANSACTION);
                 });
     }
 
     @Test
-    void When_DefaultFilterOrder_Expect_AppliedToRegistration() {
+    void When_StoreSupportsTransactionalCompletion_Expect_SpringTransactionParticipationWiredIn() {
+        contextRunner
+                .withBean(IdempotencyStore.class, IdempotencyAutoConfigurationTest::transactionalStore)
+                .run(context -> assertThat(context.getBean(TransactionParticipation.class))
+                        .isInstanceOf(SpringTransactionParticipation.class));
+    }
+
+    @Test
+    void When_StoreDoesNotSupportTransactionalCompletion_Expect_NoParticipationAndEngineStillCreated() {
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .run(context -> {
-                    FilterRegistrationBean<?> registration = context.getBean(FilterRegistrationBean.class);
-                    assertThat(registration.getOrder()).isZero();
+                    assertThat(context.getBean(TransactionParticipation.class))
+                            .isSameAs(TransactionParticipation.none());
+                    assertThat(context).hasSingleBean(IdempotencyEngine.class);
                 });
     }
 
+    /**
+     * Redis reports {@code supportsTransactionalCompletion() == false} permanently, so asking
+     * for joined completion on top of it cannot work. It must say so at startup rather than at
+     * the first message, and in the engine's own words.
+     */
     @Test
-    void When_CustomFilterOrder_Expect_AppliedToRegistration() {
+    void When_JoinTransactionWithRedis_Expect_ContextFailsToStart() {
         contextRunner
+                .withPropertyValues("idempotency.completion-mode=join-transaction")
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
-                .withPropertyValues("idempotency.filter-order=10")
-                .run(context -> {
-                    FilterRegistrationBean<?> registration = context.getBean(FilterRegistrationBean.class);
-                    assertThat(registration.getOrder()).isEqualTo(10);
-                });
-    }
-
-    @Test
-    void When_CustomMaxBodyBytes_Expect_AppliedToFilter() {
-        contextRunner
-                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
-                .withPropertyValues("idempotency.max-body-bytes=2097152")
-                .run(context -> {
-                    assertThat(context).hasSingleBean(IdempotencyFilter.class);
-                });
-    }
-
-    @Test
-    void When_NonServletApplication_Expect_NoBeanCreated() {
-        new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of(IdempotencyAutoConfiguration.class))
-                .run(context -> {
-                    assertThat(context).doesNotHaveBean(IdempotencyFilter.class);
-                    assertThat(context).doesNotHaveBean(IdempotencyConfig.class);
-                    assertThat(context).doesNotHaveBean(WebIdempotencyConfig.class);
-                });
-    }
-
-    @Test
-    void When_CustomWebConfigBeanPresent_Expect_AutoConfiguredWebConfigSkipped() {
-        WebIdempotencyConfig customWebConfig = WebIdempotencyConfig.withKeyHeader("X-Custom-Key");
-        contextRunner
-                .withBean(WebIdempotencyConfig.class, () -> customWebConfig)
-                .run(context -> {
-                    assertThat(context).hasSingleBean(WebIdempotencyConfig.class);
-                    assertThat(context.getBean(WebIdempotencyConfig.class)).isSameAs(customWebConfig);
-                });
-    }
-
-    @Test
-    void When_NoCustomSanitizerBean_Expect_DefaultSanitizerRegistered() {
-        contextRunner.run(context -> {
-            assertThat(context).hasSingleBean(ResponseSanitizer.class);
-        });
-    }
-
-    @Test
-    void When_CustomSanitizerBean_Expect_AutoConfiguredSanitizerSkipped() {
-        ResponseSanitizer custom = response -> response;
-        contextRunner.withBean(ResponseSanitizer.class, () -> custom).run(context -> {
-            assertThat(context).hasSingleBean(ResponseSanitizer.class);
-            assertThat(context.getBean(ResponseSanitizer.class)).isSameAs(custom);
-        });
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        .isInstanceOf(IllegalArgumentException.class)
+                        .hasMessageContaining("does not support transactional completion"));
     }
 
     @Test
@@ -250,6 +201,12 @@ class IdempotencyAutoConfigurationTest {
     private static IdempotencyStore acquiringStore() {
         IdempotencyStore store = mock(IdempotencyStore.class);
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired("test-lease-id"));
+        return store;
+    }
+
+    private static IdempotencyStore transactionalStore() {
+        IdempotencyStore store = mock(IdempotencyStore.class);
+        when(store.supportsTransactionalCompletion()).thenReturn(true);
         return store;
     }
 

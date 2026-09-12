@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** Starter properties are regrouped. Transport-neutral settings stay at the top level,
+  HTTP-only ones move under `idempotency.web` (`key-header`, `required`, `in-flight-status`,
+  `max-body-bytes`, `filter-order`), and JDBC-only ones under `idempotency.jdbc`. New:
+  `idempotency.completion-mode`, `idempotency.store-type`, `idempotency.jdbc.initialize-schema`,
+  `idempotency.web.required` and `idempotency.web.in-flight-status`, the last two previously
+  reachable only by declaring a `WebIdempotencyConfig` bean.
+- **Breaking.** The starter's single autoconfiguration is split into five, each conditional on its
+  own trigger: store detection, the transport-neutral engine, the HTTP filter (Servlet web
+  applications only), the method interceptor (Spring AOP only), and the purge scheduler. A
+  message-driven application now gets an engine and an interceptor without a servlet filter it has
+  no use for.
+- **Breaking.** `@Idempotent(completion = ...)` is a `String` rather than a `CompletionMode`.
+  `"autonomous"` and `"join-transaction"` are matched case-insensitively with `-` and `_`
+  interchangeable, an unrecognised value is rejected at startup, and empty means "use
+  `IdempotencyConfig.defaultCompletionMode()`" - the convention `ttl`, `lease` and `waitTimeout`
+  already followed. An enum attribute could not express "unset", which left the new
+  `idempotency.completion-mode` property unable to reach an annotated method.
+- `IdempotencyConfig` gains `defaultCompletionMode` (default `CompletionMode.AUTONOMOUS`), read by
+  the adapter layer while it builds a context. The engine still reads only
+  `completionFailurePolicy` from that class.
+- The `record-lifecycle` and `request-outcomes` diagrams are redrawn for the current model: the
+  `FAILED` state is gone, releasing deletes the row and returns the key to absent, an abandoned
+  in-progress record is purged only once its TTL has elapsed **and** its lease has expired, and an
+  in-flight key is answered with 409 plus `Retry-After` rather than a bare 503.
+- README and `AGENTS.md` are rewritten for the library as it now is: core usage, HTTP, method-level
+  idempotency, joined completion, and store selection.
+
 - **Breaking.** New `idempotency-spring` module holding the Spring integration that is not about
   HTTP: `SpringTransactionParticipation`, a `TransactionAwareConnectionResolver` that runs
   `COMPLETE` on the caller's transaction and everything else on a connection of its own, a
@@ -199,6 +226,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listener. It remains free of framework dependencies.
 
 ### Added
+
+- The starter builds an `IdempotencyStore` for you. With `idempotency-jdbc` on the classpath and a
+  single `DataSource` in the context, a `JdbcIdempotencyStore` is wired up complete with the
+  `TransactionAwareConnectionResolver` that joined completion needs - previously an application had
+  to know the resolver existed for `JOIN_TRANSACTION` to do anything. `idempotency.store-type`
+  (`auto`, `jdbc`, `in-memory`, `none`) overrides the detection, and a store bean the application
+  declares itself always wins.
+
+  `auto` deliberately never falls back to the in-memory store: an inbox that deduplicates only
+  within one JVM and forgets on restart is not a property anything should acquire by accident.
+  Naming a backend that cannot be built fails the context at startup rather than leaving the
+  application silently un-deduplicated, and the selected store is logged at INFO.
+
+  The Redis store is not autoconfigured. It takes a raw Lettuce
+  `StatefulRedisConnection<String, byte[]>` rather than the `RedisConnectionFactory` Spring Boot
+  produces, and bridging the two would mean either reaching into Spring Data Redis internals or
+  reimplementing Boot's URL, Sentinel, SSL and pooling handling and then running two clients with
+  two lifecycles.
+- `idempotency.jdbc.initialize-schema` (`embedded` by default, plus `always` and `never`), following
+  the convention Spring Boot uses for Session and Quartz. A development database gets its table for
+  free while a real one no longer receives DDL from a library at startup; point a migration tool at
+  the `idempotency-schema-postgresql.sql` or `idempotency-schema-mysql.sql` file shipped in the
+  provider jar instead.
+- `JdbcIdempotencyStore(DataSource, boolean initSchema, ConnectionResolver)`, the combination a
+  hand-wiring Spring application needs, without having to restate the default poll interval.
 
 - `NoPayload` for recording a completed operation that has nothing to replay, so non-HTTP callers
   can use the engine without fabricating a response.
