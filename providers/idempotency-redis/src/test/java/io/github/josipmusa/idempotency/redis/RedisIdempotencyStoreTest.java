@@ -192,7 +192,7 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
         String redisKey = "idempotency4j:rec:" + SCOPE_DEFAULT + ":future-format";
         commands.hset(redisKey, "owner", RedisIdempotencyStore.RECORD_OWNER.getBytes(StandardCharsets.UTF_8));
         commands.hset(redisKey, "formatVersion", "999".getBytes(StandardCharsets.US_ASCII));
-        commands.hset(redisKey, "status", "FAILED".getBytes(StandardCharsets.UTF_8));
+        commands.hset(redisKey, "status", "IN_PROGRESS".getBytes(StandardCharsets.UTF_8));
 
         assertThatThrownBy(() -> store().tryAcquire(contextFor("future-format")))
                 .isInstanceOf(IdempotencyCorruptRecordException.class)
@@ -340,7 +340,8 @@ class RedisIdempotencyStoreTest extends IdempotencyStoreContract {
     @Test
     void When_ExtendLockCalled_Expect_PurgeKeepsRecord() throws InterruptedException {
         IdempotencyStore s = store();
-        // TTL is shorter than the extended lock, so purge must use both timestamps.
+        // The lock now outlives the record's TTL. The holder still owns the key, so neither
+        // the native PEXPIRE nor the purge script may drop it.
         acquire(s, context("extend-rescore-key", Duration.ofMillis(10), Duration.ofMillis(10)));
         extendLock(s, "extend-rescore-key", Duration.ofSeconds(30));
 

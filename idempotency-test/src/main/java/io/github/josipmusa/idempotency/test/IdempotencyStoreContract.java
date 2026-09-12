@@ -636,15 +636,99 @@ public abstract class IdempotencyStoreContract {
     // --- Additional edge-case contracts ---
 
     @Test
-    void When_ExtendLockFailedKey_Expect_SilentlyIgnored() {
+    void When_ExtendLockReleasedKey_Expect_SilentlyIgnored() {
         IdempotencyStore s = store();
-        String key = "failed-extend-key";
+        String key = "released-extend-key";
 
         acquire(s, contextFor(key));
         release(s, key);
 
-        // Must not throw — FAILED is not IN_PROGRESS
+        // Must not throw — a released record is gone, and the heartbeat may still fire
         extendLock(s, key, Duration.ofSeconds(10));
+    }
+
+    @Test
+    void When_Released_Expect_RecordAbsent() throws InterruptedException {
+        IdempotencyStore s = store();
+        String key = "released-absent";
+        Duration ttl = Duration.ofMillis(50);
+
+        acquire(s, contextWithTtl(key, ttl, Duration.ofSeconds(5)));
+        release(s, key);
+
+        // A failed attempt leaves no trace. Once the TTL the record was created with has
+        // passed there is nothing left for a purge to collect — a record that had merely
+        // changed status would still be sitting there waiting to be counted here.
+        sleepFor(ttl.plusMillis(100));
+
+        assertThat(s.purgeExpired())
+                .as("release must delete the record, not move it to another state")
+                .isZero();
+    }
+
+    @Test
+    void When_ReleaseWithWrongLease_Expect_LeaseLost() {
+        IdempotencyStore s = store();
+        String key = "release-wrong-lease";
+
+        acquire(s, contextFor(key));
+
+        assertThatThrownBy(() -> s.release(identity(key), "not-the-lease"))
+                .isInstanceOf(IdempotencyLeaseLostException.class);
+        // The record is untouched: its real owner can still release it.
+        assertThatCode(() -> release(s, key)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void When_ReleasedThenAcquired_Expect_FreshLease() {
+        IdempotencyStore s = store();
+        String key = "released-fresh-lease";
+
+        var first = (AcquireResult.Acquired) acquire(s, contextFor(key));
+        s.release(identity(key), first.leaseId());
+
+        var second = acquire(s, contextFor(key));
+
+        assertThat(second).isInstanceOf(AcquireResult.Acquired.class);
+        assertThat(((AcquireResult.Acquired) second).leaseId()).isNotEqualTo(first.leaseId());
+        // The released lease is not the owner of the new acquisition and cannot mutate it.
+        assertThatThrownBy(() -> s.release(identity(key), first.leaseId()))
+                .isInstanceOf(IdempotencyLeaseLostException.class);
+    }
+
+    @Test
+    void When_PurgeExpired_Expect_OnlyExpiredRowsGone() throws InterruptedException {
+        IdempotencyStore s = store();
+        Duration shortTtl = Duration.ofMillis(50);
+
+        // Completed, TTL already past by the time purge runs — the only purgeable record.
+        acquire(s, contextWithTtl("purge-only-expired", shortTtl, Duration.ofSeconds(5)));
+        complete(s, "purge-only-expired", samplePayload(), shortTtl);
+        // Completed and well inside its TTL.
+        acquire(s, contextFor("purge-only-live"));
+        complete(s, "purge-only-live", samplePayload(), Duration.ofHours(1));
+        // IN_PROGRESS with an expired lease but a live TTL: stealable, not garbage.
+        acquire(s, contextWithLeaseAndWait("purge-only-stale-lease", shortTtl, Duration.ZERO));
+        // IN_PROGRESS with an expired TTL but a lease nobody has given up: still owned.
+        // Deleting it would let a second caller run the protected action again.
+        acquire(
+                s,
+                IdempotencyContext.builder(SCOPE_DEFAULT, "purge-only-held")
+                        .ttl(shortTtl)
+                        .leaseDuration(Duration.ofSeconds(30))
+                        .waitTimeout(Duration.ZERO)
+                        .fingerprint(FINGERPRINT_DEFAULT)
+                        .build());
+
+        sleepFor(shortTtl.plusMillis(100));
+
+        assertThat(s.purgeExpired())
+                .as("only the record that has expired and is owned by nobody is purgeable")
+                .isEqualTo(1);
+        assertThat(s.tryAcquire(contextFor("purge-only-live"))).isInstanceOf(AcquireResult.Duplicate.class);
+        assertThat(s.tryAcquire(contextWithLeaseAndWait("purge-only-held", Duration.ofSeconds(5), Duration.ZERO)))
+                .as("a record under a live lease survives purge and is still held")
+                .isInstanceOf(AcquireResult.InFlight.class);
     }
 
     @Test
@@ -659,15 +743,15 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_FailedKeyUnderContention_Expect_TimeoutRespected()
+    void When_ReleasedKeyUnderContention_Expect_TimeoutRespected()
             throws InterruptedException, ExecutionException, TimeoutException {
         IdempotencyStore s = store();
-        String key = "contended-failed-key";
+        String key = "contended-released-key";
         int chaosThreadCount = 20;
         AtomicBoolean stop = new AtomicBoolean(false);
         CountDownLatch chaosReady = new CountDownLatch(chaosThreadCount);
 
-        // Put key in FAILED state
+        // Leave the key free, having already been acquired and released once
         acquire(s, contextFor(key, Duration.ofSeconds(10)));
         release(s, key);
 
@@ -953,15 +1037,15 @@ public abstract class IdempotencyStoreContract {
     }
 
     @Test
-    void When_StolenFailedKeyCompletedWithNewFingerprint_Expect_OldFingerprintIsMismatch() {
+    void When_ReleasedKeyCompletedWithNewFingerprint_Expect_OldFingerprintIsMismatch() {
         IdempotencyStore s = store();
-        String key = "fp-stolen-complete";
+        String key = "fp-released-complete";
 
-        // First attempt with FINGERPRINT_A — fails
+        // First attempt with FINGERPRINT_A — fails and leaves no record
         acquire(s, contextFor(key, FINGERPRINT_A));
         release(s, key);
 
-        // Second attempt steals with FINGERPRINT_B and completes
+        // Second attempt acquires afresh with FINGERPRINT_B and completes
         acquire(s, contextFor(key, FINGERPRINT_B));
         complete(s, key, samplePayload(), Duration.ofHours(1));
 
@@ -975,31 +1059,6 @@ public abstract class IdempotencyStoreContract {
         var mismatch = (AcquireResult.FingerprintMismatch) result;
         assertThat(mismatch.storedFingerprint()).isEqualTo(FINGERPRINT_B);
         assertThat(mismatch.receivedFingerprint()).isEqualTo(FINGERPRINT_A);
-    }
-
-    @Test
-    void When_KeyReleasedAfterLeaseExpired_Expect_FailedRecordNotImmediatelyPurgeable() throws InterruptedException {
-        IdempotencyStore s = store();
-        String key = "failed-expiry-contract";
-
-        // A short lease so it has certainly expired by the time release() runs, paired with
-        // the helper's one-hour TTL. release() must carry that TTL over untouched, not date
-        // the FAILED record from the already-past lease.
-        Duration lease = Duration.ofMillis(100);
-
-        acquire(s, contextFor(key, lease));
-
-        // Wait for the lease to expire, then release
-        sleepFor(lease.plusMillis(100));
-        release(s, key);
-
-        // Purge immediately — the FAILED record should NOT be eligible yet.
-        int purged = s.purgeExpired();
-
-        assertThat(purged)
-                .as("FAILED record should survive an immediate purgeExpired() call; "
-                        + "release must leave expires_at at the record's TTL, not the expired lease")
-                .isEqualTo(0);
     }
 
     // ── Optional fingerprint tests ─────────────────────────────────────

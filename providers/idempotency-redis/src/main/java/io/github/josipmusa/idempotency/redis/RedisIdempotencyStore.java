@@ -147,7 +147,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 local leaseExpiresAt = tonumber(redis.call('HGET', rec, 'leaseExpiresAt'))
                 if not leaseExpiresAt then return {'CORRUPT', 'leaseExpiresAt'} end
                 if leaseExpiresAt > now then return {'BUSY', string.format('%.0f', leaseExpiresAt - now)} end
-            elseif status ~= nil and status ~= 'FAILED' then
+            elseif status ~= nil then
                 return {'CORRUPT', 'status'}
             end
 
@@ -203,26 +203,20 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             return {'OK'}
             """);
 
-    /** KEYS: record. ARGV: lease, grace, owner, format. */
+    /** KEYS: record. ARGV: lease, owner, format. */
     private static final LuaScript RELEASE = LuaScript.of("""
             local rec = KEYS[1]
             local kind = redis.call('TYPE', rec).ok
             if kind == 'none' then return {'MISSING'} end
-            if kind ~= 'hash' or redis.call('HGET', rec, 'owner') ~= ARGV[3] then return {'FOREIGN'} end
-            if redis.call('HGET', rec, 'formatVersion') ~= ARGV[4] then return {'CORRUPT', 'formatVersion'} end
+            if kind ~= 'hash' or redis.call('HGET', rec, 'owner') ~= ARGV[2] then return {'FOREIGN'} end
+            if redis.call('HGET', rec, 'formatVersion') ~= ARGV[3] then return {'CORRUPT', 'formatVersion'} end
             local status = redis.call('HGET', rec, 'status')
             if status ~= 'IN_PROGRESS' then return {'CONFLICT', status or 'missing'} end
             if redis.call('HGET', rec, 'leaseId') ~= ARGV[1] then return {'STALE'} end
-            local expiresAt = tonumber(redis.call('HGET', rec, 'expiresAt'))
-            if not expiresAt then return {'CORRUPT', 'expiresAt'} end
 
-            local clock = redis.call('TIME')
-            local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
-            -- expiresAt is carried over untouched: a FAILED record is re-acquirable at once,
-            -- and its original TTL is what keeps a purge from dropping it before a retry.
-            redis.call('HSET', rec, 'status', 'FAILED')
-            redis.call('HDEL', rec, 'leaseExpiresAt', 'leaseId', 'payload_type', 'payload', 'attributes', 'completedAt')
-            redis.call('PEXPIRE', rec, math.max(1, expiresAt - now + tonumber(ARGV[2])))
+            -- The record is deleted outright: a failed attempt leaves no trace, and the next
+            -- acquire for this identity writes a fresh record.
+            redis.call('DEL', rec)
             return {'OK'}
             """);
 
@@ -260,15 +254,13 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                         and redis.call('HGET', rec, 'formatVersion') == ARGV[2] then
                     local status = redis.call('HGET', rec, 'status')
                     local expiresAt = tonumber(redis.call('HGET', rec, 'expiresAt'))
-                    local purgeableAt = expiresAt
+                    local owned = false
                     if status == 'IN_PROGRESS' then
                         local leaseExpiresAt = tonumber(redis.call('HGET', rec, 'leaseExpiresAt'))
-                        if leaseExpiresAt and (not purgeableAt or leaseExpiresAt > purgeableAt) then
-                            purgeableAt = leaseExpiresAt
-                        end
+                        owned = leaseExpiresAt == nil or leaseExpiresAt > now
                     end
-                    if (status == 'COMPLETE' or status == 'FAILED' or status == 'IN_PROGRESS')
-                            and purgeableAt and purgeableAt <= now then
+                    if (status == 'COMPLETE' or status == 'IN_PROGRESS')
+                            and not owned and expiresAt and expiresAt <= now then
                         redis.call('DEL', rec)
                         deleted = deleted + 1
                     end
@@ -391,7 +383,6 @@ public class RedisIdempotencyStore implements IdempotencyStore {
                 "release " + identity,
                 keysFor(identity),
                 arg(leaseId),
-                arg(graceMs),
                 arg(RECORD_OWNER),
                 arg(FORMAT_VERSION));
         requireOk(reply, identity, "release");
@@ -523,16 +514,24 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    @SuppressWarnings("unchecked")
     private List<Object> eval(LuaScript script, String description, String[] keys, byte[]... args) {
         try {
-            try {
-                return (List<Object>) commands.evalsha(script.digest(), ScriptOutputType.MULTI, keys, args);
-            } catch (RedisNoScriptException e) {
-                return (List<Object>) commands.eval(script.body(), ScriptOutputType.MULTI, keys, args);
-            }
+            return evalCached(script, keys, args);
         } catch (RedisException e) {
             throw new IdempotencyStoreUnavailableException("Failed to " + description, e);
+        }
+    }
+
+    /**
+     * Runs the script by digest, falling back to shipping its body when the server has not
+     * seen it yet - after a restart, or when another client flushed the script cache.
+     */
+    @SuppressWarnings("unchecked")
+    private List<Object> evalCached(LuaScript script, String[] keys, byte[]... args) {
+        try {
+            return (List<Object>) commands.evalsha(script.digest(), ScriptOutputType.MULTI, keys, args);
+        } catch (RedisNoScriptException e) {
+            return (List<Object>) commands.eval(script.body(), ScriptOutputType.MULTI, keys, args);
         }
     }
 

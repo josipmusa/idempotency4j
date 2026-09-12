@@ -133,6 +133,40 @@ class IdempotencyEngineListenerTest {
     }
 
     @Test
+    void When_ActionThrowsError_Expect_ReleasedAndOnFailedFired() {
+        IdempotencyContext context = defaultContext("action-error-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        Error actionFailure = new StackOverflowError("boom");
+
+        assertThatThrownBy(() -> engine.execute(context, () -> {
+                    throw actionFailure;
+                }))
+                .isSameAs(actionFailure);
+
+        InOrder inOrder = inOrder(listener, store);
+        inOrder.verify(listener).onAcquired(context, LEASE_ID);
+        inOrder.verify(store).release(identity("action-error-key"), LEASE_ID);
+        inOrder.verify(listener).onFailed(context, LEASE_ID, actionFailure, FailurePhase.ACTION);
+        verify(listener, never()).onCompleted(any(), any(), any());
+    }
+
+    @Test
+    void When_HeartbeatThrowsError_Expect_ReleasedAndOnFailedFired() {
+        IdempotencyContext context = defaultContext("heartbeat-error-key");
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        Error heartbeatFailure = new StackOverflowError("heartbeat blew the stack");
+        doThrow(heartbeatFailure).when(store).extendLock(any(), any(), any());
+
+        assertThatThrownBy(() -> engine.execute(context, () -> {})).isSameAs(heartbeatFailure);
+
+        InOrder inOrder = inOrder(listener, store);
+        inOrder.verify(listener).onAcquired(context, LEASE_ID);
+        inOrder.verify(store).release(identity("heartbeat-error-key"), LEASE_ID);
+        inOrder.verify(listener).onFailed(context, LEASE_ID, heartbeatFailure, FailurePhase.ACTION);
+        verify(listener, never()).onCompleted(any(), any(), any());
+    }
+
+    @Test
     void When_ActionThrowsAndReleaseFails_Expect_FailedStillFiredWithSuppressedRelease() {
         IdempotencyContext context = defaultContext("release-fail-key");
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));

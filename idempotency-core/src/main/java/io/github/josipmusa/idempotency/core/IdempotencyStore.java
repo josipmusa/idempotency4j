@@ -31,13 +31,17 @@ import java.time.Duration;
  *
  * <h2>State machine for a record</h2>
  * <pre>
- * [not exists] ──tryAcquire──→ IN_PROGRESS ──complete(leaseId)──→ COMPLETE
- *                                   │
- *                           release(leaseId)
- *                                   │
- *                                   ↓
- *                                FAILED ──tryAcquire──→ IN_PROGRESS
+ * [absent] ──tryAcquire──→ IN_PROGRESS ──complete(leaseId)──→ COMPLETE
+ *                               │
+ *                       release(leaseId)
+ *                               │
+ *                               ↓
+ *                            [absent]
  * </pre>
+ *
+ * <p>There are two states, not three: a record is absent, IN_PROGRESS, or COMPLETE.
+ * A failed attempt leaves no trace — {@code release} deletes the record, so the next
+ * {@code tryAcquire} sees a key that was never used.
  *
  * <p>COMPLETE records return {@link AcquireResult.Duplicate} until their TTL
  * expires, after which they are treated as new. IN_PROGRESS records whose
@@ -53,7 +57,8 @@ import java.time.Duration;
  *   <li>{@code extendLock} must be a silent no-op for unknown or
  *       non-IN_PROGRESS records (the heartbeat may fire after completion).</li>
  *   <li>{@code complete} and {@code release} must reject calls for records
- *       that are not IN_PROGRESS or are owned by a different lease.</li>
+ *       that are absent, not IN_PROGRESS, or owned by a different lease, by
+ *       throwing {@code IdempotencyLeaseLostException}.</li>
  * </ul>
  */
 public interface IdempotencyStore {
@@ -81,7 +86,7 @@ public interface IdempotencyStore {
      *
      * <p>Stale acquisitions (IN_PROGRESS with an expired lease) are
      * stolen atomically — the caller receives {@code Acquired} as if the
-     * record were new. FAILED records are reclaimed the same way.
+     * record were new.
      *
      * <p><strong>Fingerprint comparison.</strong>
      * {@link IdempotencyContext#requestFingerprint()} is optional, so a stored
@@ -134,14 +139,11 @@ public interface IdempotencyStore {
     void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl);
 
     /**
-     * Transitions an IN_PROGRESS record to FAILED, allowing it to be retried.
+     * Deletes an IN_PROGRESS record, allowing the key to be used again.
      *
-     * <p>Called by the engine when the action throws. The record becomes
-     * immediately reclaimable by the next {@code tryAcquire} caller.
-     *
-     * <p>Implementations must leave the record's {@code expires_at} untouched. A
-     * FAILED record is reclaimable straight away, and the TTL it was created with
-     * is what stops a purge from removing it out from under a retry.
+     * <p>Called by the engine when the action throws. A failed attempt leaves no
+     * trace: the record is gone, and the next {@code tryAcquire} for that identity
+     * acquires it as if the key were new.
      *
      * @param identity the identity to release
      * @param leaseId  the lease returned by the successful {@code tryAcquire}
@@ -171,14 +173,18 @@ public interface IdempotencyStore {
     /**
      * Purges all expired records from the store.
      *
-     * <p>The following records are eligible for purging:
-     * <ul>
-     *   <li>{@code COMPLETE} records whose {@code expires_at} is in the past</li>
-     *   <li>{@code FAILED} records whose {@code expires_at} is in the past</li>
-     *   <li>{@code IN_PROGRESS} records whose lease and {@code expires_at}
-     *       have both passed — indicating a crashed caller whose TTL window
-     *       has also closed</li>
-     * </ul>
+     * <p>A record is eligible for purging when its {@code expires_at} is in the
+     * past <strong>and</strong> nobody owns it: an IN_PROGRESS record is only
+     * purgeable once its lease has also expired.
+     *
+     * <p>The two timestamps answer different questions. {@code expires_at} says how
+     * long a completed record stays replayable; the lease says whether a caller
+     * still owns the key. Purge collects garbage, so it must ask both. Deleting a
+     * record whose lease is still being extended would let a second caller acquire
+     * the same key and run the protected action again, which is precisely what this
+     * library exists to prevent. An expired lease on its own is the other half of
+     * the rule: that record is stealable by the next {@code tryAcquire} caller, not
+     * garbage, and it stays until its own {@code expires_at} passes.
      *
      * <p>This method does not schedule itself. Callers are responsible for
      * invoking it periodically. When using the Spring Boot starter, a

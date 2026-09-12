@@ -54,10 +54,11 @@ import org.slf4j.LoggerFactory;
  * in the {@code finally} block regardless of success or failure.
  *
  * <h2>Failure handling</h2>
- * <p>If the action throws, the engine calls {@link IdempotencyStore#release}
- * to transition the key to FAILED so it can be retried. If {@code release}
- * itself throws (e.g. store is down), the release exception is added as a
- * suppressed exception on the original — the action's exception always
+ * <p>If the action throws anything at all — including an {@link Error} — the
+ * engine calls {@link IdempotencyStore#release} to delete the record so the key
+ * can be retried, and the failed attempt leaves no trace. If {@code release}
+ * itself throws (e.g. store is down), the release failure is added as a
+ * suppressed exception on the original — what the action threw always
  * propagates as the primary.
  *
  * <h2>Lifecycle callbacks</h2>
@@ -125,7 +126,8 @@ public final class IdempotencyEngine {
      * @throws IdempotencyLockTimeoutException if the key is still in-flight when
      *         the wait timeout elapsed
      * @throws Exception if the action itself throws — the original exception
-     *         propagates unchanged, and the key is released for retry
+     *         propagates unchanged, and the record is deleted so the key can be
+     *         retried. An {@link Error} is handled the same way and propagates too
      */
     public ExecutionResult execute(IdempotencyContext context, ThrowingRunnable action) throws Exception {
         Objects.requireNonNull(context, "context must not be null");
@@ -201,10 +203,10 @@ public final class IdempotencyEngine {
         ScheduledFuture<?> heartbeat;
         try {
             heartbeat = startHeartbeat(context, leaseId);
-        } catch (RuntimeException schedulingFailure) {
+        } catch (Throwable schedulingFailure) {
             try {
                 store.release(context.identity(), leaseId);
-            } catch (Exception releaseFailure) {
+            } catch (Throwable releaseFailure) {
                 schedulingFailure.addSuppressed(releaseFailure);
             }
             throw schedulingFailure;
@@ -212,24 +214,33 @@ public final class IdempotencyEngine {
         try {
             notify("onAcquired", context, listener -> listener.onAcquired(context, leaseId));
             action.run();
-            try {
-                store.extendLock(context.identity(), leaseId, context.leaseDuration());
-            } catch (Exception ignored) {
-                // Best-effort: this final extension only buys the adapter time to call
-                // complete(). The lease is still valid, and complete() fences on it anyway,
-                // so a failure here must not turn a successful action into a failed one.
-            }
+            extendLeaseForCompletion(context, leaseId);
             return ExecutionResult.executed(leaseId);
-        } catch (Exception e) {
+        } catch (Throwable t) {
             try {
                 store.release(context.identity(), leaseId);
-            } catch (Exception releaseEx) {
-                e.addSuppressed(releaseEx);
+            } catch (Throwable releaseFailure) {
+                t.addSuppressed(releaseFailure);
             }
-            notifyFailed(context, leaseId, e, FailurePhase.ACTION);
-            throw e;
+            notifyFailed(context, leaseId, t, FailurePhase.ACTION);
+            throw t;
         } finally {
             heartbeat.cancel(false);
+        }
+    }
+
+    /**
+     * Best-effort final lease extension, run once the action has returned.
+     *
+     * <p>This only buys the adapter time to call {@code complete()}. The lease is still
+     * valid, and {@code complete()} fences on it anyway, so a failure here must not turn
+     * a successful action into a failed one.
+     */
+    private void extendLeaseForCompletion(IdempotencyContext context, String leaseId) {
+        try {
+            store.extendLock(context.identity(), leaseId, context.leaseDuration());
+        } catch (Exception ignored) {
+            // see above - deliberately swallowed
         }
     }
 
@@ -266,15 +277,13 @@ public final class IdempotencyEngine {
         for (IdempotencyLifecycleListener listener : listeners) {
             try {
                 invocation.accept(listener);
-            } catch (Error e) {
-                throw e;
-            } catch (Throwable t) {
+            } catch (Exception e) {
                 log.warn(
                         "Idempotency lifecycle listener {} threw from {} for {}; ignoring",
                         listener.getClass().getName(),
                         callback,
                         context.identity(),
-                        t);
+                        e);
             }
         }
     }

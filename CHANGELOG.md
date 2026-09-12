@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking.** A failed attempt now leaves no trace. The `FAILED` state is gone, so a record is
+  absent, `IN_PROGRESS` or `COMPLETE`, and `IdempotencyStore.release` deletes the record instead of
+  relabelling it: the next `tryAcquire` for that identity sees a key that was never used. The engine
+  releases on any `Throwable`, `Error` included, so a lease is no longer held until expiry when the
+  action dies with something that is not an `Exception`.
+- **Breaking.** The JDBC schema reaches its final shape: `status` narrows to `VARCHAR(12)`,
+  `expires_at` becomes `NOT NULL`, the columns are reordered, and the
+  `(status, expires_at, lease_expires_at)` index is replaced by `idx_idempotency_expires` on
+  `expires_at` alone. `JdbcIdempotencyStore` no longer migrates a pre-lease-fencing table by adding
+  `lease_id` on startup. There is no migration; recreate the table.
+- `purgeExpired` now deletes a record only when `expires_at` has passed **and** nobody owns it: an
+  `IN_PROGRESS` record also needs an expired lease. A record whose heartbeat is still running is
+  never collected, whatever its age, so a purge can no longer free a key out from under a
+  long-running action and let a second caller run it again.
+- The JDBC store no longer reports a deadlock or lock-wait timeout during acquisition as
+  `IdempotencyStoreUnavailableException`. Now that `release` deletes the record, acquiring races an
+  INSERT against another caller's DELETE on the same primary key, and InnoDB breaks some of those
+  races by rolling one side back. That is a lost race, so `tryAcquire` re-inspects the row within
+  the caller's `waitTimeout` exactly as it already does for a duplicate key.
 - **Breaking.** The stored value is a transport-neutral `Payload(String type, byte[] body,
   Map<String, String> attributes)` in core, with `Payload.none()` for a caller with nothing to
   replay and a `PayloadCodec<T>` (`encode`/`decode`, plus `PayloadCodec.none()`) for translating an
