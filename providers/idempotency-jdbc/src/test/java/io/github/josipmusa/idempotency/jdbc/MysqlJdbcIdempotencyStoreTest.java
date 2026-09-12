@@ -40,8 +40,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @Testcontainers
 class MysqlJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
 
+    // The image default max_allowed_packet is 1 MiB, which a payload of that size cannot fit
+    // inside once the rest of the statement is added. 64 MiB is MySQL 8's own default for a
+    // server that is not running under the image's minimal config.
     @Container
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0").withDatabaseName("idempotency_test");
+    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0")
+            .withDatabaseName("idempotency_test")
+            .withCommand("mysqld", "--max-allowed-packet=67108864");
 
     private static DataSource dataSource;
 

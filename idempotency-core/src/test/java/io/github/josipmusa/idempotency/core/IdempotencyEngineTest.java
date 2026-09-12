@@ -28,7 +28,6 @@ import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -92,9 +91,11 @@ class IdempotencyEngineTest {
         scheduler.schedule(() -> {}, delay.toMillis(), TimeUnit.MILLISECONDS).get(5, TimeUnit.SECONDS);
     }
 
-    private StoredResponse anyStoredResponse() {
-        return new StoredResponse(
-                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes(), Instant.now());
+    private Payload anyPayload() {
+        return new Payload(
+                "http/response",
+                "{\"id\":\"123\"}".getBytes(),
+                Map.of("status", "200", "Content-Type", "application/json"));
     }
 
     @Test
@@ -109,19 +110,21 @@ class IdempotencyEngineTest {
 
     @Test
     void When_CompletedKey_Expect_ReturnsDuplicate() throws Exception {
-        StoredResponse response = anyStoredResponse();
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(response));
+        Payload payload = anyPayload();
+        Instant completedAt = Instant.now();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(payload, completedAt));
 
         ExecutionResult result = engine.execute(defaultContext("done-key"), () -> {});
 
         assertThat(result).isInstanceOf(ExecutionResult.Duplicate.class);
         ExecutionResult.Duplicate duplicate = (ExecutionResult.Duplicate) result;
-        assertThat(duplicate.payload()).isSameAs(response);
+        assertThat(duplicate.payload()).isEqualTo(payload);
+        assertThat(duplicate.completedAt()).isEqualTo(completedAt);
     }
 
     @Test
     void When_CompletedKey_Expect_ActionNotCalled() throws Exception {
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(anyStoredResponse()));
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(anyPayload(), Instant.now()));
         AtomicInteger counter = new AtomicInteger(0);
 
         engine.execute(defaultContext("dup-key"), counter::incrementAndGet);
@@ -371,7 +374,7 @@ class IdempotencyEngineTest {
     @Test
     void When_Complete_Expect_DelegatesToStoreWithContextKey() {
         IdempotencyContext context = defaultContext("complete-key");
-        StoredResponse payload = anyStoredResponse();
+        Payload payload = anyPayload();
 
         engine.complete(context, LEASE_ID, payload, context.ttl());
 
@@ -379,12 +382,12 @@ class IdempotencyEngineTest {
     }
 
     @Test
-    void When_CompleteWithNoPayload_Expect_PayloadForwardedUnchanged() {
+    void When_CompleteWithNonePayload_Expect_PayloadForwardedUnchanged() {
         IdempotencyContext context = IdempotencyContext.builder(SCOPE, "no-payload-key")
                 .ttl(Duration.ofHours(1))
                 .leaseDuration(Duration.ofSeconds(5))
                 .build();
-        NoPayload payload = NoPayload.at(Instant.now());
+        Payload payload = Payload.none();
 
         engine.complete(context, LEASE_ID, payload, context.ttl());
 
@@ -397,7 +400,7 @@ class IdempotencyEngineTest {
         IdempotencyDurabilityException failure = new IdempotencyDurabilityException("replica did not acknowledge");
         doThrow(failure).when(store).complete(any(), any(), any(), any());
 
-        assertThatThrownBy(() -> engine.complete(context, LEASE_ID, anyStoredResponse(), context.ttl()))
+        assertThatThrownBy(() -> engine.complete(context, LEASE_ID, anyPayload(), context.ttl()))
                 .isSameAs(failure);
     }
 
@@ -405,7 +408,7 @@ class IdempotencyEngineTest {
     void When_Complete_Expect_LockNotExtendedAgain() {
         IdempotencyContext context = defaultContext("no-extend-key");
 
-        engine.complete(context, LEASE_ID, anyStoredResponse(), context.ttl());
+        engine.complete(context, LEASE_ID, anyPayload(), context.ttl());
 
         verify(store, never()).extendLock(any(), any(), any());
     }

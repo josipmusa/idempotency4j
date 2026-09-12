@@ -24,11 +24,11 @@ import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener;
-import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.Payload;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -102,10 +102,11 @@ class IdempotencyFilterIntegrationTest {
         assertThat(result.getResponse().getStatus()).isEqualTo(200);
         assertThat(result.getResponse().getContentAsString()).isEqualTo("echo:hello-body");
         assertThat(invocations).hasValue(1);
-        StoredResponse stored = store.completed.get(new IdempotencyIdentity(ECHO_SCOPE, "key-1"));
+        Payload stored = store.completed.get(new IdempotencyIdentity(ECHO_SCOPE, "key-1"));
         assertThat(stored).isNotNull();
-        assertThat(stored.statusCode()).isEqualTo(200);
-        assertThat(new String(stored.body(), StandardCharsets.UTF_8)).isEqualTo("echo:hello-body");
+        StoredResponse decoded = new StoredResponseCodec().decode(stored);
+        assertThat(decoded.statusCode()).isEqualTo(200);
+        assertThat(new String(decoded.body(), StandardCharsets.UTF_8)).isEqualTo("echo:hello-body");
     }
 
     @Test
@@ -159,7 +160,7 @@ class IdempotencyFilterIntegrationTest {
         assertThat(result.getResponse().getStatus()).isEqualTo(200);
         assertThat(events).containsExactly("onAcquired:listener-1", "controller", "onCompleted:listener-1");
         assertThat(listener.acquiredThread).hasValue(controllerThread.get());
-        assertThat(listener.completed).singleElement().isInstanceOf(StoredResponse.class);
+        assertThat(listener.completed).singleElement().extracting(Payload::type).isEqualTo(StoredResponseCodec.TYPE);
     }
 
     @Test
@@ -172,9 +173,10 @@ class IdempotencyFilterIntegrationTest {
                         .content("hello-body"))
                 .andReturn();
 
-        StoredResponse observed = (StoredResponse) listener.completed.getFirst();
+        Payload observed = listener.completed.getFirst();
         assertThat(observed).isEqualTo(store.completed.get(new IdempotencyIdentity(ECHO_SCOPE, "listener-2")));
-        assertThat(new String(observed.body(), StandardCharsets.UTF_8)).isEqualTo("echo:hello-body");
+        assertThat(new String(new StoredResponseCodec().decode(observed).body(), StandardCharsets.UTF_8))
+                .isEqualTo("echo:hello-body");
     }
 
     @Test
@@ -193,7 +195,10 @@ class IdempotencyFilterIntegrationTest {
         assertThat(events)
                 .containsExactly(
                         "onAcquired:listener-3", "controller", "onCompleted:listener-3", "onDuplicate:listener-3");
-        assertThat(listener.duplicates).singleElement().isInstanceOf(StoredResponse.class);
+        assertThat(listener.duplicates)
+                .singleElement()
+                .extracting(Payload::type)
+                .isEqualTo(StoredResponseCodec.TYPE);
     }
 
     @Test
@@ -288,8 +293,8 @@ class IdempotencyFilterIntegrationTest {
     private static final class RecordingListener implements IdempotencyLifecycleListener {
 
         private final AtomicReference<Thread> acquiredThread = new AtomicReference<>();
-        private final List<IdempotencyPayload> completed = new CopyOnWriteArrayList<>();
-        private final List<IdempotencyPayload> duplicates = new CopyOnWriteArrayList<>();
+        private final List<Payload> completed = new CopyOnWriteArrayList<>();
+        private final List<Payload> duplicates = new CopyOnWriteArrayList<>();
 
         @Override
         public void onAcquired(IdempotencyContext ctx, String leaseId) {
@@ -298,7 +303,7 @@ class IdempotencyFilterIntegrationTest {
         }
 
         @Override
-        public void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {
+        public void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {
             events.add("onCompleted:" + ctx.key());
             completed.add(payload);
         }
@@ -309,7 +314,7 @@ class IdempotencyFilterIntegrationTest {
         }
 
         @Override
-        public void onDuplicate(IdempotencyContext ctx, IdempotencyPayload payload) {
+        public void onDuplicate(IdempotencyContext ctx, Payload payload, Instant completedAt) {
             events.add("onDuplicate:" + ctx.key());
             duplicates.add(payload);
         }
@@ -323,25 +328,27 @@ class IdempotencyFilterIntegrationTest {
         }
 
         @Override
-        public void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {
+        public void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {
             throw new IllegalStateException("listener failed on completion");
         }
     }
 
     private static final class RecordingStore implements IdempotencyStore {
-        private final Map<IdempotencyIdentity, StoredResponse> completed = new ConcurrentHashMap<>();
+        private final Map<IdempotencyIdentity, Payload> completed = new ConcurrentHashMap<>();
+        private final Map<IdempotencyIdentity, Instant> completedAt = new ConcurrentHashMap<>();
 
         @Override
         public AcquireResult tryAcquire(IdempotencyContext context) {
-            StoredResponse stored = completed.get(context.identity());
+            Payload stored = completed.get(context.identity());
             return stored != null
-                    ? AcquireResult.duplicate(stored)
+                    ? AcquireResult.duplicate(stored, completedAt.get(context.identity()))
                     : AcquireResult.acquired(UUID.randomUUID().toString());
         }
 
         @Override
-        public void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl) {
-            completed.put(identity, (StoredResponse) payload);
+        public void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
+            completed.put(identity, payload);
+            completedAt.put(identity, Instant.now());
         }
 
         @Override

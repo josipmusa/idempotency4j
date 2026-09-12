@@ -70,7 +70,7 @@ public interface IdempotencyStore {
      *   <li>{@link AcquireResult.Acquired} — lock obtained, caller should
      *       execute the action and then call {@link #complete}.</li>
      *   <li>{@link AcquireResult.Duplicate} — the record was already completed,
-     *       the stored payload is attached for replay.</li>
+     *       the stored payload and its completion instant are attached for replay.</li>
      *   <li>{@link AcquireResult.InFlight} — the record is still held by another
      *       caller and this caller's {@code waitTimeout} elapsed. The attached
      *       {@code retryAfter} is the remaining lease of the current holder at the
@@ -115,10 +115,12 @@ public interface IdempotencyStore {
      * will be returned to subsequent callers via
      * {@link AcquireResult.Duplicate} until {@code ttl} expires.
      *
-     * <p>Implementations must round-trip every {@link IdempotencyPayload}
-     * variant: a {@link StoredResponse} replays as an equal
-     * {@code StoredResponse}, and a {@link NoPayload} replays as a
-     * {@code NoPayload} carrying the same {@code completedAt}.
+     * <p>Implementations must round-trip a {@link Payload} whole: a duplicate caller
+     * gets back an equal payload - same {@code type}, same {@code body} bytes, same
+     * {@code attributes} - including for {@link Payload#none()}. The store also records
+     * when it made the transition and reports that back as
+     * {@link AcquireResult.Duplicate#completedAt()}; completion time is the store's to
+     * determine, not the caller's.
      *
      * @param identity the identity acquired by a prior {@code tryAcquire}
      * @param leaseId  the lease returned by that successful {@code tryAcquire}
@@ -129,7 +131,7 @@ public interface IdempotencyStore {
      * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException
      *         if the mutation was accepted but requested durability could not be confirmed
      */
-    void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl);
+    void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl);
 
     /**
      * Transitions an IN_PROGRESS record to FAILED, allowing it to be retried.

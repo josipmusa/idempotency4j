@@ -15,10 +15,8 @@
  */
 package io.github.josipmusa.idempotency.spring.web;
 
-import io.github.josipmusa.idempotency.core.StoredResponse;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -58,15 +56,13 @@ final class HttpIdempotencyMapper {
     private HttpIdempotencyMapper() {}
 
     /**
-     * Snapshots what the handler wrote, ready for storage.
+     * Snapshots what the handler wrote, ready for encoding and storage.
      *
-     * @param response   the wrapper that buffered the handler's output
-     * @param completedAt when the request finished
+     * @param response the wrapper that buffered the handler's output
      * @return the captured response
      */
-    static StoredResponse capture(ContentCachingResponseWrapper response, Instant completedAt) {
-        return new StoredResponse(
-                response.getStatus(), collectHeaders(response), response.getContentAsByteArray(), completedAt);
+    static StoredResponse capture(ContentCachingResponseWrapper response) {
+        return new StoredResponse(response.getStatus(), collectHeaders(response), response.getContentAsByteArray());
     }
 
     /**

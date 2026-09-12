@@ -16,6 +16,7 @@
 package io.github.josipmusa.idempotency.core;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Objects;
 
 /**
@@ -54,12 +55,17 @@ public sealed interface AcquireResult
     }
 
     /**
-     * Identity was already completed — carries the stored payload for replay.
-     * The action must NOT be executed again.
+     * Identity was already completed — carries the stored payload for replay, and when the
+     * original operation finished. The action must NOT be executed again.
+     *
+     * @param payload     what the original execution stored; {@link Payload#none()} when it
+     *                    had nothing to replay
+     * @param completedAt when the store recorded that completion
      */
-    record Duplicate(IdempotencyPayload payload) implements AcquireResult {
+    record Duplicate(Payload payload, Instant completedAt) implements AcquireResult {
         public Duplicate {
             Objects.requireNonNull(payload, "payload must not be null");
+            Objects.requireNonNull(completedAt, "completedAt must not be null");
         }
     }
 
@@ -96,8 +102,8 @@ public sealed interface AcquireResult
         return new Acquired(leaseId);
     }
 
-    static AcquireResult duplicate(IdempotencyPayload payload) {
-        return new Duplicate(payload);
+    static AcquireResult duplicate(Payload payload, Instant completedAt) {
+        return new Duplicate(payload, completedAt);
     }
 
     static AcquireResult inFlight(Duration retryAfter) {

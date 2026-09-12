@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.time.Instant;
 import java.util.Objects;
 
 /**
@@ -46,12 +47,17 @@ public sealed interface ExecutionResult permits ExecutionResult.Executed, Execut
 
     /**
      * The action was skipped — a previous operation already completed this key.
-     * The adapter should replay the attached {@link IdempotencyPayload} as if
-     * the action had just run.
+     * The adapter should replay the attached {@link Payload} as if the action had
+     * just run.
+     *
+     * @param payload     what the original execution stored; {@link Payload#none()} when it
+     *                    had nothing to replay
+     * @param completedAt when the store recorded that completion
      */
-    record Duplicate(IdempotencyPayload payload) implements ExecutionResult {
+    record Duplicate(Payload payload, Instant completedAt) implements ExecutionResult {
         public Duplicate {
             Objects.requireNonNull(payload, "payload must not be null");
+            Objects.requireNonNull(completedAt, "completedAt must not be null");
         }
     }
 
@@ -59,7 +65,7 @@ public sealed interface ExecutionResult permits ExecutionResult.Executed, Execut
         return new Executed(leaseId);
     }
 
-    static ExecutionResult duplicate(IdempotencyPayload payload) {
-        return new Duplicate(payload);
+    static ExecutionResult duplicate(Payload payload, Instant completedAt) {
+        return new Duplicate(payload, completedAt);
     }
 }

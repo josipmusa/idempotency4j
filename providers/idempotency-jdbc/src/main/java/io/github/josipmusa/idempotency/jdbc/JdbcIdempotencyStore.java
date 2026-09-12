@@ -21,10 +21,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
-import io.github.josipmusa.idempotency.core.IdempotencyPayload;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.NoPayload;
-import io.github.josipmusa.idempotency.core.StoredResponse;
+import io.github.josipmusa.idempotency.core.Payload;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
@@ -40,12 +38,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
-import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
+import java.util.Calendar;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
@@ -68,17 +67,30 @@ import javax.sql.DataSource;
 public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static final long DEFAULT_POLL_INTERVAL_MS = 100;
-    private static final String SELECT_CURRENT_TIME = "SELECT CURRENT_TIMESTAMP(3)";
+
+    /**
+     * Reads the database clock as UTC wall-clock fields, so {@link #currentTime} can turn it
+     * into a true {@link Instant} with {@link #UTC}. A plain {@code CURRENT_TIMESTAMP} returns
+     * the server's local time, which a driver is free to interpret in its own zone: on MySQL
+     * that silently shifts the value by the JVM's offset, which is harmless for arithmetic
+     * against other columns written the same way but wrong for {@code completed_at}, which
+     * leaves the store as an instant a caller sees.
+     */
+    private static final String SELECT_CURRENT_TIME_MYSQL = "SELECT UTC_TIMESTAMP(3)";
+
+    private static final String SELECT_CURRENT_TIME_POSTGRESQL = "SELECT CURRENT_TIMESTAMP(3) AT TIME ZONE 'UTC'";
+
+    private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
 
     private static final String DELETE_EXPIRED = "DELETE FROM idempotency_records "
             + "WHERE scope = ? AND idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
 
     private static final String INSERT = "INSERT INTO idempotency_records "
-            + "(scope, idempotency_key, status, lease_expires_at, expires_at, request_fingerprint, lease_id) "
+            + "(scope, idempotency_key, status, lease_expires_at, expires_at, fingerprint, lease_id) "
             + "VALUES (?, ?, 'IN_PROGRESS', ?, ?, ?, ?)";
 
     private static final String SELECT_FOR_UPDATE =
-            "SELECT status, lease_expires_at, response_code, response_headers, response_body, completed_at, request_fingerprint "
+            "SELECT status, lease_expires_at, payload_type, payload, attributes, completed_at, fingerprint "
                     + "FROM idempotency_records WHERE scope = ? AND idempotency_key = ? FOR UPDATE";
 
     private static final String SELECT_STATUS_AND_LEASE =
@@ -86,18 +98,18 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static final String STEAL_LEASE =
             "UPDATE idempotency_records SET status = 'IN_PROGRESS', lease_expires_at = ?, "
-                    + "request_fingerprint = ?, lease_id = ?, "
-                    + "response_code = NULL, response_headers = NULL, response_body = NULL, completed_at = NULL "
+                    + "fingerprint = ?, lease_id = ?, "
+                    + "payload_type = NULL, payload = NULL, attributes = NULL, completed_at = NULL "
                     + "WHERE scope = ? AND idempotency_key = ? "
                     + "AND (status = 'FAILED' OR (status = 'IN_PROGRESS' AND lease_expires_at < ?))";
 
     private static final String COMPLETE =
-            "UPDATE idempotency_records SET status = 'COMPLETE', response_code = ?, response_headers = ?, "
-                    + "response_body = ?, completed_at = ?, lease_expires_at = NULL, lease_id = NULL, expires_at = ? "
+            "UPDATE idempotency_records SET status = 'COMPLETE', payload_type = ?, payload = ?, "
+                    + "attributes = ?, completed_at = ?, lease_expires_at = NULL, lease_id = NULL, expires_at = ? "
                     + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
     private static final String RELEASE = "UPDATE idempotency_records SET status = 'FAILED', lease_expires_at = NULL, "
-            + "lease_id = NULL, response_code = NULL, response_headers = NULL, response_body = NULL "
+            + "lease_id = NULL, payload_type = NULL, payload = NULL, attributes = NULL "
             + "WHERE scope = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND lease_id = ?";
 
     private static final String EXTEND_LEASE = "UPDATE idempotency_records SET lease_expires_at = ? "
@@ -135,8 +147,16 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private final DataSource dataSource;
     private final long pollIntervalMs;
+
+    /**
+     * The dialect's clock query, resolved from the first connection this store uses rather
+     * than in the constructor, so a store built against an unreachable {@code DataSource}
+     * still constructs and fails where the caller can see it.
+     */
+    private volatile String currentTimeSql;
+
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
+    private static final TypeReference<Map<String, String>> ATTRIBUTES_TYPE = new TypeReference<>() {};
 
     public JdbcIdempotencyStore(DataSource dataSource) {
         this(dataSource, true);
@@ -297,7 +317,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public void complete(IdempotencyIdentity identity, String leaseId, IdempotencyPayload payload, Duration ttl) {
+    public void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
         Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
         requirePositiveDuration(ttl, "ttl");
@@ -305,7 +325,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             Instant now = currentTime(conn);
             try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
                 bindPayload(ps, payload);
-                setTimestamp(ps, 4, payload.completedAt());
+                setTimestamp(ps, 4, now);
                 setTimestamp(ps, 5, now.plus(ttl));
                 bindIdentity(ps, 6, identity);
                 ps.setString(8, leaseId);
@@ -320,26 +340,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     /**
-     * Binds the response columns of {@link #COMPLETE}.
+     * Binds the payload columns of {@link #COMPLETE}.
      *
-     * <p>{@link NoPayload} leaves {@code response_code}, {@code response_headers} and
-     * {@code response_body} NULL — those columns are already nullable, so no schema change
-     * is needed. A NULL {@code response_code} on a COMPLETE row is what
-     * {@link #readPayload} reads back as {@code NoPayload}.
+     * <p>Every payload has a type, so {@code payload_type} is always written; it is what
+     * {@link #readPayload} keys off to tell a stored payload from an empty column set.
      */
-    private static void bindPayload(PreparedStatement ps, IdempotencyPayload payload) throws SQLException {
-        switch (payload) {
-            case StoredResponse response -> {
-                ps.setInt(1, response.statusCode());
-                ps.setString(2, headersToJson(response.headers()));
-                ps.setBytes(3, response.body());
-            }
-            case NoPayload ignored -> {
-                ps.setNull(1, Types.INTEGER);
-                ps.setNull(2, Types.VARCHAR);
-                ps.setNull(3, Types.VARBINARY);
-            }
-        }
+    private static void bindPayload(PreparedStatement ps, Payload payload) throws SQLException {
+        ps.setString(1, payload.type());
+        ps.setBytes(2, payload.body());
+        ps.setString(3, attributesToJson(payload.attributes()));
     }
 
     @Override
@@ -486,15 +495,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 }
 
                 String status = rs.getString("status");
-                Timestamp leaseExpiresTs = rs.getTimestamp("lease_expires_at");
+                Timestamp leaseExpiresTs = getTimestamp(rs, "lease_expires_at");
 
                 if ("COMPLETE".equals(status)) {
-                    String storedFingerprint = rs.getString("request_fingerprint");
+                    String storedFingerprint = rs.getString("fingerprint");
                     if (isMismatch(storedFingerprint, context.requestFingerprint())) {
                         return RowInspection.resolved(
                                 AcquireResult.fingerprintMismatch(storedFingerprint, context.requestFingerprint()));
                     }
-                    return RowInspection.resolved(AcquireResult.duplicate(readPayload(rs)));
+                    return RowInspection.resolved(readDuplicate(rs));
                 }
 
                 Instant now = currentTime(conn);
@@ -576,30 +585,23 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         ps.setString(index + 1, identity.key());
     }
 
-    /**
-     * Materializes the payload of a COMPLETE row.
-     *
-     * <p>A NULL {@code response_code} means the record was completed by a caller with
-     * nothing to replay, and reads back as {@link NoPayload}.
-     */
-    private IdempotencyPayload readPayload(ResultSet rs) throws SQLException {
-        int statusCode = rs.getInt("response_code");
-        boolean noResponse = rs.wasNull();
-        Timestamp completedAtTs = rs.getTimestamp("completed_at");
+    /** Materializes the {@link AcquireResult.Duplicate} carried by a COMPLETE row. */
+    private AcquireResult readDuplicate(ResultSet rs) throws SQLException {
+        Timestamp completedAtTs = getTimestamp(rs, "completed_at");
         if (completedAtTs == null) {
             throw new IdempotencyCorruptRecordException("Completed JDBC record has no completed_at value");
         }
-        Instant completedAt = completedAtTs.toInstant();
-        if (noResponse) {
-            return NoPayload.at(completedAt);
+        String type = rs.getString("payload_type");
+        if (type == null) {
+            throw new IdempotencyCorruptRecordException("Completed JDBC record has no payload_type value");
         }
-
-        String headersJson = rs.getString("response_headers");
-        byte[] body = rs.getBytes("response_body");
-        Map<String, List<String>> headers = headersJson != null ? jsonToHeaders(headersJson) : Map.of();
-        byte[] responseBody = body != null ? body : new byte[0];
-
-        return new StoredResponse(statusCode, headers, responseBody, completedAt);
+        byte[] body = rs.getBytes("payload");
+        String attributesJson = rs.getString("attributes");
+        Payload payload = new Payload(
+                type,
+                body != null ? body : new byte[0],
+                attributesJson != null ? jsonToAttributes(attributesJson) : Map.of());
+        return AcquireResult.duplicate(payload, completedAtTs.toInstant());
     }
 
     /**
@@ -618,22 +620,50 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         return "23000".equals(sqlState) || "23505".equals(sqlState);
     }
 
-    private static Instant currentTime(Connection conn) throws SQLException {
+    private Instant currentTime(Connection conn) throws SQLException {
         try (Statement statement = conn.createStatement();
-                ResultSet result = statement.executeQuery(SELECT_CURRENT_TIME)) {
+                ResultSet result = statement.executeQuery(currentTimeSql(conn))) {
             if (!result.next()) {
-                throw new SQLException("Database did not return CURRENT_TIMESTAMP");
+                throw new SQLException("Database did not return the current timestamp");
             }
-            Timestamp timestamp = result.getTimestamp(1);
+            Timestamp timestamp = result.getTimestamp(1, utcCalendar());
             if (timestamp == null) {
-                throw new SQLException("Database returned null CURRENT_TIMESTAMP");
+                throw new SQLException("Database returned a null current timestamp");
             }
             return timestamp.toInstant();
         }
     }
 
+    private String currentTimeSql(Connection conn) throws SQLException {
+        String sql = currentTimeSql;
+        if (sql == null) {
+            sql = conn.getMetaData()
+                            .getDatabaseProductName()
+                            .toLowerCase(Locale.ROOT)
+                            .contains("postgresql")
+                    ? SELECT_CURRENT_TIME_POSTGRESQL
+                    : SELECT_CURRENT_TIME_MYSQL;
+            currentTimeSql = sql;
+        }
+        return sql;
+    }
+
+    /**
+     * Every timestamp crosses the driver boundary in UTC, in both directions, so a column
+     * holds UTC wall-clock fields whatever zone the server and the JVM are in and reads back
+     * as the instant it was written from.
+     */
     private static void setTimestamp(PreparedStatement statement, int index, Instant value) throws SQLException {
-        statement.setTimestamp(index, Timestamp.from(value));
+        statement.setTimestamp(index, Timestamp.from(value), utcCalendar());
+    }
+
+    private static Timestamp getTimestamp(ResultSet rs, String column) throws SQLException {
+        return rs.getTimestamp(column, utcCalendar());
+    }
+
+    /** {@link Calendar} is mutable and not thread-safe, so each call gets its own. */
+    private static Calendar utcCalendar() {
+        return Calendar.getInstance(UTC);
     }
 
     private static void requirePositiveDuration(Duration value, String name) {
@@ -669,22 +699,22 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     // --- JSON serialization ---
 
-    static String headersToJson(Map<String, List<String>> headers) {
+    static String attributesToJson(Map<String, String> attributes) {
         try {
-            return OBJECT_MAPPER.writeValueAsString(headers);
+            return OBJECT_MAPPER.writeValueAsString(attributes);
         } catch (JsonProcessingException e) {
-            throw new IdempotencyStoreException("Failed to serialize response headers to JSON", e);
+            throw new IdempotencyStoreException("Failed to serialize payload attributes to JSON", e);
         }
     }
 
-    static Map<String, List<String>> jsonToHeaders(String json) {
+    static Map<String, String> jsonToAttributes(String json) {
         if (json == null || json.equals("{}")) {
             return Map.of();
         }
         try {
-            return OBJECT_MAPPER.readValue(json, HEADERS_TYPE);
+            return OBJECT_MAPPER.readValue(json, ATTRIBUTES_TYPE);
         } catch (JsonProcessingException e) {
-            throw new IdempotencyCorruptRecordException("Failed to deserialize response headers from JSON", e);
+            throw new IdempotencyCorruptRecordException("Failed to deserialize payload attributes from JSON", e);
         }
     }
 }

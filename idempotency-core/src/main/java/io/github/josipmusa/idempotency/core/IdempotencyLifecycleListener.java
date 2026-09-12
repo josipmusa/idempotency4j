@@ -15,6 +15,8 @@
  */
 package io.github.josipmusa.idempotency.core;
 
+import java.time.Instant;
+
 /**
  * Observes the idempotency lifecycle as {@link IdempotencyEngine} drives it.
  *
@@ -71,7 +73,7 @@ package io.github.josipmusa.idempotency.core;
  *     }
  *
  *     @Override
- *     public void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {
+ *     public void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {
  *         CURRENT_KEY.remove();
  *     }
  *
@@ -104,10 +106,10 @@ public interface IdempotencyLifecycleListener {
      *
      * @param ctx     the context this execution ran under
      * @param leaseId the lease that was completed
-     * @param payload what was stored for a duplicate to replay - a
-     *                {@link StoredResponse} for HTTP, {@link NoPayload} otherwise
+     * @param payload what was stored for a duplicate to replay, or
+     *                {@link Payload#none()} when there was nothing
      */
-    default void onCompleted(IdempotencyContext ctx, String leaseId, IdempotencyPayload payload) {}
+    default void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {}
 
     /**
      * The execution ended without a recorded completion.
@@ -129,11 +131,12 @@ public interface IdempotencyLifecycleListener {
      * <p>Fires instead of the {@code onAcquired}/terminal pair: no lease exists
      * for a duplicate, and nothing follows this callback.
      *
-     * @param ctx     the context the duplicate arrived under
-     * @param payload what the original execution stored - a {@link StoredResponse}
-     *                for HTTP, or {@link NoPayload} when there is nothing to replay
+     * @param ctx         the context the duplicate arrived under
+     * @param payload     what the original execution stored, or {@link Payload#none()}
+     *                    when there is nothing to replay
+     * @param completedAt when the store recorded the original completion
      */
-    default void onDuplicate(IdempotencyContext ctx, IdempotencyPayload payload) {}
+    default void onDuplicate(IdempotencyContext ctx, Payload payload, Instant completedAt) {}
 
     /** Where an execution failed, and therefore what a retry under the same key will do. */
     enum FailurePhase {

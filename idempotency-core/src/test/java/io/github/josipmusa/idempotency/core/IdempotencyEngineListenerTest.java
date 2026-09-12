@@ -80,15 +80,17 @@ class IdempotencyEngineListenerTest {
                 .build();
     }
 
-    private StoredResponse anyStoredResponse() {
-        return new StoredResponse(
-                200, Map.of("Content-Type", List.of("application/json")), "{\"id\":\"123\"}".getBytes(), Instant.now());
+    private Payload anyPayload() {
+        return new Payload(
+                "http/response",
+                "{\"id\":\"123\"}".getBytes(),
+                Map.of("status", "200", "Content-Type", "application/json"));
     }
 
     @Test
     void When_ActionSucceedsAndCompletes_Expect_AcquiredThenCompleted() throws Exception {
         IdempotencyContext context = defaultContext("happy-key");
-        StoredResponse payload = anyStoredResponse();
+        Payload payload = anyPayload();
         when(store.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
 
         ExecutionResult result = engine.execute(context, () -> {});
@@ -155,7 +157,7 @@ class IdempotencyEngineListenerTest {
         doThrow(failure).when(store).complete(any(), any(), any(), any());
 
         engine.execute(context, () -> {});
-        assertThatThrownBy(() -> engine.complete(context, LEASE_ID, anyStoredResponse(), context.ttl()))
+        assertThatThrownBy(() -> engine.complete(context, LEASE_ID, anyPayload(), context.ttl()))
                 .isSameAs(failure);
 
         InOrder inOrder = inOrder(listener);
@@ -165,37 +167,39 @@ class IdempotencyEngineListenerTest {
     }
 
     @Test
-    void When_DuplicateWithStoredResponse_Expect_OnDuplicateOnly() throws Exception {
+    void When_DuplicateWithStoredPayload_Expect_OnDuplicateOnly() throws Exception {
         IdempotencyContext context = defaultContext("duplicate-key");
-        StoredResponse stored = anyStoredResponse();
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored));
+        Payload stored = anyPayload();
+        Instant completedAt = Instant.now();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored, completedAt));
 
         engine.execute(context, () -> {});
 
-        verify(listener).onDuplicate(context, stored);
+        verify(listener).onDuplicate(context, stored, completedAt);
         verifyNoMoreInteractions(listener);
     }
 
     @Test
-    void When_DuplicateWithNoPayload_Expect_NoPayloadForwarded() throws Exception {
+    void When_DuplicateWithNonePayload_Expect_NonePayloadForwarded() throws Exception {
         IdempotencyContext context = IdempotencyContext.builder(SCOPE, "duplicate-no-payload")
                 .ttl(Duration.ofHours(1))
                 .leaseDuration(Duration.ofSeconds(5))
                 .build();
-        NoPayload stored = NoPayload.at(Instant.now());
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored));
+        Payload stored = Payload.none();
+        Instant completedAt = Instant.now();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored, completedAt));
 
         engine.execute(context, () -> {});
 
-        verify(listener).onDuplicate(context, stored);
+        verify(listener).onDuplicate(context, stored, completedAt);
         verifyNoMoreInteractions(listener);
     }
 
     @Test
     void When_DuplicateListenerThrows_Expect_DuplicateStillReturned() throws Exception {
-        StoredResponse stored = anyStoredResponse();
-        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored));
-        doThrow(new RuntimeException("listener boom")).when(listener).onDuplicate(any(), any());
+        Payload stored = anyPayload();
+        when(store.tryAcquire(any())).thenReturn(AcquireResult.duplicate(stored, Instant.now()));
+        doThrow(new RuntimeException("listener boom")).when(listener).onDuplicate(any(), any(), any());
 
         ExecutionResult result = engine.execute(defaultContext("duplicate-throwing-key"), () -> {});
 
@@ -254,7 +258,7 @@ class IdempotencyEngineListenerTest {
     @Test
     void When_CompletedListenerThrows_Expect_CompleteReturnsNormally() {
         IdempotencyContext context = defaultContext("throwing-completed-key");
-        StoredResponse payload = anyStoredResponse();
+        Payload payload = anyPayload();
         doThrow(new RuntimeException("listener boom")).when(listener).onCompleted(any(), any(), any());
 
         engine.complete(context, LEASE_ID, payload, context.ttl());
