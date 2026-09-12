@@ -73,6 +73,34 @@ class IdempotentHandlerRegistryTest {
     }
 
     @Test
+    void When_HandlerDeclaresKey_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.methodOnlyAttributes("#body.id()", "", ""));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(key = \"#body.id()\")")
+                .hasMessageContaining("the key comes from the request header");
+    }
+
+    @Test
+    void When_HandlerDeclaresCodec_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.methodOnlyAttributes("", "receiptCodec", ""));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(codec = \"receiptCodec\")");
+    }
+
+    @Test
+    void When_HandlerDeclaresCompletion_Expect_ThrowsIllegalStateException() {
+        setupHandler(AnnotationHelper.methodOnlyAttributes("", "", "join-transaction"));
+
+        assertThatThrownBy(() -> registry.afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("@Idempotent(completion = \"join-transaction\")");
+    }
+
+    @Test
     void When_ValidAnnotation_Expect_ResolvesCorrectDurations() {
         HandlerMethod handlerMethod = setupHandler(AnnotationHelper.annotation("PT2H", "PT30S", "PT0S"));
         registry.afterSingletonsInstantiated();

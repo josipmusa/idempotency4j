@@ -16,6 +16,9 @@
 package io.github.josipmusa.idempotency.core;
 
 import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Objects;
 
 /**
@@ -72,8 +75,41 @@ public record IdempotencyIdentity(String scope, String key) implements Serializa
         }
     }
 
+    /**
+     * Renders the identity for a log line or an exception message, with the key masked.
+     *
+     * <p>The scope is the library's own, but the key is whatever the client sent - an order
+     * reference, an email address, a session token - and this string ends up in exception
+     * messages that the default completion-failure policy logs at error level. So the key is
+     * replaced by {@code #} and the first eight hex characters of its SHA-256, which is
+     * stable enough to correlate two log lines about the same record without putting the
+     * value itself in the log. Call {@link #key()} where the raw key is genuinely needed.
+     *
+     * @return the scope followed by a masked digest of the key
+     */
     @Override
     public String toString() {
-        return scope + "/" + key;
+        return scope + "/" + maskedKey();
+    }
+
+    /**
+     * The key as it is safe to print: {@code #} followed by eight hex characters of its
+     * SHA-256 digest.
+     *
+     * @return the masked form of {@link #key()}
+     */
+    public String maskedKey() {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(9).append('#');
+            for (int i = 0; i < 4; i++) {
+                hex.append(Character.forDigit((digest[i] >> 4) & 0xF, 16));
+                hex.append(Character.forDigit(digest[i] & 0xF, 16));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // Every JRE ships SHA-256; if this one does not, still never print the key.
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
     }
 }

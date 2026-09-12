@@ -367,7 +367,8 @@ class IdempotencyEngineTest {
 
         assertThatThrownBy(() -> engine.execute(context, () -> {}))
                 .isInstanceOf(IdempotencyFingerprintMismatchException.class)
-                .hasMessageContaining("fp-mismatch-key")
+                .hasMessageContaining(context.identity().maskedKey())
+                .hasMessageNotContaining("fp-mismatch-key")
                 .hasMessageContaining("stored-hash")
                 .hasMessageContaining("received-hash");
     }

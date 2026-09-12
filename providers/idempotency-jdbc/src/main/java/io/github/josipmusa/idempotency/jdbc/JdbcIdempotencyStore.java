@@ -87,9 +87,17 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private static final String DELETE_EXPIRED = "DELETE FROM idempotency_records "
             + "WHERE scope = ? AND idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
 
+    /**
+     * Writes {@code created_at} explicitly rather than leaving it to the column's
+     * {@code DEFAULT CURRENT_TIMESTAMP}. The default is evaluated in the session's time zone,
+     * which a driver sets from the JVM, while every other timestamp here is bound as UTC - so
+     * letting the default stand puts two different clocks in one row, and a UTC database read
+     * from a JVM two zones away records rows whose {@code created_at} is two hours ahead of
+     * their own {@code expires_at}.
+     */
     private static final String INSERT = "INSERT INTO idempotency_records "
-            + "(scope, idempotency_key, status, lease_expires_at, expires_at, fingerprint, lease_id) "
-            + "VALUES (?, ?, 'IN_PROGRESS', ?, ?, ?, ?)";
+            + "(scope, idempotency_key, status, lease_expires_at, expires_at, fingerprint, lease_id, created_at) "
+            + "VALUES (?, ?, 'IN_PROGRESS', ?, ?, ?, ?, ?)";
 
     private static final String SELECT_FOR_UPDATE =
             "SELECT status, lease_expires_at, payload_type, payload, attributes, completed_at, fingerprint "
@@ -544,6 +552,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             setTimestamp(ins, 4, now.plus(context.ttl()));
             ins.setString(5, context.requestFingerprint());
             ins.setString(6, leaseId);
+            setTimestamp(ins, 7, now);
             ins.executeUpdate();
             return true;
         } catch (SQLException e) {

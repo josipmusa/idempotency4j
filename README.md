@@ -335,6 +335,11 @@ annotation:
 @Idempotent(ttl = "PT24H", lease = "PT30S", waitTimeout = "PT10S")
 ```
 
+An annotated endpoint belongs to the filter alone. The method advisor leaves request mapping
+handlers to it, so the two never guard the same call under two different keys, and the three
+attributes only a method can honour - `key`, `codec` and `completion` - are rejected at startup
+rather than silently ignored on an endpoint.
+
 Whether a request without a key is rejected is `idempotency.web.required`, one answer for the whole
 API rather than a per-endpoint one: an API that answers it differently per endpoint is one clients
 cannot reason about. Set it to `false` where idempotency is offered rather than demanded - a request
@@ -399,9 +404,10 @@ void on(OrderPlaced event) {
 Three things have to be true for this to work, and the library tells you at startup or on entry if
 they are not:
 
-- **The store must support it.** JDBC does; the in-memory and Redis stores do not. Setting
-  `idempotency.completion-mode=join-transaction` against a store that cannot support it fails the
-  context at startup.
+- **The store must support it.** JDBC does; the in-memory and Redis stores do not. Asking for
+  joined completion against a store that cannot give it fails the context at startup, whether the
+  request came from `idempotency.completion-mode=join-transaction` or from a single
+  `@Idempotent(completion = "join-transaction")`.
 - **A transaction must already be active when the method is entered.** The transaction advisor has
   to run *outside* this one. Both default to `Ordered.LOWEST_PRECEDENCE`, which is a tie rather than
   an order, so break it with `@EnableTransactionManagement(order = Ordered.HIGHEST_PRECEDENCE)`. A
@@ -641,6 +647,11 @@ depending on your endpoints may include PII, tokens, or financial data.
 - Keep TTL values short to limit retention, and let `idempotency.purge.cron` remove expired records
   promptly. Purging needs `@EnableScheduling`.
 - Audit what is annotated `@Idempotent`, what its results contain, and how large they can get.
+
+Idempotency keys are client-controlled and may themselves carry identifying data, so the library
+never writes one to a log or an exception message. Both render a record as its scope followed by a
+short digest of the key, `PaymentController.create/#3f9a2c71`, which is stable enough to tie two
+lines together without putting the value in the log.
 
 To strip or redact sensitive fields before storage, register a `ResponseSanitizer` bean
 (`io.github.josipmusa.idempotency.spring.web.ResponseSanitizer`). The default is a no-op

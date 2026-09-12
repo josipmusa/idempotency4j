@@ -103,6 +103,17 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
         boolean firstAttempt = true;
 
         while (true) {
+            // Every iteration answers to the wait budget, whichever branch sent it round
+            // again. A steal that loses its race retries from here, and without this check
+            // that retry would not be accounted for at all.
+            if (!firstAttempt && System.nanoTime() - startedAtNanos >= waitNanos) {
+                Entry current = store.get(identity);
+                return AcquireResult.inFlight(
+                        current == null ? Duration.ZERO : remainingLease(current, clock.instant()));
+            }
+            boolean firstLook = firstAttempt;
+            firstAttempt = false;
+
             Instant now = clock.instant();
 
             // Evict expired COMPLETE entry for this identity so a fresh insert can follow
@@ -148,8 +159,7 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
             // Active IN_PROGRESS — give up if the caller has no wait budget left.
             // A zero wait never sleeps: the first look is also the last.
-            long remainingWaitNanos = firstAttempt ? waitNanos : waitNanos - (System.nanoTime() - startedAtNanos);
-            firstAttempt = false;
+            long remainingWaitNanos = firstLook ? waitNanos : waitNanos - (System.nanoTime() - startedAtNanos);
             if (remainingWaitNanos <= 0) {
                 return AcquireResult.inFlight(remainingLease(existing, now));
             }

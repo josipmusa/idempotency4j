@@ -81,6 +81,39 @@ class IdempotencyMethodAutoConfigurationTest {
                 });
     }
 
+    @Test
+    void When_MethodAsksForJoinedCompletionAStoreCannotGive_Expect_ContextFailsToStart() {
+        // The in-memory store cannot complete inside a caller's transaction, and the global
+        // completion-mode is left at its autonomous default, so only the annotation asks for
+        // it. Discovering that on the first message - as a complaint that no transaction is
+        // active, from inside a method that is demonstrably @Transactional - is no good.
+        contextRunner
+                .withBean(IdempotencyStore.class, InMemoryIdempotencyStore::new)
+                .withUserConfiguration(JoinedListenerConfig.class)
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("join-transaction")
+                        .hasMessageContaining("cannot complete inside a caller's transaction"));
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class JoinedListenerConfig {
+
+        @Bean
+        JoinedListener joinedListener() {
+            return new JoinedListener();
+        }
+    }
+
+    static class JoinedListener {
+
+        @Idempotent(key = "#messageId", completion = "join-transaction", waitTimeout = "PT0S")
+        public void on(String messageId) {}
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class ListenerConfig {
 

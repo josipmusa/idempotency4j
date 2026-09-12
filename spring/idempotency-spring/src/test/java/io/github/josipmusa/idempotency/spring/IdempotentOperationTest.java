@@ -76,22 +76,22 @@ class IdempotentOperationTest {
 
         @Idempotent(key = "#messageId")
         void unset(String messageId) {
-            //noop
+            // noop
         }
 
         @Idempotent(key = "#messageId", completion = "autonomous")
         void autonomous(String messageId) {
-            //noop
+            // noop
         }
 
         @Idempotent(key = "#messageId", completion = "join-transaction")
         void joinTransaction(String messageId) {
-            //noop
+            // noop
         }
 
         @Idempotent(key = "#messageId", completion = "eventually")
         void eventually(String messageId) {
-            //noop
+            // noop
         }
     }
 }

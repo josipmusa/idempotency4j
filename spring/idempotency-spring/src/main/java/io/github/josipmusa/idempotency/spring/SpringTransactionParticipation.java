@@ -52,25 +52,34 @@ public class SpringTransactionParticipation implements TransactionParticipation 
 
     @Override
     public void afterCommit(Runnable action) {
-        register(
-                Objects.requireNonNull(action, "action must not be null"), TransactionSynchronization.STATUS_COMMITTED);
+        register(Objects.requireNonNull(action, "action must not be null"), true);
     }
 
     @Override
     public void afterRollback(Runnable action) {
-        register(
-                Objects.requireNonNull(action, "action must not be null"),
-                TransactionSynchronization.STATUS_ROLLED_BACK);
+        register(Objects.requireNonNull(action, "action must not be null"), false);
     }
 
     /**
-     * Registers a callback that runs on {@code afterCompletion} for the matching status only.
+     * Registers a callback that runs on {@code afterCompletion} for the matching outcome.
      *
      * <p>{@code afterCompletion} rather than {@code afterCommit}, because it is the one hook
      * Spring guarantees to call whichever way the transaction ended - the engine needs both
      * outcomes, and needs exactly one of them.
+     *
+     * <p>Only {@link TransactionSynchronization#STATUS_COMMITTED} counts as a commit;
+     * everything else, {@link TransactionSynchronization#STATUS_UNKNOWN} included, is treated
+     * as a rollback. {@code STATUS_UNKNOWN} means the transaction manager could not determine
+     * the outcome - a heuristic JTA completion, or an earlier synchronization throwing during
+     * the commit. Matching it against neither branch would leave the engine's terminal
+     * callback unfired and the lease neither completed nor released, breaking the
+     * one-terminal-per-lease invariant that
+     * {@link io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener} promises. An
+     * indeterminate outcome is not a confirmed commit, and the record must not be announced
+     * as durable on the strength of one, so it is resolved the safe way: release the lease
+     * and report the failure, which costs at most a re-execution.
      */
-    private static void register(Runnable action, int wantedStatus) {
+    private static void register(Runnable action, boolean onCommit) {
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             throw new IllegalStateException(
                     "Cannot register a transaction callback: no transaction is active on this thread");
@@ -78,7 +87,8 @@ public class SpringTransactionParticipation implements TransactionParticipation 
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCompletion(int status) {
-                if (status == wantedStatus) {
+                boolean committed = status == TransactionSynchronization.STATUS_COMMITTED;
+                if (committed == onCommit) {
                     action.run();
                 }
             }

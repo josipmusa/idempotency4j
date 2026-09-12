@@ -25,8 +25,12 @@ package io.github.josipmusa.idempotency.core;
  * fires them by hand.
  *
  * <p>Implementations must invoke a registered callback exactly once, after the transaction
- * has reached its outcome, and must run {@code afterCommit} only on commit and
- * {@code afterRollback} only on rollback.
+ * has reached its outcome, and must run {@code afterCommit} only on a confirmed commit.
+ * Every other outcome, an indeterminate one included, must run {@code afterRollback}:
+ * the engine defers its terminal lifecycle callback to these two, so an outcome that fires
+ * neither would leave a lease with no terminal at all. An indeterminate outcome is not a
+ * confirmed commit, and resolving it as a rollback costs at most a re-execution, where
+ * resolving it as a commit would announce a record that may never have become durable.
  */
 public interface TransactionParticipation {
 

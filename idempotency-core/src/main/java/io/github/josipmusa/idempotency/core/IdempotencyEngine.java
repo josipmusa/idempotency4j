@@ -321,11 +321,37 @@ public final class IdempotencyEngine {
      * the guarantee the context asked for, which is the one thing worse than failing.
      */
     private void requireTransactionForJoinedMode(IdempotencyContext context) {
-        if (context.completionMode() == CompletionMode.JOIN_TRANSACTION && !transactions.active()) {
+        if (context.completionMode() != CompletionMode.JOIN_TRANSACTION) {
+            return;
+        }
+        // Ask the store first. A store that cannot enlist in a caller's transaction is wired
+        // with TransactionParticipation.none(), whose active() is always false - so checking
+        // the transaction first would blame the caller for a missing transaction it did in
+        // fact open, and send them hunting advisor ordering for a problem that is not there.
+        if (!store.supportsTransactionalCompletion()) {
+            throw new IllegalStateException("Context for " + context.identity()
+                    + " asks for CompletionMode.JOIN_TRANSACTION but "
+                    + store.getClass().getSimpleName() + " cannot complete inside a caller's transaction. "
+                    + "Use a store that can, or use CompletionMode.AUTONOMOUS.");
+        }
+        if (!transactions.active()) {
             throw new IllegalStateException("Context for " + context.identity()
                     + " asks for CompletionMode.JOIN_TRANSACTION but no transaction is active on this thread. "
                     + "Start the transaction around the engine call, or use CompletionMode.AUTONOMOUS.");
         }
+    }
+
+    /**
+     * Reports whether this engine's store can complete inside a caller's transaction.
+     *
+     * <p>Lets an adapter validate a {@link CompletionMode#JOIN_TRANSACTION} operation while it
+     * is wiring itself, rather than leaving the caller to discover on the first message that
+     * the mode it asked for was never available.
+     *
+     * @return what the store reports for {@link IdempotencyStore#supportsTransactionalCompletion()}
+     */
+    public boolean supportsTransactionalCompletion() {
+        return store.supportsTransactionalCompletion();
     }
 
     /**

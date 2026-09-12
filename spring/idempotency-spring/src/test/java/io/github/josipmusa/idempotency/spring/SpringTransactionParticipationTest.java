@@ -81,6 +81,20 @@ class SpringTransactionParticipationTest {
     }
 
     @Test
+    void When_TransactionOutcomeUnknown_Expect_AfterRollbackActionRun() {
+        beginTransaction();
+        List<String> events = new ArrayList<>();
+        participation.afterCommit(() -> events.add("committed"));
+        participation.afterRollback(() -> events.add("rolled-back"));
+
+        fireCompletion(TransactionSynchronization.STATUS_UNKNOWN);
+
+        // An indeterminate outcome is not a confirmed commit. Firing neither action would
+        // leave the engine's lease without a terminal callback at all.
+        assertThat(events).containsExactly("rolled-back");
+    }
+
+    @Test
     void When_RegisteringWithoutTransaction_Expect_Rejected() {
         assertThatThrownBy(() -> participation.afterCommit(() -> {}))
                 .isInstanceOf(IllegalStateException.class)

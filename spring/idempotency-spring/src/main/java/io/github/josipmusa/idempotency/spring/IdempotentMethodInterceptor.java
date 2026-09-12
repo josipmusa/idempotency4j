@@ -15,6 +15,7 @@
  */
 package io.github.josipmusa.idempotency.spring;
 
+import io.github.josipmusa.idempotency.core.CompletionMode;
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
@@ -104,7 +105,30 @@ public class IdempotentMethodInterceptor implements MethodInterceptor, BeanFacto
      * @throws IllegalStateException if the annotation cannot be honoured
      */
     void register(Idempotent annotation, Method method, Class<?> targetClass) {
-        operations.computeIfAbsent(method, ignored -> IdempotentOperation.of(annotation, method, targetClass, config));
+        IdempotentOperation operation = operations.computeIfAbsent(
+                method, ignored -> IdempotentOperation.of(annotation, method, targetClass, config));
+        requireStoreSupportsCompletionMode(operation, method);
+    }
+
+    /**
+     * Fails the context when a method asks for joined completion that its store can never
+     * give it.
+     *
+     * <p>The application-wide {@code idempotency.completion-mode} is checked where the engine
+     * is built, but a single {@code @Idempotent(completion = "join-transaction")} never
+     * reaches that check: the mode is resolved here, per method. Without this the context
+     * starts and the mistake surfaces on the first call, as a complaint that no transaction
+     * is active - which is both misleading and as late as it could possibly be.
+     */
+    private void requireStoreSupportsCompletionMode(IdempotentOperation operation, Method method) {
+        if (operation.completionMode() == CompletionMode.JOIN_TRANSACTION
+                && !engine.supportsTransactionalCompletion()) {
+            throw new IllegalStateException("@Idempotent(completion = \"join-transaction\") on "
+                    + method.getDeclaringClass().getSimpleName() + "." + method.getName()
+                    + " cannot be honoured: the configured idempotency store cannot complete inside a caller's "
+                    + "transaction. Use a store that can, such as the JDBC one, or drop the attribute to complete "
+                    + "autonomously.");
+        }
     }
 
     @Nullable

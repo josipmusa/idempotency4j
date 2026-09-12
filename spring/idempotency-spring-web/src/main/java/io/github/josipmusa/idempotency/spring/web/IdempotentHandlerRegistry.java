@@ -63,6 +63,7 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
             if (annotation == null) return;
 
             Method method = handlerMethod.getMethod();
+            rejectMethodOnlyAttributes(annotation, handlerMethod);
             Duration ttl = parseDuration(annotation.ttl(), "ttl", config.defaultTtl(), handlerMethod);
             Duration lease = parseDuration(annotation.lease(), "lease", config.defaultLeaseDuration(), handlerMethod);
             Duration waitTimeout =
@@ -76,6 +77,35 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
     @Nullable
     public ResolvedIdempotent resolve(HandlerMethod handlerMethod) {
         return cache.get(handlerMethod.getMethod());
+    }
+
+    /**
+     * Rejects the {@code @Idempotent} attributes that only a method-level operation can
+     * honour, so an endpoint never carries one that quietly does nothing.
+     *
+     * <p>An HTTP request brings its own key in a header, its own body to fingerprint, and its
+     * own response to replay, so {@code key}, {@code codec} and {@code completion} have no
+     * meaning here: the filter reads only the durations and the scope. Accepting them and
+     * ignoring them would let an endpoint annotated {@code completion = "join-transaction"}
+     * look protected while completing autonomously.
+     */
+    private static void rejectMethodOnlyAttributes(Idempotent annotation, HandlerMethod handlerMethod) {
+        rejectAttribute("key", annotation.key(), handlerMethod, "the key comes from the request header");
+        rejectAttribute(
+                "codec", annotation.codec(), handlerMethod, "the HTTP response itself is what a duplicate replays");
+        rejectAttribute(
+                "completion",
+                annotation.completion(),
+                handlerMethod,
+                "a request is not running in a transaction the record could join");
+    }
+
+    private static void rejectAttribute(String name, String value, HandlerMethod method, String because) {
+        if (!value.isEmpty()) {
+            throw new IllegalStateException("@Idempotent(" + name + " = \"" + value + "\") on "
+                    + method.getShortLogMessage() + " cannot be honoured on an HTTP endpoint: " + because
+                    + ". Remove the attribute.");
+        }
     }
 
     private static Duration parseDuration(String raw, String attribute, Duration defaultValue, HandlerMethod method) {

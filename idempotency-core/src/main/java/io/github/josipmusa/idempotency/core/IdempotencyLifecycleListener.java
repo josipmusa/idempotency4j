@@ -50,8 +50,12 @@ import java.time.Instant;
  *       {@link io.github.josipmusa.idempotency.core.exception.IdempotencyDurabilityException}
  *       is a failure, not a completion: it fires
  *       {@link #onFailed} with {@link FailurePhase#COMPLETION}.</li>
- *   <li>A lock timeout or a fingerprint mismatch acquires no lease and fires
- *       nothing - the engine throws and the action never runs.</li>
+ *   <li>{@link #onInFlight} stands alone for the same reason as {@link #onDuplicate}:
+ *       another caller holds the key and did not finish within the wait timeout, so no
+ *       lease was acquired and the action never runs. The engine does not throw here -
+ *       it returns {@link Outcome.InFlight}.</li>
+ *   <li>A fingerprint mismatch acquires no lease and fires nothing at all - the engine
+ *       throws and the action never runs.</li>
  *   <li>{@code onAcquired} means the action is about to run. In the one case where
  *       the engine acquires a lease and abandons it before that (it could not start
  *       the heartbeat), it releases the lease and fires nothing at all, rather than

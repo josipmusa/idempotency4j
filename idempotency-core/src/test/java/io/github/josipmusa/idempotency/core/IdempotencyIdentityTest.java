@@ -105,4 +105,23 @@ class IdempotencyIdentityTest {
     void When_SameKeyDifferentScope_Expect_NotEqual() {
         assertThat(new IdempotencyIdentity("a", "k")).isNotEqualTo(new IdempotencyIdentity("b", "k"));
     }
+
+    @Test
+    void When_RenderedAsString_Expect_ScopeShownAndKeyMasked() {
+        IdempotencyIdentity identity = new IdempotencyIdentity("PaymentController.create", "alice@example.com");
+
+        assertThat(identity.toString()).startsWith("PaymentController.create/#").doesNotContain("alice@example.com");
+    }
+
+    @Test
+    void When_SameKey_Expect_SameMask() {
+        assertThat(new IdempotencyIdentity("a", "k").maskedKey())
+                .isEqualTo(new IdempotencyIdentity("b", "k").maskedKey());
+    }
+
+    @Test
+    void When_DifferentKeys_Expect_DifferentMasks() {
+        assertThat(new IdempotencyIdentity("a", "k1").maskedKey())
+                .isNotEqualTo(new IdempotencyIdentity("a", "k2").maskedKey());
+    }
 }

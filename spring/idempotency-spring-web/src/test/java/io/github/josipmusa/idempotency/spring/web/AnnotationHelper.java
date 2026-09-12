@@ -35,10 +35,19 @@ class AnnotationHelper {
     }
 
     static Idempotent annotation(String ttl, String lease, String waitTimeout, String scope) {
+        return annotation(ttl, lease, waitTimeout, scope, "", "", "");
+    }
+
+    static Idempotent methodOnlyAttributes(String key, String codec, String completion) {
+        return annotation("", "", "", "", key, codec, completion);
+    }
+
+    static Idempotent annotation(
+            String ttl, String lease, String waitTimeout, String scope, String key, String codec, String completion) {
         return new Idempotent() {
             @Override
             public String key() {
-                return "";
+                return key;
             }
 
             @Override
@@ -63,12 +72,12 @@ class AnnotationHelper {
 
             @Override
             public String completion() {
-                return "";
+                return completion;
             }
 
             @Override
             public String codec() {
-                return "";
+                return codec;
             }
 
             @Override

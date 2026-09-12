@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `@Idempotent` on a Spring MVC handler no longer fails the context. The method advisor claimed
+  request mapping handlers too and then demanded the `key` expression an endpoint has no use for,
+  so the documented HTTP usage could not start in any application that had both halves of the
+  starter active - which is every Servlet application. Handlers are now left to the filter, which
+  also stops a keyed endpoint being guarded twice under two different keys. The attributes only a
+  method can honour, `key`, `codec` and `completion`, are rejected on a handler at startup instead
+  of being silently ignored.
+- `@Idempotent(completion = "join-transaction")` against a store that cannot complete inside a
+  caller's transaction now fails at startup. Only the application-wide
+  `idempotency.completion-mode` was checked before, so a per-method request surfaced on the first
+  call as a claim that no transaction was active - inside a method that was demonstrably
+  `@Transactional`. The engine's own runtime check names the store's limitation too, rather than
+  blaming the caller for a transaction they did open.
+- A transaction whose outcome Spring reports as `STATUS_UNKNOWN` no longer leaves a lease with no
+  terminal lifecycle callback at all. `SpringTransactionParticipation` matched commit and rollback
+  by exact status, so an indeterminate completion fired neither, and a listener that had bound
+  state in `onAcquired` never unbound it. Anything that is not a confirmed commit is now resolved
+  as a rollback.
+- `InMemoryIdempotencyStore.tryAcquire` counts every pass against the wait budget. A steal that
+  lost its race retried through a `continue` that skipped the deadline check, so a caller could go
+  round again after its budget was spent.
+- The JDBC store writes `created_at` itself rather than leaving it to the column default. The
+  default is evaluated in the session's time zone while every other timestamp is bound as UTC, so
+  a row could record a `created_at` hours away from its own `expires_at`.
+
+### Security
+
+- Idempotency keys are masked in logs and exception messages. A key is client-controlled and may
+  carry identifying data, and `IdempotencyIdentity.toString()` put it verbatim into store, engine
+  and rollback exception messages, which the default completion-failure policy logs at error
+  level. A record now renders as its scope plus a short stable digest of the key.
+
 ### Changed
 
 - **Breaking.** Starter properties are regrouped. Transport-neutral settings stay at the top level,

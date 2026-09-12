@@ -19,11 +19,14 @@ import java.io.Serial;
 import java.lang.reflect.Method;
 import java.util.Objects;
 import org.aopalliance.aop.Advice;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.aop.Pointcut;
 import org.springframework.aop.support.AbstractPointcutAdvisor;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.aop.support.StaticMethodMatcherPointcut;
 import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.MergedAnnotations;
 import org.springframework.lang.Nullable;
 
 /**
@@ -32,11 +35,22 @@ import org.springframework.lang.Nullable;
  * <p>Matching a method also registers it with the interceptor. Spring consults a pointcut
  * while it builds proxies, so that is startup - which is where a bad annotation should be
  * caught, and where the parsing belongs so the hot path is a map lookup.
+ *
+ * <p>Spring MVC request mapping handlers are deliberately not matched. An HTTP request
+ * carries its own key, so those are the filter's to guard, and each annotation belongs to
+ * exactly one adapter.
  */
 public class IdempotentAdvisor extends AbstractPointcutAdvisor {
 
     @Serial
     private static final long serialVersionUID = 1L;
+
+    private static final Logger log = LoggerFactory.getLogger(IdempotentAdvisor.class);
+
+    /**
+     * Named rather than imported: this module must not depend on Spring Web.
+     */
+    private static final String REQUEST_MAPPING_ANNOTATION = "org.springframework.web.bind.annotation.RequestMapping";
 
     // Both are transient because neither an engine-backed interceptor nor a pointcut is
     // serializable, and an advisor is infrastructure that is built at startup, never restored
@@ -74,8 +88,34 @@ public class IdempotentAdvisor extends AbstractPointcutAdvisor {
             if (annotation == null) {
                 return false;
             }
+            if (isRequestMappingHandler(specific)) {
+                log.debug(
+                        "Leaving @Idempotent {}.{} to the HTTP adapter: it is a request mapping handler, "
+                                + "so its key comes from the request header rather than its parameters",
+                        resolvedTarget.getSimpleName(),
+                        specific.getName());
+                return false;
+            }
             interceptor.register(annotation, specific, resolvedTarget);
             return true;
         }
+    }
+
+    /**
+     * Reports whether the method is a Spring MVC request mapping handler.
+     *
+     * <p>Such a method is the HTTP adapter's to guard, not this advisor's: an HTTP request
+     * brings its own {@code Idempotency-Key}, so the annotation there carries no {@code key}
+     * expression and the filter reads only the durations and the scope from it. Advising it
+     * here would demand a key the endpoint has no use for, and - once one was invented to
+     * satisfy the demand - would guard the same call twice, under two different keys.
+     *
+     * <p>Matched by annotation name rather than by type so that this module keeps its
+     * transport neutrality: {@code idempotency-spring} does not depend on Spring Web, and an
+     * application without it on the classpath simply never matches.
+     */
+    private static boolean isRequestMappingHandler(Method method) {
+        return MergedAnnotations.from(method, MergedAnnotations.SearchStrategy.TYPE_HIERARCHY)
+                .isPresent(REQUEST_MAPPING_ANNOTATION);
     }
 }
