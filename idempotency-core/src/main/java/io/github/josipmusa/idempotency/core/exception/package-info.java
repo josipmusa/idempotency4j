@@ -20,9 +20,6 @@
  *       stored idempotency data is malformed or uses an unsupported format.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyForeignRecordException} -
  *       a configured namespace contains data owned by another application.</li>
- *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyLockTimeoutException} -
- *       thrown when a caller's {@code lockTimeout} expires while waiting for an
- *       in-flight request to complete.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException} -
  *       thrown when the same idempotency key is reused with a different request body;
  *       the adapter maps this to HTTP 422.</li>

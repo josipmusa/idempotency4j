@@ -25,7 +25,6 @@ import java.io.Serial;
  * recover from in-line — they should propagate to the error handler.
  *
  * @see IdempotencyStoreException for storage/persistence failures
- * @see IdempotencyLockTimeoutException for lock wait timeouts
  */
 public class IdempotencyException extends RuntimeException {
 

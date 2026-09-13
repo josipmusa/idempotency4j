@@ -1,93 +1,93 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 880 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="record-lifecycle-dark-title record-lifecycle-dark-desc">
       <title id="record-lifecycle-dark-title">Idempotency record lifecycle</title>
-      <desc id="record-lifecycle-dark-desc">A record is created in progress when a caller acquires a lease, which a heartbeat keeps extending while the action runs and which the next caller may steal once it expires; the record then either completes with a replayable payload or fails and becomes reclaimable, and both terminal states are purged when their time to live elapses.</desc>
+      <desc id="record-lifecycle-dark-desc">A record is created in progress when a caller acquires a lease, which a heartbeat keeps extending while the action runs and which the next caller may steal once it expires. The record then either completes with a replayable payload, or is released, which deletes it so the key is absent again and free to be reused. A completed record is purged once its time to live elapses; an abandoned in-progress record is purged only once its time to live has elapsed and its lease has expired too.</desc>
       <defs>
         <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
         <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
-        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6a95d8"/></marker>
       </defs>
 
       <rect width="100%" height="100%" fill="#2d3142"/>
 
       <!-- TRANSITIONS (drawn before states) -->
-      <line x1="78" y1="136" x2="160" y2="136" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-      <path d="M 216,120 C 216,72 304,72 304,120" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-      <path d="M 304,184 C 304,232 216,232 216,184" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
-      <path d="M 360,136 H 440 Q 448,136 448,128 V 88 Q 448,80 456,80" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-      <path d="M 360,168 H 400 Q 408,168 408,176 V 264 Q 408,272 416,272 H 456" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-      <path d="M 556,304 V 336 Q 556,344 548,344 H 128 Q 120,344 120,336 V 176 Q 120,168 128,168 H 160" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-      <path d="M 656,80 H 792 Q 800,80 800,88 V 144" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
-      <path d="M 656,272 H 792 Q 800,272 800,264 V 160" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <!-- start -> IN_PROGRESS -->
+      <line x1="78" y1="168" x2="160" y2="168" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- heartbeat self-loop (inner) -->
+      <path d="M 216,136 C 216,96 304,96 304,136" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- lease expired, stolen by the next caller (outer, time-driven) -->
+      <path d="M 180,136 C 180,48 340,48 340,136" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <!-- IN_PROGRESS -> COMPLETE -->
+      <line x1="360" y1="168" x2="456" y2="168" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <!-- IN_PROGRESS -> absent (release deletes the record) -->
+      <path d="M 260,200 V 244 Q 260,252 252,252 H 80 Q 72,252 72,244 V 182" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- COMPLETE -> purged -->
+      <path d="M 656,168 H 786" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <!-- abandoned IN_PROGRESS -> purged -->
+      <path d="M 340,200 V 308 Q 340,316 348,316 H 792 Q 800,316 800,308 V 184" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
 
       <!-- TRANSITION LABELS -->
-      <rect x="87" y="116" width="64" height="12" rx="2" fill="#2d3142"/>
-      <text x="119" y="125" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TRYACQUIRE</text>
+      <rect x="87" y="148" width="64" height="12" rx="2" fill="#2d3142"/>
+      <text x="119" y="157" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TRYACQUIRE</text>
 
-      <rect x="228" y="64" width="64" height="12" rx="2" fill="#2d3142"/>
-      <text x="260" y="73" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HEARTBEAT</text>
+      <rect x="228" y="88" width="64" height="12" rx="2" fill="#2d3142"/>
+      <text x="260" y="97" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HEARTBEAT</text>
 
-      <rect x="218" y="230" width="84" height="12" rx="2" fill="#2d3142"/>
-      <text x="260" y="239" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">LEASE EXPIRED</text>
+      <rect x="200" y="40" width="120" height="12" rx="2" fill="#2d3142"/>
+      <text x="260" y="49" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">LEASE EXPIRED — STOLEN</text>
 
-      <rect x="376" y="102" width="64" height="12" rx="2" fill="#2d3142"/>
-      <text x="408" y="111" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">COMPLETE()</text>
+      <rect x="376" y="150" width="64" height="12" rx="2" fill="#2d3142"/>
+      <text x="408" y="159" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">COMPLETE()</text>
 
-      <rect x="344" y="214" width="56" height="12" rx="2" fill="#2d3142"/>
-      <text x="372" y="223" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RELEASE()</text>
+      <rect x="108" y="246" width="136" height="12" rx="2" fill="#2d3142"/>
+      <text x="176" y="255" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RELEASE() — ROW DELETED</text>
 
-      <rect x="306" y="324" width="64" height="12" rx="2" fill="#2d3142"/>
-      <text x="338" y="333" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RECLAIMED</text>
+      <rect x="686" y="150" width="72" height="12" rx="2" fill="#2d3142"/>
+      <text x="722" y="159" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TTL ELAPSED</text>
 
-      <rect x="688" y="60" width="72" height="12" rx="2" fill="#2d3142"/>
-      <text x="724" y="69" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TTL ELAPSED</text>
+      <rect x="452" y="310" width="176" height="12" rx="2" fill="#2d3142"/>
+      <text x="540" y="319" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TTL ELAPSED + LEASE EXPIRED</text>
 
-      <rect x="688" y="252" width="72" height="12" rx="2" fill="#2d3142"/>
-      <text x="724" y="261" fill="#8e98ac" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TTL ELAPSED</text>
-
-      <!-- START -->
-      <circle cx="72" cy="136" r="6" fill="#f5f5f5"/>
+      <!-- ABSENT (start and the state release returns to) -->
+      <circle cx="72" cy="168" r="6" fill="#f5f5f5"/>
+      <text x="72" y="196" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">absent</text>
 
       <!-- IN_PROGRESS -->
-      <rect x="160" y="120" width="200" height="64" rx="8" fill="#2d3142"/>
-      <rect x="160" y="120" width="200" height="64" rx="8" fill="#f5f5f5" fill-opacity="0.05" stroke="#bfc0c0" stroke-width="1"/>
-      <text x="260" y="148" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IN_PROGRESS</text>
-      <text x="260" y="164" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">lease held</text>
+      <rect x="160" y="136" width="200" height="64" rx="8" fill="#2d3142"/>
+      <rect x="160" y="136" width="200" height="64" rx="8" fill="#f5f5f5" fill-opacity="0.05" stroke="#bfc0c0" stroke-width="1"/>
+      <text x="260" y="164" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IN_PROGRESS</text>
+      <text x="260" y="180" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">lease held</text>
 
       <!-- COMPLETE (focal) -->
-      <rect x="456" y="48" width="200" height="64" rx="8" fill="#2d3142"/>
-      <rect x="456" y="48" width="200" height="64" rx="8" fill="#f08a59" fill-opacity="0.10" stroke="#f08a59" stroke-width="1"/>
-      <text x="556" y="76" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">COMPLETE</text>
-      <text x="556" y="92" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">payload replayable</text>
-
-      <!-- FAILED -->
-      <rect x="456" y="240" width="200" height="64" rx="8" fill="#2d3142"/>
-      <rect x="456" y="240" width="200" height="64" rx="8" fill="#f5f5f5" fill-opacity="0.05" stroke="#bfc0c0" stroke-width="1"/>
-      <text x="556" y="268" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">FAILED</text>
-      <text x="556" y="284" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">reclaimable</text>
+      <rect x="456" y="136" width="200" height="64" rx="8" fill="#2d3142"/>
+      <rect x="456" y="136" width="200" height="64" rx="8" fill="#f08a59" fill-opacity="0.10" stroke="#f08a59" stroke-width="1"/>
+      <text x="556" y="164" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">COMPLETE</text>
+      <text x="556" y="180" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">payload replayable</text>
 
       <!-- END (purged) -->
-      <circle cx="800" cy="152" r="8" fill="none" stroke="#f5f5f5" stroke-width="1"/>
-      <circle cx="800" cy="152" r="5" fill="#f5f5f5"/>
+      <circle cx="800" cy="168" r="8" fill="none" stroke="#f5f5f5" stroke-width="1"/>
+      <circle cx="800" cy="168" r="5" fill="#f5f5f5"/>
+
+      <!-- NOTE -->
+      <text x="48" y="356" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace">A failed attempt leaves no trace: the next tryAcquire sees a key that was never used.</text>
 
       <!-- LEGEND -->
-      <line x1="48" y1="384" x2="832" y2="384" stroke="#f5f5f5" stroke-opacity="0.10" stroke-width="0.8"/>
+      <line x1="48" y1="384" x2="832" y2="384" stroke="#f5f5f5" stroke-opacity="0.16" stroke-width="0.8"/>
       <text x="48" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
 
       <circle cx="142" cy="398" r="5" fill="#f5f5f5"/>
-      <text x="156" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">START</text>
+      <text x="156" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">ABSENT</text>
 
-      <circle cx="254" cy="398" r="6" fill="none" stroke="#f5f5f5" stroke-width="0.8"/>
-      <circle cx="254" cy="398" r="3.5" fill="#f5f5f5"/>
-      <text x="270" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">PURGED</text>
+      <circle cx="262" cy="398" r="6" fill="none" stroke="#f5f5f5" stroke-width="0.8"/>
+      <circle cx="262" cy="398" r="3.5" fill="#f5f5f5"/>
+      <text x="278" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">PURGED</text>
 
-      <rect x="368" y="392" width="24" height="12" rx="3" fill="#f5f5f5" fill-opacity="0.05" stroke="#bfc0c0" stroke-width="0.8"/>
-      <text x="400" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">RECORD STATE</text>
+      <rect x="376" y="392" width="24" height="12" rx="3" fill="#f5f5f5" fill-opacity="0.05" stroke="#bfc0c0" stroke-width="0.8"/>
+      <text x="408" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">RECORD STATE</text>
 
-      <rect x="536" y="392" width="24" height="12" rx="3" fill="#f08a59" fill-opacity="0.10" stroke="#f08a59" stroke-width="0.8"/>
-      <text x="568" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">COMPLETED</text>
+      <rect x="544" y="392" width="24" height="12" rx="3" fill="#f08a59" fill-opacity="0.10" stroke="#f08a59" stroke-width="0.8"/>
+      <text x="576" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">COMPLETED</text>
 
-      <line x1="680" y1="398" x2="704" y2="398" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
-      <text x="712" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">TIME-DRIVEN</text>
+      <line x1="688" y1="398" x2="712" y2="398" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="720" y="402" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">TIME-DRIVEN</text>
     </svg>

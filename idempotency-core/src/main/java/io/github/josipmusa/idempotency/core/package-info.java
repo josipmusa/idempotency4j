@@ -16,14 +16,22 @@
  *       defaults used by adapters to build an {@code IdempotencyContext}.</li>
  *   <li>{@link io.github.josipmusa.idempotency.core.AcquireResult} — sealed outcome of
  *       {@code IdempotencyStore.tryAcquire}: {@code Acquired}, {@code Duplicate},
- *       {@code LockTimeout}, or {@code FingerprintMismatch}.</li>
- *   <li>{@link io.github.josipmusa.idempotency.core.ExecutionResult} — sealed outcome of
- *       {@code IdempotencyEngine.execute}: {@code Executed} or {@code Duplicate}.</li>
- *   <li>{@link io.github.josipmusa.idempotency.core.IdempotencyPayload} — sealed type for
- *       what a completed operation left behind: a
- *       {@link io.github.josipmusa.idempotency.core.StoredResponse} for an HTTP caller, or
- *       {@link io.github.josipmusa.idempotency.core.NoPayload} when there is nothing to
- *       replay.</li>
+ *       {@code InFlight}, or {@code FingerprintMismatch}.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.Outcome} — sealed outcome of
+ *       {@code IdempotencyEngine.execute}: {@code Executed}, {@code Replayed}, or
+ *       {@code InFlight}.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.CompletionFailurePolicy} — whether a
+ *       completion the store refused is rethrown or logged and swallowed.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener} - observes
+ *       acquisition, completion, failure, duplicate detection, and in-flight rejection on
+ *       the calling thread.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.Payload} — the transport-neutral
+ *       envelope a completed operation left behind: a type, a body, and flat string
+ *       attributes, stored verbatim and handed back on a duplicate.
+ *       {@link io.github.josipmusa.idempotency.core.Payload#none()} is what a caller with
+ *       nothing to replay stores.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.core.PayloadCodec} — translates between an
+ *       adapter's own result type and that envelope.</li>
  * </ul>
  *
  * <p>This package has zero framework dependencies. Adding Spring, JDBC, or Redis

@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.github.josipmusa</groupId>
         <artifactId>idempotency4j</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
+        <version>0.3.0-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -23,8 +23,36 @@
         </dependency>
         <dependency>
             <groupId>io.github.josipmusa</groupId>
+            <artifactId>idempotency-spring</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.josipmusa</groupId>
             <artifactId>idempotency-spring-web</artifactId>
             <version>${project.version}</version>
+        </dependency>
+
+        <!--
+          Providers are optional: whichever one the application puts on its classpath is what
+          the store autoconfiguration detects. Declaring them here only lets this module compile
+          against them; it never drags them into an application that did not ask for one.
+        -->
+        <dependency>
+            <groupId>io.github.josipmusa</groupId>
+            <artifactId>idempotency-jdbc</artifactId>
+            <version>${project.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.github.josipmusa</groupId>
+            <artifactId>idempotency-inmemory</artifactId>
+            <version>${project.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -54,10 +82,35 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
+            <!--
+              The root pom disables annotation processing everywhere. This module is the one
+              exception: without the Spring Boot configuration processor running, no
+              spring-configuration-metadata.json is produced, additional-spring-configuration-metadata.json
+              is never merged into it, and IDE completion for idempotency.* does not work at all.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <proc>full</proc>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-configuration-processor</artifactId>
+                            <version>${spring-boot.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>

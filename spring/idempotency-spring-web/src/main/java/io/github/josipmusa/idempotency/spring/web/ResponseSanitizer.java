@@ -15,16 +15,12 @@
  */
 package io.github.josipmusa.idempotency.spring.web;
 
-import io.github.josipmusa.idempotency.core.IdempotencyStore;
-import io.github.josipmusa.idempotency.core.StoredResponse;
-
 /**
  * SPI for sanitizing {@link StoredResponse} instances before they are persisted.
  *
- * <p>Called by {@link IdempotencyFilter} immediately before
- * {@link IdempotencyStore#complete}. The returned value is what gets
- * stored and replayed on duplicate requests.
- *
+ * <p>Called by {@link StoredResponseCodec#encode} on the way into the stored payload, so
+ * nothing reaches a store without passing through it. The returned value is what gets stored
+ * and replayed on duplicate requests.
  */
 @FunctionalInterface
 public interface ResponseSanitizer {

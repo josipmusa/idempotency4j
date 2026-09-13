@@ -31,6 +31,7 @@ import java.time.Duration;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -75,32 +76,30 @@ class PostgresJdbcIdempotencyStoreTest extends IdempotencyStoreContract {
     }
 
     @Test
-    void When_ExistingSchemaPredatesLeaseFencing_Expect_ColumnMigratedAutomatically() throws SQLException {
-        try (Connection conn = dataSource.getConnection();
-                Statement stmt = conn.createStatement()) {
-            stmt.execute("ALTER TABLE idempotency_records DROP COLUMN lease_id");
-        }
-
-        new JdbcIdempotencyStore(dataSource, true);
-
-        try (Connection conn = dataSource.getConnection();
-                Statement stmt = conn.createStatement()) {
-            assertThatCode(() -> stmt.executeQuery("SELECT lease_id FROM idempotency_records WHERE 1 = 0"))
-                    .doesNotThrowAnyException();
-        }
-    }
-
-    @Test
     void When_ConnectionExhausted_Expect_ThrowsIdempotencyStoreException() throws Exception {
         DataSource exhaustedDs = mock(DataSource.class);
         when(exhaustedDs.getConnection()).thenThrow(new SQLException("connection pool exhausted", "08001"));
 
         JdbcIdempotencyStore failingStore = new JdbcIdempotencyStore(exhaustedDs, false);
-        IdempotencyContext context =
-                new IdempotencyContext("key", Duration.ofHours(1), Duration.ofSeconds(5), "a".repeat(64));
+        IdempotencyContext context = IdempotencyContext.builder(SCOPE_DEFAULT, "key")
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(Duration.ofSeconds(5))
+                .waitTimeout(Duration.ofSeconds(5))
+                .fingerprint("a".repeat(64))
+                .build();
 
         assertThat(failingStore).isNotNull();
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> failingStore.tryAcquire(context))
                 .isInstanceOf(IdempotencyStoreUnavailableException.class);
+    }
+
+    /** The transactional half of the store contract, on the same container. */
+    @Nested
+    class TransactionalCompletion extends JdbcTransactionalStoreContract {
+
+        @Override
+        protected DataSource dataSource() {
+            return dataSource;
+        }
     }
 }

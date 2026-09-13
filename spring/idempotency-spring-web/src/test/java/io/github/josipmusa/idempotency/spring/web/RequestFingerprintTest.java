@@ -28,8 +28,7 @@ class RequestFingerprintTest {
         String first = RequestFingerprint.of(body);
         String second = RequestFingerprint.of(body);
 
-        assertThat(first).isEqualTo(second);
-        assertThat(first).hasSize(64);
+        assertThat(first).isEqualTo(second).hasSize(64);
     }
 
     @Test
