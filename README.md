@@ -146,8 +146,8 @@ scope to `<simple class name>.<method name>`, so the same message id delivered t
 the same `Idempotency-Key` sent to two endpoints, is two independent records rather than one
 silently skipping the other's work.
 
-Each record moves through a small state machine. There are two states, not three: a record is
-absent, `IN_PROGRESS`, or `COMPLETE`. Releasing deletes the row, so a failed attempt leaves no trace
+Each record moves through a small state machine. A record is absent, `IN_PROGRESS`, or `COMPLETE`;
+there is no failed state. Releasing deletes the row, so a failed attempt leaves no trace
 at all and the next caller sees a key that was never used. Every acquisition carries a lease, and
 `complete`, `release`, and the heartbeat all have to present a matching lease, which is what fences
 a stale owner out after its lease has been stolen:
@@ -430,7 +430,7 @@ Set `idempotency.completion-mode=join-transaction` to make it the application-wi
 
 | Module | Use when | Autoconfigured |
 |---|---|---|
-| `idempotency-jdbc` | You have a relational database. PostgreSQL and MySQL | Yes, from a single `DataSource` bean |
+| `idempotency-jdbc` | You have a relational database. PostgreSQL and MySQL, H2 for development | Yes, from a single `DataSource` bean |
 | `idempotency-redis` | You have Redis. Standalone and Sentinel topologies | No - declare the connection and the store |
 | `idempotency-inmemory` | Local development and tests. Not for more than one instance | Only on `store-type: in-memory` |
 

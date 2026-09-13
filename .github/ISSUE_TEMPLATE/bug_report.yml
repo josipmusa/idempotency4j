@@ -12,15 +12,24 @@ body:
     attributes:
       label: Library version
       description: Which version of idempotency4j are you using?
-      placeholder: e.g. 0.1.0
+      placeholder: e.g. 0.2.0
     validations:
       required: true
 
   - type: input
     id: java-version
     attributes:
-      label: Java version
-      placeholder: e.g. Java 21
+      label: Java and Spring Boot version
+      placeholder: e.g. Java 21, Spring Boot 3.5.16
+    validations:
+      required: true
+
+  - type: input
+    id: store
+    attributes:
+      label: Storage backend
+      description: Which store, and which database or Redis version behind it.
+      placeholder: e.g. JDBC on PostgreSQL 16, Redis 7.2, in-memory
     validations:
       required: true
 
