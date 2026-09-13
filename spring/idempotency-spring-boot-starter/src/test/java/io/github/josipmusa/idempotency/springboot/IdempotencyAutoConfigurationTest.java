@@ -20,6 +20,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.github.josipmusa.idempotency.core.AcquireResult;
 import io.github.josipmusa.idempotency.core.CompletionFailurePolicy;
 import io.github.josipmusa.idempotency.core.CompletionMode;
@@ -33,8 +37,10 @@ import io.github.josipmusa.idempotency.spring.SpringTransactionParticipation;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
@@ -43,6 +49,31 @@ import org.springframework.core.annotation.Order;
 
 /** The transport-neutral autoconfiguration: config, scheduler, engine. */
 class IdempotencyAutoConfigurationTest {
+
+    private ListAppender<ILoggingEvent> logs;
+    private Logger capturedLogger;
+
+    /** Library logs are switched off in logback-test.xml, so the one logger under test is tapped directly. */
+    private ListAppender<ILoggingEvent> captureLogs(Class<?> loggerClass) {
+        capturedLogger = (Logger) LoggerFactory.getLogger(loggerClass);
+        capturedLogger.setLevel(Level.INFO);
+        logs = new ListAppender<>();
+        logs.start();
+        capturedLogger.addAppender(logs);
+        return logs;
+    }
+
+    @AfterEach
+    void detachLogCapture() {
+        if (capturedLogger != null) {
+            capturedLogger.detachAppender(logs);
+            capturedLogger.setLevel(Level.OFF);
+        }
+    }
+
+    private static List<String> messages(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+    }
 
     private static final List<String> listenerCalls = new CopyOnWriteArrayList<>();
 
@@ -147,7 +178,7 @@ class IdempotencyAutoConfigurationTest {
      * the first message, and in the engine's own words.
      */
     @Test
-    void When_JoinTransactionWithRedis_Expect_ContextFailsToStart() {
+    void When_JoinTransactionAppWideOnNonTransactionalStore_Expect_ContextFailsNamingTheProperty() {
         contextRunner
                 .withPropertyValues("idempotency.completion-mode=join-transaction")
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
@@ -155,8 +186,45 @@ class IdempotencyAutoConfigurationTest {
                         .hasFailed()
                         .getFailure()
                         .rootCause()
-                        .isInstanceOf(IllegalArgumentException.class)
-                        .hasMessageContaining("does not support transactional completion"));
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("idempotency.completion-mode is join-transaction")
+                        .hasMessageContaining("cannot complete inside a caller's transaction")
+                        .hasMessageContaining("idempotency.completion-mode=autonomous"));
+    }
+
+    @Test
+    void When_JoinTransactionAppWideOnTransactionalStore_Expect_EngineCreated() {
+        contextRunner
+                .withPropertyValues("idempotency.completion-mode=join-transaction")
+                .withBean(IdempotencyStore.class, IdempotencyAutoConfigurationTest::transactionalStore)
+                .run(context -> assertThat(context).hasSingleBean(IdempotencyEngine.class));
+    }
+
+    @Test
+    void When_StoreTypeNamesABackendThatCannotBeBuilt_Expect_ContextFailsToStart() {
+        contextRunner
+                .withPropertyValues("idempotency.store-type=jdbc")
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .hasMessageContaining("idempotency.store-type is jdbc"));
+    }
+
+    @Test
+    void When_ApplicationDeclaresItsOwnStore_Expect_SelectedStoreLogged() {
+        ListAppender<ILoggingEvent> appender = captureLogs(IdempotencyAutoConfiguration.class);
+        contextRunner
+                .withBean(IdempotencyStore.class, IdempotencyAutoConfigurationTest::acquiringStore)
+                .run(context -> assertThat(messages(appender))
+                        .anySatisfy(m ->
+                                assertThat(m).startsWith("Idempotency store: ").contains("IdempotencyStore")));
+    }
+
+    @Test
+    void When_NoStoreAndStoreTypeAuto_Expect_InactiveWarning() {
+        ListAppender<ILoggingEvent> appender = captureLogs(IdempotencyAutoConfiguration.class);
+        contextRunner.run(context ->
+                assertThat(messages(appender)).anySatisfy(m -> assertThat(m).contains("idempotency is inactive")));
     }
 
     @Test

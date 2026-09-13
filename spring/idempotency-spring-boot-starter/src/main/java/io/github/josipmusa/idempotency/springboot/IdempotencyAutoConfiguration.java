@@ -25,12 +25,16 @@ import io.github.josipmusa.idempotency.spring.SpringTransactionParticipation;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 
 /**
@@ -46,6 +50,45 @@ import org.springframework.context.annotation.Bean;
 @AutoConfiguration(after = IdempotencyStoreAutoConfiguration.class)
 @EnableConfigurationProperties(IdempotencyProperties.class)
 public class IdempotencyAutoConfiguration {
+
+    private static final Logger log = LoggerFactory.getLogger(IdempotencyAutoConfiguration.class);
+
+    /**
+     * Reports which store the engine ended up with, whether the starter built it or the
+     * application declared it, and fails the context when {@code idempotency.store-type} named
+     * a backend nothing could build. It lives here rather than in the store autoconfiguration
+     * because that one backs off entirely once the application declares a store, and the
+     * report is owed in that case too.
+     */
+    @Bean
+    SmartInitializingSingleton idempotencyStoreReporter(
+            ApplicationContext applicationContext, IdempotencyProperties properties) {
+        return () -> {
+            String[] stores = applicationContext.getBeanNamesForType(IdempotencyStore.class);
+            IdempotencyProperties.StoreType requested = properties.getStoreType();
+            if (stores.length == 0) {
+                if (requested == IdempotencyProperties.StoreType.JDBC
+                        || requested == IdempotencyProperties.StoreType.IN_MEMORY) {
+                    throw new IllegalStateException("idempotency.store-type is "
+                            + requested.name().toLowerCase().replace('_', '-')
+                            + " but no store could be built. Add the matching provider dependency"
+                            + (requested == IdempotencyProperties.StoreType.JDBC
+                                    ? " (io.github.josipmusa:idempotency-jdbc) and make sure exactly one DataSource"
+                                            + " bean is available."
+                                    : " (io.github.josipmusa:idempotency-inmemory)."));
+                }
+                if (requested == IdempotencyProperties.StoreType.AUTO) {
+                    log.warn("No IdempotencyStore bean is present, so idempotency is inactive: no engine, no filter, "
+                            + "and no request is deduplicated. Add a provider dependency, or declare a store bean, "
+                            + "or set idempotency.store-type=none to silence this.");
+                }
+                return;
+            }
+            log.info(
+                    "Idempotency store: {}",
+                    applicationContext.getBean(stores[0]).getClass().getName());
+        };
+    }
 
     @Bean
     @ConditionalOnMissingBean
@@ -88,10 +131,8 @@ public class IdempotencyAutoConfiguration {
     @ConditionalOnClass(SpringTransactionParticipation.class)
     @ConditionalOnMissingBean(TransactionParticipation.class)
     @ConditionalOnBean(IdempotencyStore.class)
-    TransactionParticipation idempotencyTransactionParticipation(
-            IdempotencyStore store, IdempotencyProperties properties) {
-        boolean joinedRequested = properties.getCompletionMode() == CompletionMode.JOIN_TRANSACTION;
-        return store.supportsTransactionalCompletion() || joinedRequested
+    TransactionParticipation idempotencyTransactionParticipation(IdempotencyStore store) {
+        return store.supportsTransactionalCompletion()
                 ? new SpringTransactionParticipation()
                 : TransactionParticipation.none();
     }
@@ -105,11 +146,27 @@ public class IdempotencyAutoConfiguration {
             ObjectProvider<IdempotencyLifecycleListener> lifecycleListeners,
             IdempotencyConfig idempotencyConfig,
             ObjectProvider<TransactionParticipation> transactions) {
+        requireStoreSupportsDefaultCompletionMode(idempotencyStore, idempotencyConfig);
         return new IdempotencyEngine(
                 idempotencyStore,
                 idempotencyScheduler,
                 lifecycleListeners.orderedStream().toList(),
                 idempotencyConfig,
                 transactions.getIfAvailable(TransactionParticipation::none));
+    }
+
+    /**
+     * The engine would refuse a {@code TransactionParticipation} for a store that cannot use
+     * one, but its message talks in engine terms. An application that set the property is
+     * told about the property.
+     */
+    private static void requireStoreSupportsDefaultCompletionMode(IdempotencyStore store, IdempotencyConfig config) {
+        if (config.defaultCompletionMode() == CompletionMode.JOIN_TRANSACTION
+                && !store.supportsTransactionalCompletion()) {
+            throw new IllegalStateException("idempotency.completion-mode is join-transaction, but the configured "
+                    + "idempotency store (" + store.getClass().getName()
+                    + ") cannot complete inside a caller's transaction. Use a store that can, such as the JDBC one, "
+                    + "or set idempotency.completion-mode=autonomous.");
+        }
     }
 }

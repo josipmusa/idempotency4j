@@ -71,6 +71,7 @@ Servlet-only.
 | Spring WebFlux | No | Nothing registers, and no error is raised |
 | PostgreSQL | Tested on 16 | Via `idempotency-jdbc` |
 | MySQL | Tested on 8.0 | Via `idempotency-jdbc` |
+| H2 | Tested on 2.x | Via `idempotency-jdbc`, for development. The store contract runs on it |
 | Redis | 7+, tested on 7 | Standalone and Sentinel. Redis Cluster is not supported |
 
 ## Quick start
@@ -411,8 +412,9 @@ they are not:
 - **A transaction must already be active when the method is entered.** The transaction advisor has
   to run *outside* this one. Both default to `Ordered.LOWEST_PRECEDENCE`, which is a tie rather than
   an order, so break it with `@EnableTransactionManagement(order = Ordered.HIGHEST_PRECEDENCE)`. A
-  joined context entered without an active transaction is an `IllegalStateException`, not a silent
-  downgrade.
+  `@Transactional` method that asks for joined completion while the transaction advisor is not
+  ordered ahead fails the context at startup with exactly that instruction. A joined context entered
+  without an active transaction at runtime is an `IllegalStateException`, not a silent downgrade.
 - **The store needs the caller's connection.** The starter wires a
   `TransactionAwareConnectionResolver` into the JDBC store for you, which runs `COMPLETE` on the
   transaction-bound connection and everything else on a connection of its own.
@@ -466,7 +468,8 @@ idempotency:
 while a real database never gets DDL from a library behind its owner's back. On PostgreSQL or MySQL,
 point Flyway, Liquibase, or your own migration at the `idempotency-schema-postgresql.sql` or
 `idempotency-schema-mysql.sql` file shipped in the provider jar, or set `always` if you would rather
-the store created it.
+the store created it. If the table still cannot be queried once the context has started, the starter
+logs a warning saying so, rather than leaving the first keyed request to fail with a 500.
 
 Constructing the store by hand still works, and there the `initSchema` flag is yours:
 

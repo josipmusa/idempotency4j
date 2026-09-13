@@ -20,6 +20,9 @@ import io.github.josipmusa.idempotency.inmemory.InMemoryIdempotencyStore;
 import io.github.josipmusa.idempotency.jdbc.ConnectionResolver;
 import io.github.josipmusa.idempotency.jdbc.JdbcIdempotencyStore;
 import io.github.josipmusa.idempotency.spring.TransactionAwareConnectionResolver;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,7 +38,6 @@ import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.jdbc.EmbeddedDatabaseConnection;
 import org.springframework.boot.sql.init.DatabaseInitializationMode;
-import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
@@ -67,36 +69,6 @@ public class IdempotencyStoreAutoConfiguration {
      * means no engine, no engine means no filter, and requests are simply never deduplicated.
      * That is the one failure this library must not have.
      */
-    @Bean
-    SmartInitializingSingleton idempotencyStoreReporter(
-            ApplicationContext applicationContext, IdempotencyProperties properties) {
-        return () -> {
-            String[] stores = applicationContext.getBeanNamesForType(IdempotencyStore.class);
-            IdempotencyProperties.StoreType requested = properties.getStoreType();
-            if (stores.length == 0) {
-                if (requested == IdempotencyProperties.StoreType.JDBC
-                        || requested == IdempotencyProperties.StoreType.IN_MEMORY) {
-                    throw new IllegalStateException("idempotency.store-type is "
-                            + requested.name().toLowerCase().replace('_', '-')
-                            + " but no store could be built. Add the matching provider dependency"
-                            + (requested == IdempotencyProperties.StoreType.JDBC
-                                    ? " (io.github.josipmusa:idempotency-jdbc) and make sure exactly one DataSource"
-                                            + " bean is available."
-                                    : " (io.github.josipmusa:idempotency-inmemory)."));
-                }
-                if (requested == IdempotencyProperties.StoreType.AUTO) {
-                    log.warn("No IdempotencyStore bean is present, so idempotency is inactive: no engine, no filter, "
-                            + "and no request is deduplicated. Add a provider dependency, or declare a store bean, "
-                            + "or set idempotency.store-type=none to silence this.");
-                }
-                return;
-            }
-            log.info(
-                    "Idempotency store: {}",
-                    applicationContext.getBean(stores[0]).getClass().getName());
-        };
-    }
-
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass({JdbcIdempotencyStore.class, TransactionAwareConnectionResolver.class})
     @Conditional(OnJdbcStoreType.class)
@@ -121,6 +93,34 @@ public class IdempotencyStoreAutoConfiguration {
                 DataSource dataSource, IdempotencyProperties properties, ObjectProvider<ConnectionResolver> resolver) {
             boolean initSchema = shouldInitSchema(properties.getJdbc().getInitializeSchema(), dataSource);
             return new JdbcIdempotencyStore(dataSource, initSchema, resolver.getIfAvailable());
+        }
+
+        /**
+         * Runs once every singleton exists, so a Flyway or Liquibase migration has already had
+         * its turn, and warns when the table is still not there: without it every keyed request
+         * fails with a 500 and nothing at startup says why. A warning rather than a failure,
+         * because the table is external state the application may legitimately create later.
+         */
+        @Bean
+        @ConditionalOnSingleCandidate(DataSource.class)
+        SmartInitializingSingleton idempotencyTableChecker(
+                ObjectProvider<JdbcIdempotencyStore> store, DataSource dataSource) {
+            return () -> {
+                if (store.getIfAvailable() == null) {
+                    return;
+                }
+                try (Connection connection = dataSource.getConnection();
+                        Statement statement = connection.createStatement()) {
+                    statement.execute("SELECT 1 FROM idempotency_records WHERE 1 = 0");
+                } catch (SQLException e) {
+                    log.warn(
+                            "The idempotency_records table could not be queried ({}), so every idempotent call will "
+                                    + "fail until it exists. Create it from the idempotency-schema-postgresql.sql or "
+                                    + "idempotency-schema-mysql.sql file shipped in the idempotency-jdbc jar, or set "
+                                    + "idempotency.jdbc.initialize-schema=always to let the store create it.",
+                            e.getMessage());
+                }
+            };
         }
 
         private static boolean shouldInitSchema(DatabaseInitializationMode mode, DataSource dataSource) {

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The JDBC store works on H2 again, and on any database it has no dialect for. The UTC clock
+  query introduced with the payload model fell back to MySQL's `UTC_TIMESTAMP` for every database
+  that was not PostgreSQL, which H2 rejects, so the embedded development path the starter's
+  `initialize-schema=embedded` default exists for created its table and then failed every acquire.
+  The store now resolves a dialect: MySQL and MariaDB keep `UTC_TIMESTAMP`, PostgreSQL keeps
+  `CURRENT_TIMESTAMP AT TIME ZONE 'UTC'`, and everything else gets the PostgreSQL schema file and a
+  plain `CURRENT_TIMESTAMP`. The full store contract now runs on H2 alongside the two containers.
+- `@Transactional` plus `@Idempotent(completion = "join-transaction")` with the transaction advisor
+  not ordered ahead of the idempotency advisor fails the context at startup, naming the method and
+  the `@EnableTransactionManagement(order = ...)` fix. Both advisors default to
+  `LOWEST_PRECEDENCE`, so a Spring Boot application that did not break the tie was entered before
+  its transaction started and only learned so on the first call.
+- `idempotency.completion-mode=join-transaction` against a store that cannot complete inside a
+  caller's transaction fails the context with a message that names the property and the remedy.
+  The engine's own rejection, which the starter used to provoke on purpose, talked about
+  `TransactionParticipation.none()`, a type a starter user never sees.
+- The "Idempotency store: ..." startup line is logged for a store the application declared itself,
+  not only for one the starter built.
+- The starter warns after startup when the `idempotency_records` table cannot be queried, pointing
+  at the shipped schema files and `idempotency.jdbc.initialize-schema=always`. Before, a real
+  database without the table started cleanly and failed every keyed request with a 500.
 - `@Idempotent` on a Spring MVC handler no longer fails the context. The method advisor claimed
   request mapping handlers too and then demanded the `key` expression an endpoint has no use for,
   so the documented HTTP usage could not start in any application that had both halves of the

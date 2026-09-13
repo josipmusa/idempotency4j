@@ -61,26 +61,57 @@ import javax.sql.DataSource;
  * <p>No Spring dependencies — only requires a {@link DataSource}.
  *
  * <p><strong>Database compatibility:</strong> Automatically detects the database
- * dialect from {@link java.sql.DatabaseMetaData#getDatabaseProductName()} and
- * loads the appropriate schema file ({@code idempotency-schema-mysql.sql} or
- * {@code idempotency-schema-postgresql.sql}). Unrecognized databases fall back
- * to the MySQL schema.
+ * dialect from {@link java.sql.DatabaseMetaData#getDatabaseProductName()}. MySQL and
+ * MariaDB get {@code idempotency-schema-mysql.sql} and read the clock with
+ * {@code UTC_TIMESTAMP}; PostgreSQL gets {@code idempotency-schema-postgresql.sql} and
+ * {@code CURRENT_TIMESTAMP AT TIME ZONE 'UTC'}. Every other database, H2 included, gets
+ * the PostgreSQL schema file, which is standard SQL, and a plain {@code CURRENT_TIMESTAMP},
+ * which is correct wherever that function carries its zone (H2) or the session runs in UTC.
  */
 public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static final long DEFAULT_POLL_INTERVAL_MS = 100;
 
     /**
-     * Reads the database clock as UTC wall-clock fields, so {@link #currentTime} can turn it
-     * into a true {@link Instant} with {@link #UTC}. A plain {@code CURRENT_TIMESTAMP} returns
-     * the server's local time, which a driver is free to interpret in its own zone: on MySQL
-     * that silently shifts the value by the JVM's offset, which is harmless for arithmetic
-     * against other columns written the same way but wrong for {@code completed_at}, which
-     * leaves the store as an instant a caller sees.
+     * What differs between databases: the schema file, the clock query, and whether the
+     * schema file can declare its index idempotently.
+     *
+     * <p>The clock query reads the database clock as UTC wall-clock fields, so
+     * {@link #currentTime} can turn it into a true {@link Instant} with {@link #UTC}. A plain
+     * {@code CURRENT_TIMESTAMP} on MySQL returns the server's local time, which the driver
+     * interprets in the JVM's zone and so silently shifts by its offset - harmless for
+     * arithmetic against other columns written the same way, wrong for {@code completed_at},
+     * which leaves the store as an instant a caller sees. Hence {@code UTC_TIMESTAMP} there.
+     * H2's {@code CURRENT_TIMESTAMP} carries its zone, so the plain form is exact; for a
+     * database this store has no dialect for, it is the portable best effort.
      */
-    private static final String SELECT_CURRENT_TIME_MYSQL = "SELECT UTC_TIMESTAMP(3)";
+    enum Dialect {
+        POSTGRESQL("/idempotency-schema-postgresql.sql", "SELECT CURRENT_TIMESTAMP(3) AT TIME ZONE 'UTC'", true),
+        MYSQL("/idempotency-schema-mysql.sql", "SELECT UTC_TIMESTAMP(3)", false),
+        GENERIC("/idempotency-schema-postgresql.sql", "SELECT CURRENT_TIMESTAMP(3)", true);
 
-    private static final String SELECT_CURRENT_TIME_POSTGRESQL = "SELECT CURRENT_TIMESTAMP(3) AT TIME ZONE 'UTC'";
+        final String schemaFile;
+        final String currentTimeSql;
+        /** MySQL has no {@code CREATE INDEX IF NOT EXISTS}, so its file leaves the index out. */
+        final boolean schemaDeclaresIndex;
+
+        Dialect(String schemaFile, String currentTimeSql, boolean schemaDeclaresIndex) {
+            this.schemaFile = schemaFile;
+            this.currentTimeSql = currentTimeSql;
+            this.schemaDeclaresIndex = schemaDeclaresIndex;
+        }
+
+        static Dialect of(String databaseProductName) {
+            String name = databaseProductName.toLowerCase(Locale.ROOT);
+            if (name.contains("postgresql")) {
+                return POSTGRESQL;
+            }
+            if (name.contains("mysql") || name.contains("mariadb")) {
+                return MYSQL;
+            }
+            return GENERIC;
+        }
+    }
 
     private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
 
@@ -157,11 +188,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private final long pollIntervalMs;
 
     /**
-     * The dialect's clock query, resolved from the first connection this store uses rather
-     * than in the constructor, so a store built against an unreachable {@code DataSource}
-     * still constructs and fails where the caller can see it.
+     * Resolved from the first connection this store uses rather than in the constructor, so
+     * a store built against an unreachable {@code DataSource} still constructs and fails where
+     * the caller can see it.
      */
-    private volatile String currentTimeSql;
+    private volatile Dialect dialect;
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, String>> ATTRIBUTES_TYPE = new TypeReference<>() {};
@@ -271,20 +302,14 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * since MySQL does not support {@code CREATE INDEX IF NOT EXISTS}.
      */
     private void initSchema() {
-        String dialect;
+        Dialect resolved;
         try (Connection conn = dataSource.getConnection()) {
-            dialect = conn.getMetaData().getDatabaseProductName().toLowerCase();
+            resolved = dialect(conn);
         } catch (SQLException e) {
             throw new IdempotencyStoreUnavailableException("Failed to detect database dialect", e);
         }
 
-        String schemaFile;
-        if (dialect.contains("postgresql")) {
-            schemaFile = "/idempotency-schema-postgresql.sql";
-        } else {
-            schemaFile = "/idempotency-schema-mysql.sql";
-        }
-
+        String schemaFile = resolved.schemaFile;
         try (InputStream is = getClass().getResourceAsStream(schemaFile)) {
             if (is == null) {
                 throw new IdempotencyStoreException("Schema file " + schemaFile + " not found on classpath");
@@ -312,7 +337,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             throw new IdempotencyStoreUnavailableException("Failed to initialize schema", e);
         }
 
-        if (!dialect.contains("postgresql")) {
+        if (!resolved.schemaDeclaresIndex) {
             createMysqlIndex();
         }
     }
@@ -755,7 +780,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     private Instant currentTime(Connection conn) throws SQLException {
         try (Statement statement = conn.createStatement();
-                ResultSet result = statement.executeQuery(currentTimeSql(conn))) {
+                ResultSet result = statement.executeQuery(dialect(conn).currentTimeSql)) {
             if (!result.next()) {
                 throw new SQLException("Database did not return the current timestamp");
             }
@@ -767,18 +792,13 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    private String currentTimeSql(Connection conn) throws SQLException {
-        String sql = currentTimeSql;
-        if (sql == null) {
-            sql = conn.getMetaData()
-                            .getDatabaseProductName()
-                            .toLowerCase(Locale.ROOT)
-                            .contains("postgresql")
-                    ? SELECT_CURRENT_TIME_POSTGRESQL
-                    : SELECT_CURRENT_TIME_MYSQL;
-            currentTimeSql = sql;
+    private Dialect dialect(Connection conn) throws SQLException {
+        Dialect resolved = dialect;
+        if (resolved == null) {
+            resolved = Dialect.of(conn.getMetaData().getDatabaseProductName());
+            dialect = resolved;
         }
-        return sql;
+        return resolved;
     }
 
     /**

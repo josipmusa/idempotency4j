@@ -18,20 +18,52 @@ package io.github.josipmusa.idempotency.springboot;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.inmemory.InMemoryIdempotencyStore;
 import io.github.josipmusa.idempotency.jdbc.ConnectionResolver;
 import io.github.josipmusa.idempotency.jdbc.JdbcIdempotencyStore;
 import io.github.josipmusa.idempotency.spring.TransactionAwareConnectionResolver;
+import java.util.List;
 import java.util.UUID;
 import javax.sql.DataSource;
 import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 class IdempotencyStoreAutoConfigurationTest {
+
+    private ListAppender<ILoggingEvent> logs;
+    private Logger capturedLogger;
+
+    /** Library logs are switched off in logback-test.xml, so the one logger under test is tapped directly. */
+    private ListAppender<ILoggingEvent> captureLogs(Class<?> loggerClass) {
+        capturedLogger = (Logger) LoggerFactory.getLogger(loggerClass);
+        capturedLogger.setLevel(Level.INFO);
+        logs = new ListAppender<>();
+        logs.start();
+        capturedLogger.addAppender(logs);
+        return logs;
+    }
+
+    @AfterEach
+    void detachLogCapture() {
+        if (capturedLogger != null) {
+            capturedLogger.detachAppender(logs);
+            capturedLogger.setLevel(Level.OFF);
+        }
+    }
+
+    private static List<String> messages(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+    }
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(IdempotencyStoreAutoConfiguration.class));
@@ -105,16 +137,6 @@ class IdempotencyStoreAutoConfigurationTest {
     }
 
     @Test
-    void When_StoreTypeNamesABackendThatCannotBeBuilt_Expect_ContextFailsToStart() {
-        contextRunner
-                .withPropertyValues("idempotency.store-type=jdbc")
-                .run(context -> assertThat(context)
-                        .hasFailed()
-                        .getFailure()
-                        .hasMessageContaining("idempotency.store-type is jdbc"));
-    }
-
-    @Test
     void When_InitializeSchemaIsNever_Expect_StoreStillCreatedWithoutTable() {
         withDataSource
                 .withPropertyValues("idempotency.jdbc.initialize-schema=never")
@@ -122,6 +144,24 @@ class IdempotencyStoreAutoConfigurationTest {
                     assertThat(context).hasSingleBean(IdempotencyStore.class);
                     assertThat(tableExists(context.getBean(DataSource.class))).isFalse();
                 });
+    }
+
+    @Test
+    void When_InitializeSchemaIsNever_Expect_StartupWarnsAboutMissingTable() {
+        ListAppender<ILoggingEvent> appender = captureLogs(IdempotencyStoreAutoConfiguration.class);
+        withDataSource
+                .withPropertyValues("idempotency.jdbc.initialize-schema=never")
+                .run(context -> assertThat(messages(appender))
+                        .anySatisfy(m -> assertThat(m)
+                                .contains("idempotency_records table could not be queried")
+                                .contains("idempotency.jdbc.initialize-schema=always")));
+    }
+
+    @Test
+    void When_TablePresent_Expect_NoMissingTableWarning() {
+        ListAppender<ILoggingEvent> appender = captureLogs(IdempotencyStoreAutoConfiguration.class);
+        withDataSource.run(
+                context -> assertThat(messages(appender)).noneMatch(m -> m.contains("could not be queried")));
     }
 
     @Test

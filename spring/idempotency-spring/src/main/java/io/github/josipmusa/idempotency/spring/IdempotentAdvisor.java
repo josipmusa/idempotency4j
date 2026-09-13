@@ -18,6 +18,7 @@ package io.github.josipmusa.idempotency.spring;
 import java.io.Serial;
 import java.lang.reflect.Method;
 import java.util.Objects;
+import java.util.Set;
 import org.aopalliance.aop.Advice;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,9 +26,15 @@ import org.springframework.aop.Pointcut;
 import org.springframework.aop.support.AbstractPointcutAdvisor;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.aop.support.StaticMethodMatcherPointcut;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.core.annotation.MergedAnnotations;
 import org.springframework.lang.Nullable;
+import org.springframework.transaction.interceptor.BeanFactoryTransactionAttributeSourceAdvisor;
 
 /**
  * Applies {@link IdempotentMethodInterceptor} to every {@link Idempotent} method.
@@ -40,7 +47,7 @@ import org.springframework.lang.Nullable;
  * carries its own key, so those are the filter's to guard, and each annotation belongs to
  * exactly one adapter.
  */
-public class IdempotentAdvisor extends AbstractPointcutAdvisor {
+public class IdempotentAdvisor extends AbstractPointcutAdvisor implements BeanFactoryAware, SmartInitializingSingleton {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -58,6 +65,7 @@ public class IdempotentAdvisor extends AbstractPointcutAdvisor {
     // same way.
     private final transient IdempotentMethodInterceptor interceptor;
     private final transient Pointcut pointcut;
+    private transient BeanFactory beanFactory;
 
     /**
      * @param interceptor what runs for a matched method
@@ -75,6 +83,45 @@ public class IdempotentAdvisor extends AbstractPointcutAdvisor {
     @Override
     public Advice getAdvice() {
         return interceptor;
+    }
+
+    @Override
+    public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
+        this.beanFactory = beanFactory;
+    }
+
+    /**
+     * A method that is itself {@code @Transactional} and asks for joined completion needs its
+     * transaction to be open before this advisor runs the engine, so the transaction advisor
+     * has to be ordered ahead of this one. Both default to {@link org.springframework.core.Ordered#LOWEST_PRECEDENCE},
+     * which is a tie the proxy resolves by registration order, not a guarantee. Left alone, the
+     * mistake surfaces on the first call as a claim that no transaction is active, inside a
+     * method that is demonstrably {@code @Transactional}; this turns it into a startup failure
+     * that says what to change.
+     */
+    @Override
+    public void afterSingletonsInstantiated() {
+        Set<Method> methods = interceptor.joinedTransactionalMethods();
+        if (methods.isEmpty() || !(beanFactory instanceof ListableBeanFactory listable)) {
+            return;
+        }
+        listable.getBeansOfType(BeanFactoryTransactionAttributeSourceAdvisor.class, false, false)
+                .values()
+                .forEach(transactionAdvisor -> requireOrderedAhead(transactionAdvisor, methods));
+    }
+
+    private void requireOrderedAhead(
+            BeanFactoryTransactionAttributeSourceAdvisor transactionAdvisor, Set<Method> methods) {
+        if (transactionAdvisor.getOrder() < getOrder()) {
+            return;
+        }
+        Method method = methods.iterator().next();
+        throw new IllegalStateException("@Idempotent(completion = \"join-transaction\") on "
+                + method.getDeclaringClass().getSimpleName() + "." + method.getName()
+                + " is also @Transactional, but the transaction advisor (order " + transactionAdvisor.getOrder()
+                + ") does not run ahead of the idempotency advisor (order " + getOrder()
+                + "), so the method would be entered before its transaction starts. Order the transaction advisor "
+                + "ahead, for example @EnableTransactionManagement(order = Ordered.HIGHEST_PRECEDENCE).");
     }
 
     private final class IdempotentPointcut extends StaticMethodMatcherPointcut {
