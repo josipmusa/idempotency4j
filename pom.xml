@@ -51,6 +51,10 @@
             <id>central</id>
             <url>https://central.sonatype.com/api/v1/publisher/upload</url>
         </repository>
+        <snapshotRepository>
+            <id>central</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+        </snapshotRepository>
     </distributionManagement>
 
     <modules>
@@ -294,7 +298,7 @@
                     <configuration>
                         <publishingServerId>central</publishingServerId>
                         <autoPublish>true</autoPublish>
-                        <waitUntil>validated</waitUntil>
+                        <waitUntil>published</waitUntil>
                     </configuration>
                 </plugin>
             </plugins>
@@ -317,15 +321,16 @@
         <!--
             Release profile: activated with -Prelease.
             Generates sources and Javadoc JARs, signs all artifacts, and publishes
-            to Maven Central via the Sonatype Central Publishing plugin.
+            to Maven Central via the Sonatype Central Publishing plugin. A -SNAPSHOT
+            version goes to the Central snapshot repository instead, and the build
+            only returns once a release is actually published.
 
             Prerequisites:
               - GPG key available to the build agent
               - CENTRAL_USERNAME / CENTRAL_TOKEN environment variables (or in settings.xml)
 
-            To publish a release:
-              mvn versions:set -DnewVersion=X.Y.Z
-              mvn deploy -Prelease
+            Releases are cut with scripts/release.sh and published by the Release
+            workflow when the tag is pushed; CI publishes a snapshot on every push to main.
         -->
         <profile>
             <id>release</id>
