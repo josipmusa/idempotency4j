@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: Spring Boot 4 and Spring Framework 7 are now the baseline.** The adapters and the
+  starter are built against Spring Boot 4.0.8 and support the 4.0 and 4.1 lines. Spring Boot 3 is
+  no longer supported: 3.5 reached open source end of life on 30 June 2026, and 3.5.16 was its
+  final OSS patch. Boot 3 applications should stay on 0.3.0, which remains on Maven Central.
+  Nothing in this library's own API changed - for an application already on Boot 4, upgrading is a
+  version bump.
+- Java 25 is now tested alongside Java 21. The compile baseline stays at Java 21, so Java 21
+  applications are unaffected; the CI matrix covers Java 21 and 25 against Spring Boot 4.0 and 4.1.
+- The Spring modules use JSpecify's `@Nullable` and `@NonNull` instead of the
+  `org.springframework.lang` annotations that Spring Framework 7 deprecates. `idempotency-core` and
+  the providers are unchanged.
+
 ## [0.3.0] - 2026-09-15
 
 This release reworks the library around a transport-neutral engine. Most public types changed

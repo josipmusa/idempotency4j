@@ -63,9 +63,9 @@ Servlet-only.
 
 | | Supported | Notes |
 |---|---|---|
-| Java | 21+ | Built and tested on 21 |
+| Java | 21+ | Compiled to 21, tested on 21 and 25 |
 | `idempotency-core` | No framework | Plain Java, plus SLF4J |
-| Spring Boot | 3.5.x | Built against 3.5.16, for the adapters and the starter |
+| Spring Boot | 4.0.x, 4.1.x | Built against 4.0.8, for the adapters and the starter |
 | Annotated methods | Spring AOP | No web stack needed - works in a consumer or a batch job |
 | Spring MVC (Servlet) | Yes | The HTTP filter activates only for Servlet web applications |
 | Spring WebFlux | No | Nothing registers, and no error is raised |
@@ -74,7 +74,18 @@ Servlet-only.
 | H2 | Tested on 2.x | Via `idempotency-jdbc`, for development. The store contract runs on it |
 | Redis | 7+, tested on 7 | Standalone and Sentinel. Redis Cluster is not supported |
 
-## Quick start
+Every row above is a combination CI runs: the build matrix covers Java 21 and 25 against Spring
+Boot 4.0 and 4.1.
+
+### Spring Boot 3
+
+0.4.0 moved to Spring Boot 4 and Spring Framework 7. Spring Boot 3.5 reached open source end of
+life on 30 June 2026, and 3.5.16 was its final OSS patch, so the 3.x line no longer receives fixes
+from Spring itself.
+
+Boot 3 applications should stay on **0.3.0**, which remains on Maven Central. The `0.3.x` branch
+exists so a serious fix could still be published from it, but no releases are scheduled and none
+are promised.
 
 Add the Spring Boot starter and one storage backend:
 
@@ -678,8 +689,9 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the build, the
 conventions, and what a change to store behaviour needs.
 
-Building requires Java 21 and Docker, since the JDBC and Redis provider tests run against real
-databases through Testcontainers:
+Building requires Java 21 - the compile baseline, which is what catches accidental use of a newer
+API - and Docker, since the JDBC and Redis provider tests run against real databases through
+Testcontainers:
 
 ```bash
 ./mvnw spotless:apply   # formatting and license headers

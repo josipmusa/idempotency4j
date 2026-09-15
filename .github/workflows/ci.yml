@@ -13,9 +13,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # The matrix is the compatibility claim: every combination the README promises is a
+    # combination that actually ran. Java 21 is the compile baseline and 25 the current LTS;
+    # 4.0 is the declared Spring Boot floor and 4.1 the current line.
     strategy:
+      fail-fast: false
       matrix:
-        java: [ 21 ]
+        java: [ 21, 25 ]
+        spring-boot: [ 4.0.8, 4.1.1 ]
+
+    name: build (Java ${{ matrix.java }}, Spring Boot ${{ matrix.spring-boot }})
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,7 +35,7 @@ jobs:
           cache: maven
 
       - name: Build and test
-        run: ./mvnw verify --batch-mode --no-transfer-progress
+        run: ./mvnw verify -Dspring-boot.version=${{ matrix.spring-boot }} --batch-mode --no-transfer-progress
 
   # Every green push to main publishes the current -SNAPSHOT to Maven Central's snapshot
   # repository, so main is always available to try out. A release version is skipped: main

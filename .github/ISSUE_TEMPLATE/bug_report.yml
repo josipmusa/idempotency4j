@@ -20,7 +20,7 @@ body:
     id: java-version
     attributes:
       label: Java and Spring Boot version
-      placeholder: e.g. Java 21, Spring Boot 3.5.16
+      placeholder: e.g. Java 21, Spring Boot 4.0.8
     validations:
       required: true
 
