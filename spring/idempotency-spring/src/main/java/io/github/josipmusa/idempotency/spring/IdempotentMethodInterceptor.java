@@ -30,6 +30,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
+import org.jspecify.annotations.Nullable;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
@@ -39,7 +40,6 @@ import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.ParameterNameDiscoverer;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.expression.EvaluationContext;
-import org.springframework.lang.Nullable;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.ClassUtils;
 
@@ -152,9 +152,8 @@ public class IdempotentMethodInterceptor implements MethodInterceptor, BeanFacto
         }
     }
 
-    @Nullable
     @Override
-    public Object invoke(MethodInvocation invocation) throws Throwable {
+    public @Nullable Object invoke(MethodInvocation invocation) throws Throwable {
         Method method = AopUtils.getMostSpecificMethod(invocation.getMethod(), targetClassOf(invocation));
         IdempotentOperation operation = operations.get(method);
         if (operation == null) {
@@ -175,8 +174,7 @@ public class IdempotentMethodInterceptor implements MethodInterceptor, BeanFacto
      * so the odd remainder - a {@code Throwable} that is neither - is wrapped. Exceptions and
      * errors propagate untouched; the engine releases the lease for all of them alike.
      */
-    @Nullable
-    private static Object proceed(MethodInvocation invocation) throws Exception {
+    private static @Nullable Object proceed(MethodInvocation invocation) throws Exception {
         try {
             return invocation.proceed();
         } catch (Exception | Error e) {

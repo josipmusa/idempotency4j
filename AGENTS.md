@@ -19,6 +19,11 @@ Before claiming any work is done, run:
 
 Requires Java 21 (see `.sdkmanrc`) and always use the Maven wrapper `./mvnw`.
 
+Java 21 is the compile baseline, not the only supported runtime: CI runs the build on 21 and 25,
+against Spring Boot 4.0 and 4.1 (`-Dspring-boot.version=`). Develop on 21 - it is what catches
+accidental use of a Java 22+ API. The Spring modules target Spring Boot 4 / Framework 7; Boot 3 is
+not supported and lives on the `0.3.x` branch.
+
 ## Common commands
 
 ```bash

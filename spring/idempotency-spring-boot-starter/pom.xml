@@ -58,6 +58,23 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-autoconfigure</artifactId>
         </dependency>
+        <!--
+            Spring Boot 4 split the autoconfigurations out of spring-boot-autoconfigure into
+            per-technology modules. DataSourceAutoConfiguration and EmbeddedDatabaseConnection
+            now live in spring-boot-jdbc, and DatabaseInitializationMode in spring-boot-sql.
+            Optional like spring-jdbc above: they let @ConditionalOnClass compile without
+            dragging JDBC into an application that chose a different store.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-jdbc</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-sql</artifactId>
+            <optional>true</optional>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>
