@@ -24,8 +24,8 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.SmartInitializingSingleton;
-import org.springframework.lang.Nullable;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
@@ -74,8 +74,7 @@ public class IdempotentHandlerRegistry implements SmartInitializingSingleton {
         this.cache = Map.copyOf(builtAnnotationCache);
     }
 
-    @Nullable
-    public ResolvedIdempotent resolve(HandlerMethod handlerMethod) {
+    public @Nullable ResolvedIdempotent resolve(HandlerMethod handlerMethod) {
         return cache.get(handlerMethod.getMethod());
     }
 

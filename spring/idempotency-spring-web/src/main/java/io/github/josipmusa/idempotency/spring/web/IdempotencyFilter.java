@@ -28,10 +28,10 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.lang.NonNull;
-import org.springframework.lang.Nullable;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerExecutionChain;
@@ -226,8 +226,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         HttpIdempotencyMapper.replay(stored, response);
     }
 
-    @Nullable
-    private HandlerMethod resolveHandlerMethod(HttpServletRequest request) {
+    private @Nullable HandlerMethod resolveHandlerMethod(HttpServletRequest request) {
         HandlerExecutionChain handlerChain;
         try {
             handlerChain = handlerMapping.getHandler(request);
