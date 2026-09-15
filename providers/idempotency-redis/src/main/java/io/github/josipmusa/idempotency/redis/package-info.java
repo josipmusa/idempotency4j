@@ -3,8 +3,8 @@
  *
  * <p>{@link io.github.josipmusa.idempotency.redis.RedisIdempotencyStore} stores each
  * idempotency record as a Redis hash and coordinates locking with Lua scripts, so every
- * state transition is atomic. It depends on Lettuce and Jackson, with no Spring or Spring Data
- * Redis dependency.
+ * state transition is atomic. It depends on Lettuce alone, with no Spring or Spring Data Redis
+ * dependency.
  *
  * <p>There is no schema to initialize. The connection must be opened with
  * {@link io.github.josipmusa.idempotency.redis.RedisIdempotencyStore#CODEC} so that binary

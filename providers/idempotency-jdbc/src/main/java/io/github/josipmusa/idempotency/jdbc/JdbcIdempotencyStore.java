@@ -15,10 +15,8 @@
  */
 package io.github.josipmusa.idempotency.jdbc;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
+import io.github.josipmusa.idempotency.core.AttributeJson;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
@@ -193,9 +191,6 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * the caller can see it.
      */
     private volatile Dialect dialect;
-
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final TypeReference<Map<String, String>> ATTRIBUTES_TYPE = new TypeReference<>() {};
 
     public JdbcIdempotencyStore(DataSource dataSource) {
         this(dataSource, true);
@@ -853,11 +848,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     // --- JSON serialization ---
 
     static String attributesToJson(Map<String, String> attributes) {
-        try {
-            return OBJECT_MAPPER.writeValueAsString(attributes);
-        } catch (JsonProcessingException e) {
-            throw new IdempotencyStoreException("Failed to serialize payload attributes to JSON", e);
-        }
+        return AttributeJson.encode(attributes);
     }
 
     static Map<String, String> jsonToAttributes(String json) {
@@ -865,9 +856,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             return Map.of();
         }
         try {
-            return OBJECT_MAPPER.readValue(json, ATTRIBUTES_TYPE);
-        } catch (JsonProcessingException e) {
-            throw new IdempotencyCorruptRecordException("Failed to deserialize payload attributes from JSON", e);
+            return AttributeJson.decode(json);
+        } catch (IdempotencyCorruptRecordException e) {
+            throw new IdempotencyCorruptRecordException("Completed JDBC record has malformed payload attributes", e);
         }
     }
 }

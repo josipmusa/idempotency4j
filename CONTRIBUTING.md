@@ -47,7 +47,7 @@ These rules are enforced by design, not by tooling, so a violation is caught in 
 - `spring/idempotency-spring` is core plus `spring-context`, `spring-aop` and `spring-tx`, with
   `spring-jdbc` and `idempotency-jdbc` optional for the connection resolver. It is
   transport-neutral: nothing from `jakarta.servlet` may appear in it.
-- `spring/idempotency-spring-web` is `idempotency-spring` plus Spring Web MVC and Jackson.
+- `spring/idempotency-spring-web` is `idempotency-spring` plus Spring Web MVC.
 - `spring/idempotency-spring-boot-starter` requires the two Spring modules and lists every
   provider as optional. It contains autoconfiguration only.
 
