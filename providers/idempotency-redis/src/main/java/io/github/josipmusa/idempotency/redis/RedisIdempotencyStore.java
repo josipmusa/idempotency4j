@@ -15,9 +15,8 @@
  */
 package io.github.josipmusa.idempotency.redis;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.josipmusa.idempotency.core.AcquireResult;
+import io.github.josipmusa.idempotency.core.AttributeJson;
 import io.github.josipmusa.idempotency.core.IdempotencyContext;
 import io.github.josipmusa.idempotency.core.IdempotencyIdentity;
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
@@ -39,7 +38,6 @@ import io.lettuce.core.api.sync.RedisCommands;
 import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.codec.RedisCodec;
 import io.lettuce.core.codec.StringCodec;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -103,8 +101,6 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     static final String FORMAT_VERSION = "2";
 
     private static final long MAX_POLL_INTERVAL_MS = 1_000;
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final TypeReference<Map<String, String>> ATTRIBUTES_TYPE = new TypeReference<>() {};
 
     /**
      * KEYS: record. ARGV: lease duration, TTL, grace, fingerprint, lease id, owner, format.
@@ -655,11 +651,7 @@ public class RedisIdempotencyStore implements IdempotencyStore {
     }
 
     static byte[] attributesToJson(Map<String, String> attributes) {
-        try {
-            return OBJECT_MAPPER.writeValueAsBytes(attributes);
-        } catch (IOException e) {
-            throw new IdempotencyStoreException("Failed to serialize payload attributes to JSON", e);
-        }
+        return AttributeJson.encode(attributes).getBytes(StandardCharsets.UTF_8);
     }
 
     static Map<String, String> jsonToAttributes(byte[] json) {
@@ -667,8 +659,8 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             return Map.of();
         }
         try {
-            return OBJECT_MAPPER.readValue(json, ATTRIBUTES_TYPE);
-        } catch (IOException e) {
+            return AttributeJson.decode(new String(json, StandardCharsets.UTF_8));
+        } catch (IdempotencyCorruptRecordException e) {
             throw new IdempotencyCorruptRecordException("Stored Redis payload attributes are malformed", e);
         }
     }

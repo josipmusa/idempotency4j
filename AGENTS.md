@@ -57,7 +57,7 @@ Enforced by design, not tooling - do not violate them:
 - `providers/*`: depend on core only, no Spring.
 - `idempotency-test`: core plus JUnit. Holds both store contracts.
 - `spring/idempotency-spring`: core + `spring-context`, `spring-aop`, `spring-tx`, and optionally `spring-jdbc` with `idempotency-jdbc` for the connection resolver. Transport-neutral: `grep -rn "jakarta.servlet" spring/idempotency-spring/src` must stay empty.
-- `spring/idempotency-spring-web`: `idempotency-spring` + Spring Web, plus Jackson for the header map `StoredResponseCodec` carries in a payload attribute.
+- `spring/idempotency-spring-web`: `idempotency-spring` + Spring Web. No JSON library: the header map `StoredResponseCodec` carries in a payload attribute goes through core's `AttributeJson`, as do the stores' attribute columns.
 - `spring/idempotency-spring-boot-starter`: `idempotency-spring` and `idempotency-spring-web` required, every provider and `spring-jdbc` optional, autoconfiguration only. An optional provider dependency lets `@ConditionalOnClass` compile; it never drags a provider into an application that did not ask for one.
 
 ### The store contract

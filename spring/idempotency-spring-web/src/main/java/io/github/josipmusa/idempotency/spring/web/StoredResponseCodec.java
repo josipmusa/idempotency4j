@@ -15,9 +15,7 @@
  */
 package io.github.josipmusa.idempotency.spring.web;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.josipmusa.idempotency.core.AttributeJson;
 import io.github.josipmusa.idempotency.core.Payload;
 import io.github.josipmusa.idempotency.core.PayloadCodec;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyCorruptRecordException;
@@ -46,9 +44,6 @@ public final class StoredResponseCodec implements PayloadCodec<StoredResponse> {
 
     static final String ATTRIBUTE_STATUS = "status";
     static final String ATTRIBUTE_HEADERS = "headers";
-
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final TypeReference<Map<String, List<String>>> HEADERS_TYPE = new TypeReference<>() {};
 
     private final ResponseSanitizer sanitizer;
 
@@ -106,11 +101,7 @@ public final class StoredResponseCodec implements PayloadCodec<StoredResponse> {
     }
 
     private static String headersToJson(Map<String, List<String>> headers) {
-        try {
-            return OBJECT_MAPPER.writeValueAsString(headers);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Failed to serialize response headers to JSON", e);
-        }
+        return AttributeJson.encodeMultimap(headers);
     }
 
     private static Map<String, List<String>> jsonToHeaders(String json) {
@@ -118,8 +109,8 @@ public final class StoredResponseCodec implements PayloadCodec<StoredResponse> {
             return Map.of();
         }
         try {
-            return OBJECT_MAPPER.readValue(json, HEADERS_TYPE);
-        } catch (JsonProcessingException e) {
+            return AttributeJson.decodeMultimap(json);
+        } catch (IdempotencyCorruptRecordException e) {
             throw new IdempotencyCorruptRecordException("Stored HTTP response headers are malformed", e);
         }
     }
