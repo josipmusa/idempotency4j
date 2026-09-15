@@ -1,5 +1,9 @@
 name: Release
 
+# Runs when a vX.Y.Z tag is pushed. The tag must point at a commit prepared by
+# scripts/release.sh prepare, so the poms already carry the release version; the
+# check step refuses anything else before Maven Central is touched.
+
 on:
   push:
     tags:
@@ -17,10 +21,12 @@ jobs:
       MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 21
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           java-version: 21
           distribution: temurin
@@ -31,12 +37,8 @@ jobs:
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
-      - name: Set release version from tag
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "Releasing version $VERSION"
-          ./mvnw versions:set -DnewVersion=$VERSION --batch-mode --no-transfer-progress
-          ./mvnw versions:commit --batch-mode --no-transfer-progress
+      - name: Check the release is prepared
+        run: scripts/release.sh check "${GITHUB_REF_NAME#v}"
 
       - name: Verify
         run: ./mvnw verify --batch-mode --no-transfer-progress
@@ -48,7 +50,11 @@ jobs:
             --batch-mode \
             --no-transfer-progress
 
+      - name: Write release notes from the changelog
+        run: scripts/release.sh notes "${GITHUB_REF_NAME#v}" > "${RUNNER_TEMP}/release-notes.md"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
+          body_path: ${{ runner.temp }}/release-notes.md
           generate_release_notes: true

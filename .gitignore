@@ -41,5 +41,6 @@ docs/specs/
 
 .sdkmanrc
 
-# Claude config
-.claude/
+# Claude config, except the release skill, which is a tracked symlink into .agents/skills
+.claude/*
+!.claude/skills/

@@ -77,3 +77,11 @@ A change to how stores behave goes into the contract first, so every backend is 
 - Keep commit messages short and factual, in the imperative: "add H2 dialect", not "added".
 
 Before opening a PR, run `./mvnw spotless:apply` and `./mvnw verify`.
+
+## Releasing
+
+Releases are cut by the maintainer with `scripts/release.sh` and published by the Release
+workflow when the tag is pushed. The full process, including patch releases from a maintenance
+branch, is in `.agents/skills/release/SKILL.md`. Snapshots of `main` are published to
+Maven Central's snapshot repository on every push, at
+`https://central.sonatype.com/repository/maven-snapshots/`.

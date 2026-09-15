@@ -69,3 +69,8 @@ Enforced by design, not tooling - do not violate them:
 - Test naming: `When_<Context>_Expect_<Result>`.
 - Formatting is Palantir Java Format via Spotless; license headers are inserted by `spotless:apply`, never by hand.
 - Keep Javadoc on public API valid - release builds (`-Prelease`) run doclint and fail on malformed Javadoc.
+- `CHANGELOG.md` keeps a permanent `## [Unreleased]` section; a change a library user would notice adds its line there in the same PR.
+
+## Releasing
+
+Releases are tag-driven and only happen when the maintainer asks. The process is the `release` skill in `.agents/skills/release/SKILL.md` (`.claude/skills/release` is a symlink to it), and the mechanics are `scripts/release.sh`: `prepare X.Y.Z` cuts the changelog, sets the README and pom versions and tags; pushing the tag runs the Release workflow, which re-checks that commit with `scripts/release.sh check` before deploying; `next X.Y.Z` reopens development. The pom on `main` always carries the next planned version as a `-SNAPSHOT`, and CI publishes that snapshot to Central on every push to `main`. Never push a tag or change the version without being asked to release.
