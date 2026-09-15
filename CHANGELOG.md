@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-09-15
 
 This release reworks the library around a transport-neutral engine. Most public types changed
 shape, both storage layouts changed, and there is no data migration: see the upgrade notes at the
@@ -112,6 +112,10 @@ end of this section before upgrading a running deployment.
   UTC as well, so `completedAt` leaves the store as a real instant whatever the session time zone.
 - `idempotency-core` depends on `slf4j-api` so the engine can report a misbehaving listener and a
   swallowed completion failure. It remains free of framework dependencies.
+- `idempotency-jdbc`, `idempotency-redis` and `idempotency-spring-web` no longer depend on Jackson.
+  The attributes column and the stored header map go through `AttributeJson` in core, which reads
+  back everything earlier releases wrote, so the library no longer fixes a Jackson major version
+  for the application and the providers depend on core alone.
 
 ### Removed
 
@@ -209,6 +213,6 @@ end of this section before upgrading a running deployment.
 - Apache 2.0 license headers on all source files
 - Maven enforcer rules requiring Java 21+ and Maven 3.9+
 
-[Unreleased]: https://github.com/josipmusa/idempotency4j/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/josipmusa/idempotency4j/releases/tag/v0.3.0
 [0.2.0]: https://github.com/josipmusa/idempotency4j/releases/tag/v0.2.0
 [0.1.0]: https://github.com/josipmusa/idempotency4j/releases/tag/v0.1.0
