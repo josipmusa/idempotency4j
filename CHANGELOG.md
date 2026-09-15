@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-15
+
 ### Changed
 
 - **Breaking: Spring Boot 4 and Spring Framework 7 are now the baseline.** The adapters and the
@@ -229,7 +231,8 @@ end of this section before upgrading a running deployment.
 - Apache 2.0 license headers on all source files
 - Maven enforcer rules requiring Java 21+ and Maven 3.9+
 
-[Unreleased]: https://github.com/josipmusa/idempotency4j/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/josipmusa/idempotency4j/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/josipmusa/idempotency4j/releases/tag/v0.4.0
 [0.3.0]: https://github.com/josipmusa/idempotency4j/releases/tag/v0.3.0
 [0.2.0]: https://github.com/josipmusa/idempotency4j/releases/tag/v0.2.0
 [0.1.0]: https://github.com/josipmusa/idempotency4j/releases/tag/v0.1.0
