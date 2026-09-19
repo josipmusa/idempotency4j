@@ -26,7 +26,7 @@ Everything else is an adapter over that engine, and you take only the ones you w
 |---|---|
 | **Annotated methods** | `@Idempotent(key = "#event.id()")` on any Spring bean - a listener, a consumer, a service method |
 | **HTTP** | A servlet filter reading the `Idempotency-Key` header and replaying stored responses |
-| **Storage** | A three-method SPI, with JDBC, Redis, and in-memory implementations |
+| **Storage** | A five-method SPI, with JDBC, Redis, and in-memory implementations |
 
 You need this if callers retry - payment processing, order creation, resource provisioning, an
 at-least-once message broker - and a duplicate would cause a real problem: money charged twice, two
