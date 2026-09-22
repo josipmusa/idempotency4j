@@ -10,8 +10,11 @@
 **An idempotency engine for Java. Give a unit of work a key: it runs once, and every duplicate gets
 the stored result back.**
 
+**[Read the documentation →](https://josipmusa.github.io/idempotency4j-docs/)**
+
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.josipmusa/idempotency-spring-boot-starter?label=maven%20central)](https://central.sonatype.com/artifact/io.github.josipmusa/idempotency-spring-boot-starter)
 [![CI](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/josipmusa/idempotency4j/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-idempotency4j-e0562a)](https://josipmusa.github.io/idempotency4j-docs/)
 [![Javadoc](https://javadoc.io/badge2/io.github.josipmusa/idempotency-core/javadoc.svg)](https://javadoc.io/doc/io.github.josipmusa/idempotency-core)
 [![Java 21+](https://img.shields.io/badge/Java-21%2B-blue)](https://adoptium.net/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
