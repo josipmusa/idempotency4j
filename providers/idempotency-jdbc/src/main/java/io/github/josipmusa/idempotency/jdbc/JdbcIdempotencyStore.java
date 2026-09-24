@@ -250,8 +250,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     /**
      * Reports {@code true}: a JDBC store completes on whatever connection its
      * {@link ConnectionResolver} hands it, so a resolver that returns the caller's
-     * transaction-bound connection for {@link Operation#COMPLETE} makes the record commit with
-     * the caller's own writes.
+     * transaction-bound connection for {@link Operation#COMPLETE_IN_TRANSACTION} makes the
+     * record commit with the caller's own writes.
      *
      * @return {@code true}
      */
@@ -419,11 +419,26 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
+        complete(Operation.COMPLETE, identity, leaseId, payload, ttl);
+    }
+
+    /**
+     * Completes on whatever connection the {@link ConnectionResolver} returns for
+     * {@link Operation#COMPLETE_IN_TRANSACTION} - the caller's transaction-bound one, for a
+     * resolver that knows about transactions.
+     */
+    @Override
+    public void completeInTransaction(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
+        complete(Operation.COMPLETE_IN_TRANSACTION, identity, leaseId, payload, ttl);
+    }
+
+    private void complete(
+            Operation operation, IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
         Objects.requireNonNull(identity, "identity must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
         requirePositiveDuration(ttl, "ttl");
         try {
-            using(Operation.COMPLETE, conn -> {
+            using(operation, conn -> {
                 Instant now = currentTime(conn);
                 try (PreparedStatement ps = conn.prepareStatement(COMPLETE)) {
                     bindPayload(ps, payload);

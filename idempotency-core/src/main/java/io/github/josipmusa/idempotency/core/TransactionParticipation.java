@@ -18,9 +18,13 @@ package io.github.josipmusa.idempotency.core;
 /**
  * The engine's view of the caller's transaction, with no dependency on any transaction API.
  *
- * <p>{@link CompletionMode#JOIN_TRANSACTION} needs two things from whatever manages
- * transactions: to know whether one is running right now, and to be told when it finished.
- * That is the whole interface. A Spring implementation delegates to
+ * <p>The engine needs two things from whatever manages transactions: to know whether one is
+ * running right now, and to be told when it finished. That is the whole interface. It uses them
+ * for both completion modes - {@link CompletionMode#JOIN_TRANSACTION} writes the record inside
+ * the transaction and settles the terminal callback when it ends, and
+ * {@link CompletionMode#AUTONOMOUS} holds the record back until the transaction has committed.
+ * Neither needs anything from the store beyond what the mode itself asks for, so any store can
+ * be paired with a real implementation. A Spring implementation delegates to
  * {@code TransactionSynchronizationManager}; a test implementation records the callbacks and
  * fires them by hand.
  *
@@ -37,9 +41,9 @@ public interface TransactionParticipation {
     /**
      * Returns a participation that is never active.
      *
-     * <p>The engine's default. An engine holding it cannot run
-     * {@link CompletionMode#JOIN_TRANSACTION}: {@link #active()} is always {@code false}, so
-     * a context asking for it is rejected with an {@link IllegalStateException}.
+     * <p>The engine's default. {@link #active()} is always {@code false}, so every autonomous
+     * completion is recorded at once, and a context asking for
+     * {@link CompletionMode#JOIN_TRANSACTION} is rejected with an {@link IllegalStateException}.
      *
      * @return the no-transaction singleton
      */

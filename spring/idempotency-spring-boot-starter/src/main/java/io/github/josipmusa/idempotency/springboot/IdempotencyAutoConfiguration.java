@@ -115,26 +115,19 @@ public class IdempotencyAutoConfiguration {
     }
 
     /**
-     * Lets the engine see the caller's transaction, so {@code completion-mode=join-transaction}
-     * and {@code @Idempotent(completion = "join-transaction")} can commit the record with the
-     * business writes.
+     * Lets the engine see the caller's transaction, whatever the store.
      *
-     * <p>Supplied only for a store that can actually use it. Handing one to a store whose
-     * {@link IdempotencyStore#supportsTransactionalCompletion()} is {@code false} is an
-     * {@link IllegalArgumentException} from the engine's own constructor - which is exactly
-     * what should happen when the application asked for joined completion, and exactly what
-     * should not happen when it did not. So the participation is created when the store
-     * supports it, or when the application asked for joined completion and is therefore owed
-     * the engine's explanation of why that cannot work here.
+     * <p>An autonomous completion inside a transaction waits for it to commit, and a rollback
+     * frees the key instead - which any store can do, because the engine only needs to be told
+     * when the transaction ended. {@code completion-mode=join-transaction} and
+     * {@code @Idempotent(completion = "join-transaction")} additionally need a store that can
+     * enlist in the transaction; that is checked where the mode is asked for, not here.
      */
     @Bean
     @ConditionalOnClass(SpringTransactionParticipation.class)
     @ConditionalOnMissingBean(TransactionParticipation.class)
-    @ConditionalOnBean(IdempotencyStore.class)
-    TransactionParticipation idempotencyTransactionParticipation(IdempotencyStore store) {
-        return store.supportsTransactionalCompletion()
-                ? new SpringTransactionParticipation()
-                : TransactionParticipation.none();
+    TransactionParticipation idempotencyTransactionParticipation() {
+        return new SpringTransactionParticipation();
     }
 
     @Bean
@@ -156,9 +149,10 @@ public class IdempotencyAutoConfiguration {
     }
 
     /**
-     * The engine would refuse a {@code TransactionParticipation} for a store that cannot use
-     * one, but its message talks in engine terms. An application that set the property is
-     * told about the property.
+     * Fails the context for an application-wide {@code join-transaction} against a store that
+     * cannot enlist in a transaction. The engine would reject each such context on its own, but
+     * only on the first call and in engine terms; an application that set the property is told
+     * about the property, at startup.
      */
     private static void requireStoreSupportsDefaultCompletionMode(IdempotencyStore store, IdempotencyConfig config) {
         if (config.defaultCompletionMode() == CompletionMode.JOIN_TRANSACTION

@@ -24,19 +24,21 @@ import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 
 /**
- * A {@link ConnectionResolver} that runs {@link Operation#COMPLETE} on the caller's Spring
- * transaction and everything else on a connection of its own.
+ * A {@link ConnectionResolver} that runs {@link Operation#COMPLETE_IN_TRANSACTION} on the
+ * caller's Spring transaction and everything else on a connection of its own.
  *
  * <p>This is the JDBC half of {@link CompletionMode#JOIN_TRANSACTION}. When a transaction is
  * bound to the thread, {@link DataSourceUtils#getConnection(DataSource)} returns the very
  * connection the caller's own writes are going through, so the inbox record joins them and
- * the two commit or roll back as one. With no transaction bound it returns a fresh
- * connection, which is exactly the autonomous behaviour.
+ * the two commit or roll back as one.
  *
  * <p>Every other operation deliberately bypasses the transaction. {@code ACQUIRE} and
- * {@code EXTEND} have to be visible to other callers the moment they run, and {@code RELEASE}
- * runs after the caller's transaction has already rolled back - joining it would either hide
- * the lease or roll the release back with it.
+ * {@code EXTEND} have to be visible to other callers the moment they run. {@code RELEASE}
+ * and an autonomous {@code COMPLETE} run from the transaction's completion callbacks, after it
+ * has rolled back or committed - and Spring keeps the finished transaction's connection bound
+ * to the thread until those callbacks return, so asking {@code DataSourceUtils} would hand
+ * back a connection whose transaction is already over. Joining it would either hide the write
+ * or lose it.
  *
  * <p>{@link #release(Connection)} hands the connection back the same way: through
  * {@link DataSourceUtils#releaseConnection(Connection, DataSource)}, which closes a connection
@@ -58,7 +60,9 @@ public class TransactionAwareConnectionResolver implements ConnectionResolver {
     @Override
     public Connection connectionFor(Operation operation) throws SQLException {
         Objects.requireNonNull(operation, "operation must not be null");
-        return operation == Operation.COMPLETE ? DataSourceUtils.getConnection(dataSource) : dataSource.getConnection();
+        return operation == Operation.COMPLETE_IN_TRANSACTION
+                ? DataSourceUtils.getConnection(dataSource)
+                : dataSource.getConnection();
     }
 
     @Override

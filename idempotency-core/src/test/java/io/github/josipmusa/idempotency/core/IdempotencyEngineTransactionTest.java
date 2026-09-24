@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -37,6 +38,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,8 +47,10 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.slf4j.LoggerFactory;
 
 /**
- * {@link CompletionMode#JOIN_TRANSACTION}: the completion rides the caller's transaction, and
- * so does the terminal callback.
+ * How the engine behaves around the caller's transaction. Under
+ * {@link CompletionMode#JOIN_TRANSACTION} the completion rides that transaction, and so does the
+ * terminal callback. Under {@link CompletionMode#AUTONOMOUS} the completion waits for it: the
+ * record is written once the transaction has committed, and a rollback frees the key.
  */
 class IdempotencyEngineTransactionTest {
 
@@ -101,7 +105,9 @@ class IdempotencyEngineTransactionTest {
         Outcome<Void> outcome = engine(store, transaction).execute(context, () -> {});
 
         assertThat(outcome).isInstanceOf(Outcome.Executed.class);
-        verify(store).complete(eq(context.identity()), eq(LEASE_ID), eq(Payload.none()), eq(context.ttl()));
+        verify(store)
+                .completeInTransaction(eq(context.identity()), eq(LEASE_ID), eq(Payload.none()), eq(context.ttl()));
+        verify(store, never()).complete(any(), any(), any(), any());
         assertThat(listener.events).containsExactly("onAcquired");
 
         transaction.commit();
@@ -130,7 +136,7 @@ class IdempotencyEngineTransactionTest {
     void When_JoinedCompletionFailsUnderAnyPolicy_Expect_Propagated(CompletionFailurePolicy policy) {
         IdempotencyContext context = joinedContext("failing-complete-key");
         RuntimeException refused = new IdempotencyStoreException("refused");
-        doThrow(refused).when(store).complete(any(), any(), any(), any());
+        doThrow(refused).when(store).completeInTransaction(any(), any(), any(), any());
         transaction.begin();
 
         assertThatThrownBy(() -> engine(store, transaction, policy).execute(context, () -> {}))
@@ -142,7 +148,7 @@ class IdempotencyEngineTransactionTest {
     @Test
     void When_JoinedCompletionFailsAndTransactionRollsBack_Expect_ReleasedWithoutSecondTerminal() {
         IdempotencyContext context = joinedContext("failing-rollback-key");
-        doThrow(new IdempotencyStoreException("refused")).when(store).complete(any(), any(), any(), any());
+        doThrow(new IdempotencyStoreException("refused")).when(store).completeInTransaction(any(), any(), any(), any());
         transaction.begin();
 
         assertThatThrownBy(() -> engine(store, transaction).execute(context, () -> {}))
@@ -156,7 +162,7 @@ class IdempotencyEngineTransactionTest {
     @Test
     void When_JoinedCompletionFailsAndTransactionCommitsAnyway_Expect_LeaseLeftInPlace() {
         IdempotencyContext context = joinedContext("failing-commit-key");
-        doThrow(new IdempotencyStoreException("refused")).when(store).complete(any(), any(), any(), any());
+        doThrow(new IdempotencyStoreException("refused")).when(store).completeInTransaction(any(), any(), any(), any());
         transaction.begin();
 
         assertThatThrownBy(() -> engine(store, transaction).execute(context, () -> {}))
@@ -174,7 +180,9 @@ class IdempotencyEngineTransactionTest {
     @Test
     void When_JoinedCompletionLostItsLeaseAndTransactionRollsBack_Expect_NoWarning() {
         IdempotencyContext context = joinedContext("stolen-rollback-key");
-        doThrow(new IdempotencyLeaseLostException("stolen")).when(store).complete(any(), any(), any(), any());
+        doThrow(new IdempotencyLeaseLostException("stolen"))
+                .when(store)
+                .completeInTransaction(any(), any(), any(), any());
         doThrow(new IdempotencyLeaseLostException("stolen")).when(store).release(any(), any());
         transaction.begin();
         Logger engineLogger = (Logger) LoggerFactory.getLogger(IdempotencyEngine.class);
@@ -207,27 +215,176 @@ class IdempotencyEngineTransactionTest {
     }
 
     @Test
-    void When_JoinedModeOnNonTransactionalStore_Expect_RejectedAtConstruction() {
+    void When_JoinedModeOnNonTransactionalStore_Expect_IllegalStateBeforeAcquire() {
         IdempotencyStore plainStore = mock(IdempotencyStore.class);
+        IdempotencyContext context = joinedContext("plain-store-key");
+        transaction.begin();
 
-        assertThatThrownBy(() -> engine(plainStore, transaction))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("does not support transactional completion");
+        assertThatThrownBy(() -> engine(plainStore, transaction).execute(context, () -> {}))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("cannot complete inside a caller's transaction");
+
+        verify(plainStore, never()).tryAcquire(any());
     }
 
     @Test
-    void When_AutonomousModeOnTransactionalEngine_Expect_OnCompletedImmediately() throws Exception {
-        IdempotencyContext context = IdempotencyContext.builder(SCOPE, "autonomous-key")
-                .ttl(Duration.ofHours(1))
-                .leaseDuration(Duration.ofSeconds(5))
-                .waitTimeout(Duration.ZERO)
-                .build();
-        transaction.begin();
+    void When_AutonomousModeWithoutTransaction_Expect_CompletedImmediately() throws Exception {
+        IdempotencyContext context = autonomousContext("autonomous-key", Duration.ofSeconds(5));
 
         engine(store, transaction).execute(context, () -> {});
 
+        verify(store).complete(eq(context.identity()), eq(LEASE_ID), eq(Payload.none()), eq(context.ttl()));
         assertThat(listener.events).containsExactly("onAcquired", "onCompleted");
         assertThat(transaction.afterCommit).isEmpty();
+    }
+
+    @Test
+    void When_AutonomousModeInsideTransaction_Expect_CompletedOnlyAfterCommit() throws Exception {
+        IdempotencyContext context = autonomousContext("deferred-commit-key", Duration.ofSeconds(5));
+        transaction.begin();
+
+        Outcome<Void> outcome = engine(store, transaction).execute(context, () -> {});
+
+        assertThat(outcome).isInstanceOf(Outcome.Executed.class);
+        verify(store, never()).complete(any(), any(), any(), any());
+        assertThat(listener.events).containsExactly("onAcquired");
+
+        transaction.commit();
+
+        verify(store).complete(eq(context.identity()), eq(LEASE_ID), eq(Payload.none()), eq(context.ttl()));
+        verify(store, never()).completeInTransaction(any(), any(), any(), any());
+        verify(store, never()).release(any(), any());
+        assertThat(listener.events).containsExactly("onAcquired", "onCompleted");
+    }
+
+    @Test
+    void When_AutonomousModeInsideTransactionAndRollback_Expect_ReleasedAndOnFailedRollback() throws Exception {
+        IdempotencyContext context = autonomousContext("deferred-rollback-key", Duration.ofSeconds(5));
+        transaction.begin();
+
+        engine(store, transaction).execute(context, () -> {});
+        transaction.rollback();
+
+        verify(store, never()).complete(any(), any(), any(), any());
+        verify(store).release(context.identity(), LEASE_ID);
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:ROLLBACK");
+        assertThat(listener.lastCause).isInstanceOf(IdempotencyRollbackException.class);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CompletionFailurePolicy.class)
+    void When_DeferredCompletionFailsAfterCommit_Expect_OnFailedCompletionAndLeaseKept(CompletionFailurePolicy policy)
+            throws Exception {
+        IdempotencyContext context = autonomousContext("deferred-failure-key", Duration.ofSeconds(5));
+        doThrow(new IdempotencyStoreException("refused")).when(store).complete(any(), any(), any(), any());
+        transaction.begin();
+
+        Outcome<Void> outcome = engine(store, transaction, policy).execute(context, () -> {});
+        transaction.commit();
+
+        assertThat(outcome).isInstanceOf(Outcome.Executed.class);
+        verify(store, never()).release(any(), any());
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
+    }
+
+    @Test
+    void When_DeferredEncodingFails_Expect_CompletionFailureBeforeCommit() {
+        IdempotencyContext context = autonomousContext("deferred-encode-key", Duration.ofSeconds(5));
+        RuntimeException unencodable = new IllegalStateException("cannot encode");
+        PayloadCodec<String> codec = new PayloadCodec<>() {
+            @Override
+            public Payload encode(String value) {
+                throw unencodable;
+            }
+
+            @Override
+            public String decode(Payload payload) {
+                return null;
+            }
+        };
+        transaction.begin();
+
+        assertThatThrownBy(() -> engine(store, transaction).execute(context, () -> "value", codec))
+                .isSameAs(unencodable);
+
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
+        assertThat(transaction.afterCommit).isEmpty();
+        verify(store, never()).release(any(), any());
+    }
+
+    @Test
+    void When_AutonomousModeInsideTransaction_Expect_HeartbeatAliveUntilCommit() throws Exception {
+        AtomicInteger extensions = new AtomicInteger();
+        doAnswer(invocation -> extensions.incrementAndGet()).when(store).extendLock(any(), any(), any());
+        IdempotencyContext context = autonomousContext("deferred-heartbeat-key", Duration.ofMillis(100));
+        transaction.begin();
+
+        engine(store, transaction).execute(context, () -> {});
+        int afterReturn = extensions.get();
+        Thread.sleep(300);
+
+        assertThat(extensions.get())
+                .as("heartbeats while the transaction is still open")
+                .isGreaterThan(afterReturn);
+
+        transaction.commit();
+        int afterCommit = extensions.get();
+        Thread.sleep(300);
+
+        assertThat(extensions.get()).as("heartbeats after the commit").isEqualTo(afterCommit);
+    }
+
+    @Test
+    void When_AutonomousModeInsideTransactionAndRollback_Expect_HeartbeatStopped() throws Exception {
+        AtomicInteger extensions = new AtomicInteger();
+        doAnswer(invocation -> extensions.incrementAndGet()).when(store).extendLock(any(), any(), any());
+        IdempotencyContext context = autonomousContext("deferred-rollback-heartbeat-key", Duration.ofMillis(100));
+        transaction.begin();
+
+        engine(store, transaction).execute(context, () -> {});
+        transaction.rollback();
+        int afterRollback = extensions.get();
+        Thread.sleep(300);
+
+        assertThat(extensions.get()).as("heartbeats after the rollback").isEqualTo(afterRollback);
+    }
+
+    @Test
+    void When_ActionEndsTheTransactionItself_Expect_CompletedImmediately() throws Exception {
+        IdempotencyContext context = autonomousContext("self-committing-key", Duration.ofSeconds(5));
+
+        engine(store, transaction).execute(context, () -> {
+            transaction.begin();
+            transaction.commit();
+        });
+
+        verify(store).complete(eq(context.identity()), eq(LEASE_ID), eq(Payload.none()), eq(context.ttl()));
+        assertThat(listener.events).containsExactly("onAcquired", "onCompleted");
+    }
+
+    @Test
+    void When_NonTransactionalStoreInsideTransaction_Expect_CompletionStillDeferred() throws Exception {
+        IdempotencyStore plainStore = mock(IdempotencyStore.class);
+        when(plainStore.tryAcquire(any())).thenReturn(AcquireResult.acquired(LEASE_ID));
+        IdempotencyContext context = autonomousContext("plain-deferred-key", Duration.ofSeconds(5));
+        transaction.begin();
+
+        engine(plainStore, transaction).execute(context, () -> {});
+        verify(plainStore, never()).complete(any(), any(), any(), any());
+
+        transaction.commit();
+
+        verify(plainStore).complete(eq(context.identity()), eq(LEASE_ID), eq(Payload.none()), eq(context.ttl()));
+        assertThat(listener.events).containsExactly("onAcquired", "onCompleted");
+    }
+
+    private static IdempotencyContext autonomousContext(String key, Duration lease) {
+        return IdempotencyContext.builder(SCOPE, key)
+                .ttl(Duration.ofHours(1))
+                .leaseDuration(lease)
+                .waitTimeout(Duration.ZERO)
+                .completionMode(CompletionMode.AUTONOMOUS)
+                .build();
     }
 
     /** Records callbacks so a test can assert the order the engine fired them in. */

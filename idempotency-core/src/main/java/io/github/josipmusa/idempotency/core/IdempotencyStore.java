@@ -127,6 +127,12 @@ public interface IdempotencyStore {
      * {@link AcquireResult.Duplicate#completedAt()}; completion time is the store's to
      * determine, not the caller's.
      *
+     * <p>The completion is the store's own: it is durable, and visible to every other caller,
+     * the moment this returns, whatever transaction the calling thread happens to be in. The
+     * engine calls this for {@link CompletionMode#AUTONOMOUS}, and when a transaction is active
+     * it waits for that transaction to commit before calling it. A completion that should commit
+     * with the caller's writes goes through {@link #completeInTransaction} instead.
+     *
      * @param identity the identity acquired by a prior {@code tryAcquire}
      * @param leaseId  the lease returned by that successful {@code tryAcquire}
      * @param payload  what to store for duplicate replay
@@ -137,6 +143,35 @@ public interface IdempotencyStore {
      *         if the mutation was accepted but requested durability could not be confirmed
      */
     void complete(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl);
+
+    /**
+     * Transitions an IN_PROGRESS record to COMPLETE inside the transaction the calling thread
+     * is running in, so the record commits or rolls back with the caller's own writes.
+     *
+     * <p>The engine calls this for {@link CompletionMode#JOIN_TRANSACTION}, and only on a store
+     * whose {@link #supportsTransactionalCompletion()} is {@code true}. Until that transaction
+     * commits the completion is invisible to other callers, who still see the record as
+     * IN_PROGRESS; if it rolls back the record stays IN_PROGRESS with its lease, and the engine
+     * releases it. Everything else - the payload round-trip, {@code completedAt}, lease fencing -
+     * is exactly as for {@link #complete}.
+     *
+     * <p>The default throws, which is right for every store that cannot enlist in a caller's
+     * transaction. A store that overrides this must also report
+     * {@link #supportsTransactionalCompletion()} as {@code true}.
+     *
+     * @param identity the identity acquired by a prior {@code tryAcquire}
+     * @param leaseId  the lease returned by that successful {@code tryAcquire}
+     * @param payload  what to store for duplicate replay
+     * @param ttl      how long to keep the completed entry before expiry
+     * @throws UnsupportedOperationException if the store cannot complete inside a caller's
+     *         transaction
+     * @throws io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException
+     *         if the record does not exist, is not IN_PROGRESS, or is owned by a different lease
+     */
+    default void completeInTransaction(IdempotencyIdentity identity, String leaseId, Payload payload, Duration ttl) {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " cannot complete inside a caller's transaction");
+    }
 
     /**
      * Deletes an IN_PROGRESS record, allowing the key to be used again.
@@ -171,17 +206,18 @@ public interface IdempotencyStore {
     void extendLock(IdempotencyIdentity identity, String leaseId, Duration extension);
 
     /**
-     * Reports whether {@link #complete} can run inside a transaction the caller already
-     * opened, so the record and the caller's own writes commit together.
+     * Reports whether {@link #completeInTransaction} is supported: whether the record can
+     * commit together with the writes of a transaction the caller already opened.
      *
      * <p>A store returns {@code true} only when it can be handed the caller's transactional
      * resource - a JDBC store with a transaction-aware connection resolver can; an in-memory
      * map and Redis cannot, and never will. Defaults to {@code false}, so a store that says
      * nothing is assumed not to support it.
      *
-     * <p>When this is {@code false}, an {@link IdempotencyEngine} configured with a real
-     * {@link TransactionParticipation} is rejected at construction rather than failing on the
-     * first request.
+     * <p>This gates {@link CompletionMode#JOIN_TRANSACTION} alone. Any store can be handed a
+     * real {@link TransactionParticipation}: the engine uses it to defer an autonomous
+     * completion until the caller's transaction has committed, which needs nothing from the
+     * store.
      *
      * @return {@code true} if {@link CompletionMode#JOIN_TRANSACTION} is supported
      */

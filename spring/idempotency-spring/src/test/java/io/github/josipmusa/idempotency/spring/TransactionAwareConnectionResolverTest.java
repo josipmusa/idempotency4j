@@ -15,7 +15,7 @@
  */
 package io.github.josipmusa.idempotency.spring;
 
-import static io.github.josipmusa.idempotency.jdbc.ConnectionResolver.Operation.COMPLETE;
+import static io.github.josipmusa.idempotency.jdbc.ConnectionResolver.Operation.COMPLETE_IN_TRANSACTION;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
@@ -41,7 +41,7 @@ class TransactionAwareConnectionResolverTest {
         when(dataSource.getConnection()).thenReturn(connection);
         TransactionAwareConnectionResolver resolver = new TransactionAwareConnectionResolver(dataSource);
 
-        Connection resolved = resolver.connectionFor(COMPLETE);
+        Connection resolved = resolver.connectionFor(COMPLETE_IN_TRANSACTION);
         resolver.release(resolved);
 
         assertThat(resolved).isSameAs(connection);
@@ -49,17 +49,18 @@ class TransactionAwareConnectionResolverTest {
     }
 
     @Test
-    void When_OperationIsComplete_Expect_TransactionBoundConnectionLeftOpen() throws SQLException {
+    void When_OperationIsCompleteInTransaction_Expect_TransactionBoundConnectionLeftOpen() throws SQLException {
         Connection connection = mock(Connection.class);
         when(connection.getAutoCommit()).thenReturn(true);
         DataSource dataSource = mock(DataSource.class);
-        when(dataSource.getConnection()).thenReturn(connection);
+        // A second, different connection: resolving a fresh one instead of the bound one fails the test.
+        when(dataSource.getConnection()).thenReturn(connection, mock(Connection.class));
         TransactionAwareConnectionResolver resolver = new TransactionAwareConnectionResolver(dataSource);
         TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
 
         transactions.executeWithoutResult(status -> {
             try {
-                Connection resolved = resolver.connectionFor(COMPLETE);
+                Connection resolved = resolver.connectionFor(COMPLETE_IN_TRANSACTION);
                 assertThat(resolved).isSameAs(connection);
                 resolver.release(resolved);
                 verify(connection, never()).close();
@@ -72,7 +73,7 @@ class TransactionAwareConnectionResolverTest {
     }
 
     @Test
-    void When_OperationIsNotComplete_Expect_ConnectionOutsideTheTransaction() throws SQLException {
+    void When_OperationIsNotCompleteInTransaction_Expect_ConnectionOutsideTheTransaction() throws SQLException {
         Connection transactional = mock(Connection.class);
         when(transactional.getAutoCommit()).thenReturn(true);
         Connection fresh = mock(Connection.class);
@@ -82,7 +83,9 @@ class TransactionAwareConnectionResolverTest {
         TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
 
         transactions.executeWithoutResult(status -> {
-            for (Operation operation : new Operation[] {Operation.ACQUIRE, Operation.RELEASE, Operation.EXTEND}) {
+            for (Operation operation : new Operation[] {
+                Operation.ACQUIRE, Operation.COMPLETE, Operation.RELEASE, Operation.EXTEND, Operation.PURGE
+            }) {
                 try {
                     Connection resolved = resolver.connectionFor(operation);
                     assertThat(resolved).isSameAs(fresh);
@@ -94,6 +97,6 @@ class TransactionAwareConnectionResolverTest {
         });
 
         verify(fresh, never()).setAutoCommit(anyBoolean());
-        verify(fresh, times(3)).close();
+        verify(fresh, times(5)).close();
     }
 }

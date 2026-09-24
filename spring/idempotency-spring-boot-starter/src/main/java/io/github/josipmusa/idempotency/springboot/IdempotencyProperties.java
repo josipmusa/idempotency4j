@@ -37,8 +37,11 @@ public class IdempotencyProperties {
     private Duration defaultWait = Duration.ofSeconds(10);
 
     /**
-     * Whether an operation that does not choose for itself records its completion on its own
-     * or inside the transaction it is already running in.
+     * Whether an {@code @Idempotent} method that does not choose for itself records its
+     * completion on its own or inside the transaction it is already running in.
+     *
+     * <p>Applies to method-level operations only. The HTTP filter always completes on its own:
+     * it runs outside any transaction the handler opens, so there is nothing for it to join.
      */
     private CompletionMode completionMode = CompletionMode.AUTONOMOUS;
 
