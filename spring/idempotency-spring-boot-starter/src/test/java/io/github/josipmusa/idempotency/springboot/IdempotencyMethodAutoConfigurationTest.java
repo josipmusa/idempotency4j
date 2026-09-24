@@ -21,10 +21,12 @@ import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.inmemory.InMemoryIdempotencyStore;
 import io.github.josipmusa.idempotency.spring.Idempotent;
 import io.github.josipmusa.idempotency.spring.IdempotentAdvisor;
+import io.github.josipmusa.idempotency.spring.IdempotentBeanPostProcessor;
 import io.github.josipmusa.idempotency.spring.IdempotentMethodInterceptor;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.aop.AopAutoConfiguration;
 import org.springframework.boot.test.context.FilteredClassLoader;
@@ -42,28 +44,67 @@ class IdempotencyMethodAutoConfigurationTest {
                     IdempotencyMethodAutoConfiguration.class));
 
     @Test
-    void When_AopPresentAndStoreBeanPresent_Expect_AdvisorCreated() {
+    void When_AopPresentAndStoreBeanPresent_Expect_PostProcessorCreatedAndNoAdvisorBean() {
         contextRunner
                 .withBean(IdempotencyStore.class, InMemoryIdempotencyStore::new)
                 .run(context -> {
                     assertThat(context).hasSingleBean(IdempotentMethodInterceptor.class);
-                    assertThat(context).hasSingleBean(IdempotentAdvisor.class);
+                    assertThat(context).hasSingleBean(IdempotentBeanPostProcessor.class);
+                    // The auto-proxy creator would apply an advisor bean a second time.
+                    assertThat(context).doesNotHaveBean(IdempotentAdvisor.class);
                 });
     }
 
+    /** An application upgraded from 0.4 may still declare the advisor bean the starter used to. */
     @Test
-    void When_AopAbsent_Expect_AdvisorBacksOff() {
+    void When_ApplicationDeclaresItsOwnAdvisorBean_Expect_ContextFailsNamingThePostProcessor() {
         contextRunner
-                .withClassLoader(new FilteredClassLoader(IdempotentAdvisor.class))
+                .withBean(IdempotencyStore.class, InMemoryIdempotencyStore::new)
+                .withBean(
+                        IdempotentAdvisor.class,
+                        () -> new IdempotentAdvisor(() -> {
+                            throw new AssertionError("the advice must not be resolved");
+                        }))
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("IdempotentBeanPostProcessor"));
+    }
+
+    @Test
+    void When_ProxyTargetClassDisabled_Expect_InterfaceProxy() {
+        contextRunner
+                .withPropertyValues("spring.aop.proxy-target-class=false")
+                .withBean(IdempotencyStore.class, InMemoryIdempotencyStore::new)
+                .withUserConfiguration(InterfaceListenerConfig.class)
+                .run(context -> assertThat(AopUtils.isJdkDynamicProxy(context.getBean(Handler.class)))
+                        .isTrue());
+    }
+
+    @Test
+    void When_ProxyTargetClassLeftAtDefault_Expect_ClassProxy() {
+        contextRunner
+                .withBean(IdempotencyStore.class, InMemoryIdempotencyStore::new)
+                .withUserConfiguration(InterfaceListenerConfig.class)
+                .run(context -> assertThat(AopUtils.isCglibProxy(context.getBean(Handler.class)))
+                        .isTrue());
+    }
+
+    @Test
+    void When_IdempotencySpringAbsent_Expect_PostProcessorBacksOff() {
+        contextRunner
+                .withClassLoader(new FilteredClassLoader(IdempotentBeanPostProcessor.class))
                 .withBean(IdempotencyStore.class, InMemoryIdempotencyStore::new)
                 .run(context -> assertThat(context).doesNotHaveBean(IdempotentMethodInterceptor.class));
     }
 
     @Test
-    void When_NoStoreBeanPresent_Expect_AdvisorBacksOff() {
+    void When_NoStoreBeanPresent_Expect_PostProcessorBacksOff() {
         contextRunner.run(context -> {
             assertThat(context).doesNotHaveBean(IdempotentMethodInterceptor.class);
-            assertThat(context).doesNotHaveBean(IdempotentAdvisor.class);
+            assertThat(context).doesNotHaveBean(IdempotentBeanPostProcessor.class);
         });
     }
 
@@ -111,6 +152,26 @@ class IdempotencyMethodAutoConfigurationTest {
     static class JoinedListener {
 
         @Idempotent(key = "#messageId", completion = "join-transaction", waitTimeout = "PT0S")
+        public void on(String messageId) {}
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class InterfaceListenerConfig {
+
+        @Bean
+        InterfaceListener interfaceListener() {
+            return new InterfaceListener();
+        }
+    }
+
+    interface Handler {
+        void on(String messageId);
+    }
+
+    static class InterfaceListener implements Handler {
+
+        @Override
+        @Idempotent(key = "#messageId", waitTimeout = "PT0S")
         public void on(String messageId) {}
     }
 

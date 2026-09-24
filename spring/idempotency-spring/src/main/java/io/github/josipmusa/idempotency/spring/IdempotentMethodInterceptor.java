@@ -26,7 +26,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
@@ -38,9 +37,7 @@ import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.context.expression.MethodBasedEvaluationContext;
 import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.ParameterNameDiscoverer;
-import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.expression.EvaluationContext;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.ClassUtils;
 
 /**
@@ -56,9 +53,9 @@ import org.springframework.util.ClassUtils;
  * arguments, so {@link Idempotent#key()} is a SpEL expression evaluated over them. The scope
  * is the method itself, which keeps two consumers of the same message independent.
  *
- * <p>Wire it with {@link IdempotentAdvisor}, which also gets every annotated method
- * {@link IdempotentOperation resolved and validated} while the proxy is built - so a bad
- * annotation fails the context rather than the first message.
+ * <p>Wire it with {@link IdempotentBeanPostProcessor}, whose {@link IdempotentAdvisor} also gets
+ * every annotated method {@link IdempotentOperation resolved and validated} while the proxy is
+ * built - so a bad annotation fails the context rather than the first message.
  */
 public class IdempotentMethodInterceptor implements MethodInterceptor, BeanFactoryAware {
 
@@ -66,7 +63,6 @@ public class IdempotentMethodInterceptor implements MethodInterceptor, BeanFacto
     private final IdempotencyConfig config;
     private final OutcomeMapper outcomeMapper;
     private final Map<Method, IdempotentOperation> operations = new ConcurrentHashMap<>();
-    private final Set<Method> joinedTransactionalMethods = ConcurrentHashMap.newKeySet();
     private final ParameterNameDiscoverer parameterNames = new DefaultParameterNameDiscoverer();
 
     private BeanFactory beanFactory;
@@ -112,23 +108,6 @@ public class IdempotentMethodInterceptor implements MethodInterceptor, BeanFacto
         IdempotentOperation operation = operations.computeIfAbsent(
                 method, ignored -> IdempotentOperation.of(annotation, method, targetClass, config));
         requireStoreSupportsCompletionMode(operation, method);
-        if (operation.completionMode() == CompletionMode.JOIN_TRANSACTION && isTransactional(method, targetClass)) {
-            joinedTransactionalMethods.add(method);
-        }
-    }
-
-    /**
-     * The methods that ask for joined completion and open their own transaction with
-     * {@code @Transactional}. Their transaction advisor has to run ahead of the idempotency
-     * advisor, which {@link IdempotentAdvisor} verifies once every singleton exists.
-     */
-    Set<Method> joinedTransactionalMethods() {
-        return Set.copyOf(joinedTransactionalMethods);
-    }
-
-    private static boolean isTransactional(Method method, Class<?> targetClass) {
-        return AnnotatedElementUtils.hasAnnotation(method, Transactional.class)
-                || AnnotatedElementUtils.hasAnnotation(targetClass, Transactional.class);
     }
 
     /**

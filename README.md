@@ -325,6 +325,19 @@ Receipt settle(SettleCommand command) { ... }
 
 A `void` method needs none - there is nothing to replay - and must leave `codec` empty.
 
+The idempotency advice always runs *inside* any transaction the method has: it is applied by a bean
+post-processor that appends itself behind the advice a bean already carries, so a `@Transactional`
+method, a `@TransactionalEventListener`, or Spring Modulith's `@ApplicationModuleListener` is
+guarded from within its own transaction, whatever order the transaction advisor was given. That is
+what lets an autonomous completion wait for the commit, and a joined one write the record inside it.
+
+Budget your connection pool for it. Inside a transaction, each call briefly needs a second pooled
+connection next to the one its transaction holds - to acquire the key, run the heartbeat, record the
+completion or release the key. A pool no larger than the number of concurrent transactional
+`@Idempotent` calls can starve until the pool's own timeout gives up; size it above that, or put a
+`LazyConnectionDataSourceProxy` in front of the `DataSource` so a transaction takes its connection
+only when it first needs one.
+
 ## HTTP endpoints
 
 Clients send a key they generate themselves:
@@ -431,12 +444,10 @@ they are not:
   joined completion against a store that cannot give it fails the context at startup, whether the
   request came from `idempotency.completion-mode=join-transaction` or from a single
   `@Idempotent(completion = "join-transaction")`.
-- **A transaction must already be active when the method is entered.** The transaction advisor has
-  to run *outside* this one. Both default to `Ordered.LOWEST_PRECEDENCE`, which is a tie rather than
-  an order, so break it with `@EnableTransactionManagement(order = Ordered.HIGHEST_PRECEDENCE)`. A
-  `@Transactional` method that asks for joined completion while the transaction advisor is not
-  ordered ahead fails the context at startup with exactly that instruction. A joined context entered
-  without an active transaction at runtime is an `IllegalStateException`, not a silent downgrade.
+- **A transaction must be active when the method runs.** `@Transactional` on the method or its
+  class is enough: the idempotency advice runs inside it, with no ordering to configure. A joined
+  method with no transaction of its own relies on its caller's. A joined context entered without an
+  active transaction is an `IllegalStateException`, not a silent downgrade.
 - **The store needs the caller's connection.** The starter wires a
   `TransactionAwareConnectionResolver` into the JDBC store for you, which runs the joined completion
   on the transaction-bound connection and everything else, an autonomous completion included, on a
@@ -663,6 +674,10 @@ state. Prefix keys at the application level where that matters, for example `use
 **Redis Cluster is not supported.** The provider takes Lettuce's non-cluster
 `StatefulRedisConnection`, and its bounded SCAN purge is not node-aware. Standalone and Sentinel
 master-replica connections work.
+
+**Beans in a circular reference are not advised.** The advice is applied by a bean post-processor,
+which - like `@Async` - cannot reach a bean that was injected into its own dependency cycle before
+it was post-processed. Spring Boot forbids circular references by default.
 
 **Downstream side effects.** See [What this is not](#what-this-is-not).
 
