@@ -50,9 +50,27 @@ class IdempotencyMethodAutoConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasSingleBean(IdempotentMethodInterceptor.class);
                     assertThat(context).hasSingleBean(IdempotentBeanPostProcessor.class);
-                    // An advisor bean would be applied a second time by the auto-proxy creator.
+                    // The auto-proxy creator would apply an advisor bean a second time.
                     assertThat(context).doesNotHaveBean(IdempotentAdvisor.class);
                 });
+    }
+
+    /** An application upgraded from 0.4 may still declare the advisor bean the starter used to. */
+    @Test
+    void When_ApplicationDeclaresItsOwnAdvisorBean_Expect_ContextFailsNamingThePostProcessor() {
+        contextRunner
+                .withBean(IdempotencyStore.class, InMemoryIdempotencyStore::new)
+                .withBean(
+                        IdempotentAdvisor.class,
+                        () -> new IdempotentAdvisor(() -> {
+                            throw new AssertionError("the advice must not be resolved");
+                        }))
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("IdempotentBeanPostProcessor"));
     }
 
     @Test

@@ -33,8 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has, so it always runs inside the bean's transaction: `@Transactional` with
   `completion = "join-transaction"` works without `@EnableTransactionManagement(order = ...)`, and the
   startup check demanding that order is gone. Setting the order anyway is harmless. The starter no
-  longer registers an `IdempotentAdvisor` bean; **breaking** for an application that declared its own,
-  which must be removed or it will be applied a second time. Proxies follow
+  longer registers an `IdempotentAdvisor` bean, and an `IdempotentAdvisor` registered as a bean now
+  fails the context at startup; **breaking** for an application that declared its own, which must
+  remove it (or, without the starter, register `IdempotentBeanPostProcessor` instead). Proxies follow
   `spring.aop.proxy-target-class`. Inside a transaction every call briefly needs a second pooled
   connection, so size the pool above the number of concurrent transactional `@Idempotent` calls.
 - `idempotency.completion-mode` is documented as applying to `@Idempotent` methods only. The HTTP

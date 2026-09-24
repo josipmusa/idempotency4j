@@ -27,6 +27,7 @@ import org.springframework.aop.Pointcut;
 import org.springframework.aop.support.AbstractPointcutAdvisor;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.aop.support.StaticMethodMatcherPointcut;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.core.annotation.MergedAnnotations;
 import org.springframework.util.function.SingletonSupplier;
@@ -47,8 +48,15 @@ import org.springframework.util.function.SingletonSupplier;
  * supplied lazily: it is resolved the first time a method matches, which keeps a post-processor
  * holding this advisor from pulling the engine, the store and its {@code DataSource} into
  * existence before the other post-processors are registered.
+ *
+ * <p>It must not be registered as a bean, and fails the context if it is. An auto-proxy creator
+ * applies every advisor bean at the advisor's order, which ties with the transaction advisor's,
+ * so whether the interceptor runs inside the transaction would come down to registration order.
+ * Next to {@link IdempotentBeanPostProcessor} it would also advise every method a second time,
+ * and the inner call would find the outer one's lease and report every call in flight. Adding it
+ * to a {@code ProxyFactory} by hand is fine.
  */
-public class IdempotentAdvisor extends AbstractPointcutAdvisor {
+public class IdempotentAdvisor extends AbstractPointcutAdvisor implements InitializingBean {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -85,6 +93,18 @@ public class IdempotentAdvisor extends AbstractPointcutAdvisor {
 
     private static Supplier<IdempotentMethodInterceptor> supplied(IdempotentMethodInterceptor interceptor) {
         return () -> interceptor;
+    }
+
+    /**
+     * Called only when the advisor is a bean, which is the one wiring it does not support.
+     *
+     * @throws IllegalStateException always
+     */
+    @Override
+    public void afterPropertiesSet() {
+        throw new IllegalStateException("IdempotentAdvisor must not be registered as a bean: an auto-proxy creator "
+                + "would apply it at an order that ties with the transaction advisor's. "
+                + "Register IdempotentBeanPostProcessor instead - the starter already does.");
     }
 
     @Override

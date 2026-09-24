@@ -132,9 +132,8 @@ class IdempotentMethodInterceptorTest {
                     IdempotentMethodInterceptor.class,
                     () -> new IdempotentMethodInterceptor(engine, IdempotencyConfig.defaults()));
             context.registerBean(
-                    IdempotentAdvisor.class,
-                    () -> new IdempotentAdvisor(context.getBean(IdempotentMethodInterceptor.class)));
-            context.registerBean(DefaultAdvisorAutoProxyCreator.class);
+                    IdempotentBeanPostProcessor.class,
+                    () -> new IdempotentBeanPostProcessor(() -> context.getBean(IdempotentMethodInterceptor.class)));
             context.registerBean(MissingCodecRecorder.class);
 
             assertThatThrownBy(context::refresh)
@@ -151,9 +150,8 @@ class IdempotentMethodInterceptorTest {
                     IdempotentMethodInterceptor.class,
                     () -> new IdempotentMethodInterceptor(engine, IdempotencyConfig.defaults()));
             context.registerBean(
-                    IdempotentAdvisor.class,
-                    () -> new IdempotentAdvisor(context.getBean(IdempotentMethodInterceptor.class)));
-            context.registerBean(DefaultAdvisorAutoProxyCreator.class);
+                    IdempotentBeanPostProcessor.class,
+                    () -> new IdempotentBeanPostProcessor(() -> context.getBean(IdempotentMethodInterceptor.class)));
             context.registerBean(Recorder.class, () -> recorder);
             context.refresh();
 
@@ -162,6 +160,30 @@ class IdempotentMethodInterceptorTest {
             service.handle("msg-1");
 
             assertThat(recorder.calls).containsExactly("msg-1");
+        }
+    }
+
+    /**
+     * The post-processor is the one supported wiring. An advisor bean would be applied by any
+     * auto-proxy creator at an order that ties with the transaction advisor's, and next to the
+     * post-processor it would advise every method twice.
+     */
+    @Test
+    void When_AdvisorRegisteredAsBean_Expect_ContextFailsNamingThePostProcessor() {
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(
+                    IdempotentMethodInterceptor.class,
+                    () -> new IdempotentMethodInterceptor(engine, IdempotencyConfig.defaults()));
+            context.registerBean(
+                    IdempotentAdvisor.class,
+                    () -> new IdempotentAdvisor(context.getBean(IdempotentMethodInterceptor.class)));
+            context.registerBean(DefaultAdvisorAutoProxyCreator.class);
+            context.registerBean(Recorder.class, () -> recorder);
+
+            assertThatThrownBy(context::refresh)
+                    .rootCause()
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("IdempotentBeanPostProcessor");
         }
     }
 
