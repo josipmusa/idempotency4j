@@ -19,12 +19,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.github.josipmusa.idempotency.core.exception.IdempotencyRollbackException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,6 +35,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * {@link CompletionMode#JOIN_TRANSACTION}: the completion rides the caller's transaction, and
@@ -64,8 +68,14 @@ class IdempotencyEngineTransactionTest {
     }
 
     private IdempotencyEngine engine(IdempotencyStore backing, TransactionParticipation participation) {
-        return new IdempotencyEngine(
-                backing, scheduler, List.of(listener), IdempotencyConfig.defaults(), participation);
+        return engine(backing, participation, CompletionFailurePolicy.PROPAGATE);
+    }
+
+    private IdempotencyEngine engine(
+            IdempotencyStore backing, TransactionParticipation participation, CompletionFailurePolicy policy) {
+        IdempotencyConfig config =
+                IdempotencyConfig.builder().completionFailurePolicy(policy).build();
+        return new IdempotencyEngine(backing, scheduler, List.of(listener), config, participation);
     }
 
     private static IdempotencyContext joinedContext(String key) {
@@ -107,6 +117,48 @@ class IdempotencyEngineTransactionTest {
         assertThat(listener.events).containsExactly("onAcquired", "onFailed:ROLLBACK");
         assertThat(listener.lastCause).isInstanceOf(IdempotencyRollbackException.class);
         verify(store).release(context.identity(), LEASE_ID);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CompletionFailurePolicy.class)
+    void When_JoinedCompletionFailsUnderAnyPolicy_Expect_Propagated(CompletionFailurePolicy policy) {
+        IdempotencyContext context = joinedContext("failing-complete-key");
+        RuntimeException refused = new IdempotencyStoreException("refused");
+        doThrow(refused).when(store).complete(any(), any(), any(), any());
+        transaction.begin();
+
+        assertThatThrownBy(() -> engine(store, transaction, policy).execute(context, () -> {}))
+                .isSameAs(refused);
+
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
+    }
+
+    @Test
+    void When_JoinedCompletionFailsAndTransactionRollsBack_Expect_ReleasedWithoutSecondTerminal() {
+        IdempotencyContext context = joinedContext("failing-rollback-key");
+        doThrow(new IdempotencyStoreException("refused")).when(store).complete(any(), any(), any(), any());
+        transaction.begin();
+
+        assertThatThrownBy(() -> engine(store, transaction).execute(context, () -> {}))
+                .isInstanceOf(IdempotencyStoreException.class);
+        transaction.rollback();
+
+        verify(store).release(context.identity(), LEASE_ID);
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
+    }
+
+    @Test
+    void When_JoinedCompletionFailsAndTransactionCommitsAnyway_Expect_LeaseLeftInPlace() {
+        IdempotencyContext context = joinedContext("failing-commit-key");
+        doThrow(new IdempotencyStoreException("refused")).when(store).complete(any(), any(), any(), any());
+        transaction.begin();
+
+        assertThatThrownBy(() -> engine(store, transaction).execute(context, () -> {}))
+                .isInstanceOf(IdempotencyStoreException.class);
+        transaction.commit();
+
+        verify(store, never()).release(any(), any());
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
     }
 
     @Test

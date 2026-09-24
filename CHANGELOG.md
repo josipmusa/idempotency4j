@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A joined completion that the store refuses now always propagates, even under `LOG_AND_RETURN` -
+  the starter's default - which used to return `Executed` and let the transaction commit the business
+  writes without the inbox record. When that transaction rolls back, the lease is released, so the
+  key is retryable at once instead of staying in flight until the lease expires.
+
 ## [0.4.0] - 2026-09-15
 
 ### Changed
