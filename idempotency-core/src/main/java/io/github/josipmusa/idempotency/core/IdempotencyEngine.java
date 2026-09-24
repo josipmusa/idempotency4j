@@ -424,10 +424,10 @@ public final class IdempotencyEngine {
         if (context.completionMode() != CompletionMode.JOIN_TRANSACTION) {
             return;
         }
-        // Ask the store first. A store that cannot enlist in a caller's transaction is wired
-        // with TransactionParticipation.none(), whose active() is always false - so checking
-        // the transaction first would blame the caller for a missing transaction it did in
-        // fact open, and send them hunting advisor ordering for a problem that is not there.
+        // Ask the store first. When both are missing, opening a transaction would not help, so
+        // the store is the problem worth naming. It also keeps the message honest for an engine
+        // built with TransactionParticipation.none(), whose active() is always false even inside
+        // a transaction the caller did open.
         if (!store.supportsTransactionalCompletion()) {
             throw new IllegalStateException("Context for " + context.identity()
                     + " asks for CompletionMode.JOIN_TRANSACTION but "
