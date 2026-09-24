@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the commit, and a rollback left the record in progress until its lease expired. This
   applies to every store, so the starter now wires `SpringTransactionParticipation` whatever the
   store, and the engine no longer rejects a `TransactionParticipation` for a store that cannot join
-  a transaction.
+  a transaction. One consequence: calling the same key twice inside one transaction, such as a
+  duplicate within a batch processed in a single transaction, no longer replays the first result.
+  The first record is still in progress when the second call arrives, so that call waits out its
+  `waitTimeout` and then reports in flight.
 - **Breaking for custom stores:** joined completion calls the new
   `IdempotencyStore.completeInTransaction`, and `complete` always means an autonomous write. The
   default implementation throws, so a store that cannot enlist in a transaction needs no change; a
