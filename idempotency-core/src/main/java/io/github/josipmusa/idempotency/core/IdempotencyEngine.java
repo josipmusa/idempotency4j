@@ -17,6 +17,7 @@ package io.github.josipmusa.idempotency.core;
 
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener.FailurePhase;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyRollbackException;
 import java.time.Duration;
 import java.time.Instant;
@@ -64,7 +65,11 @@ import org.slf4j.LoggerFactory;
  * <p>If the action succeeded but the completion could not be recorded, the lease is
  * <em>not</em> released: the work happened, so deleting the record would advertise a key
  * that was never used. What the engine does next is
- * {@link CompletionFailurePolicy the configured policy}.
+ * {@link CompletionFailurePolicy the configured policy}, except under
+ * {@link CompletionMode#JOIN_TRANSACTION}, where the failure always propagates: returning
+ * normally would let the caller's transaction commit its writes without the record, which is
+ * the one outcome joined completion exists to rule out. If that transaction then rolls back,
+ * the engine releases the lease, because the work it guarded is gone with it.
  *
  * <h2>Completion modes</h2>
  * <p>By default the completion is recorded on its own, the moment the action returns. A
@@ -186,8 +191,8 @@ public final class IdempotencyEngine {
      * @throws Exception if the action itself throws - the original exception propagates
      *         unchanged, and the record is deleted so the key can be retried. An
      *         {@link Error} is handled the same way and propagates too. A failure to record
-     *         the completion propagates only under
-     *         {@link CompletionFailurePolicy#PROPAGATE}
+     *         the completion propagates under {@link CompletionFailurePolicy#PROPAGATE}, and
+     *         always under {@link CompletionMode#JOIN_TRANSACTION}
      */
     public <T> Outcome<T> execute(IdempotencyContext context, ThrowingSupplier<T> action, PayloadCodec<T> codec)
             throws Exception {
@@ -226,7 +231,8 @@ public final class IdempotencyEngine {
      * @throws IdempotencyFingerprintMismatchException if the key was already used with a
      *         different request body
      * @throws Exception if the action itself throws, or if the completion could not be
-     *         recorded under {@link CompletionFailurePolicy#PROPAGATE}
+     *         recorded under {@link CompletionFailurePolicy#PROPAGATE} or
+     *         {@link CompletionMode#JOIN_TRANSACTION}
      */
     public Outcome<Void> execute(IdempotencyContext context, ThrowingRunnable action) throws Exception {
         Objects.requireNonNull(action, "action must not be null");
@@ -285,6 +291,9 @@ public final class IdempotencyEngine {
      * effects are durable, so deleting the record would advertise a key that was never used.
      * The record stays IN_PROGRESS until its lease expires, at which point a retry can steal
      * it and run the action again - which is the honest outcome, because nothing was recorded.
+     *
+     * <p>A joined completion failure ignores the policy and always propagates, and the lease is
+     * released if the caller's transaction rolls back - see {@link #releaseOnRollback}.
      */
     private <T> Outcome<T> complete(IdempotencyContext context, String leaseId, T value, PayloadCodec<T> codec) {
         Payload payload;
@@ -293,6 +302,10 @@ public final class IdempotencyEngine {
             store.complete(context.identity(), leaseId, payload, context.ttl());
         } catch (Exception e) {
             notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
+            if (context.completionMode() == CompletionMode.JOIN_TRANSACTION) {
+                releaseOnRollback(context, leaseId);
+                throw e;
+            }
             if (completionFailurePolicy == CompletionFailurePolicy.PROPAGATE) {
                 throw e;
             }
@@ -303,6 +316,9 @@ public final class IdempotencyEngine {
             return new Outcome.Executed<>(value);
         } catch (Throwable t) {
             notifyFailed(context, leaseId, t, FailurePhase.COMPLETION);
+            if (context.completionMode() == CompletionMode.JOIN_TRANSACTION) {
+                releaseOnRollback(context, leaseId);
+            }
             throw t;
         }
         if (context.completionMode() == CompletionMode.JOIN_TRANSACTION) {
@@ -375,6 +391,32 @@ public final class IdempotencyEngine {
             IdempotencyRollbackException rollback = new IdempotencyRollbackException(context.identity());
             releaseQuietly(context, leaseId, rollback);
             notifyFailed(context, leaseId, rollback, FailurePhase.ROLLBACK);
+        });
+    }
+
+    /**
+     * Frees the key of a joined completion the store refused, once the transaction rolls back.
+     *
+     * <p>The failure has already been reported as the lease's terminal, so this fires nothing.
+     * Without it the record would sit IN_PROGRESS until its lease expired, turning away every
+     * retry of work that, after the rollback, never happened. A caller that swallows the
+     * failure and commits anyway gets no release: its work is durable and the record honestly
+     * says nothing was recorded.
+     */
+    private void releaseOnRollback(IdempotencyContext context, String leaseId) {
+        transactions.afterRollback(() -> {
+            try {
+                store.release(context.identity(), leaseId);
+            } catch (IdempotencyLeaseLostException leaseLost) {
+                // The refusal was a lost lease, so another caller owns the key now: there is
+                // nothing of ours to release.
+                log.debug("Lease on {} was taken over before its transaction rolled back", context.identity());
+            } catch (Exception releaseFailure) {
+                log.warn(
+                        "Could not release {} after its transaction rolled back; it stays in flight until its lease expires",
+                        context.identity(),
+                        releaseFailure);
+            }
         });
     }
 

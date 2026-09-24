@@ -26,6 +26,12 @@ package io.github.josipmusa.idempotency.core;
  *
  * <p>Configured through {@link IdempotencyConfig.Builder#completionFailurePolicy}. The
  * default is {@link #PROPAGATE}.
+ *
+ * <p>The policy governs autonomous completions only. A
+ * {@link CompletionMode#JOIN_TRANSACTION} completion failure always propagates, whatever is
+ * configured: returning normally would let the caller's transaction commit its writes without
+ * the record, and joined completion exists to make that impossible. If the transaction then
+ * rolls back, the engine releases the lease, so the key is retryable at once.
  */
 public enum CompletionFailurePolicy {
 
