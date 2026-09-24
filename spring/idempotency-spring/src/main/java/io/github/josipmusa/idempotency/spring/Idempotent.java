@@ -112,8 +112,9 @@ public @interface Idempotent {
      * the same convention the durations above follow, so an application whose idempotent work
      * is all transactional sets the mode once in configuration rather than on every method.
      *
-     * <p>{@code "join-transaction"} needs an active transaction when the method is entered -
-     * put {@code @Transactional} outside this annotation's interceptor - and a store that
+     * <p>{@code "join-transaction"} needs an active transaction when the method runs -
+     * {@code @Transactional} on the method or its class is enough, because
+     * {@link IdempotentBeanPostProcessor} puts the interceptor inside it - and a store that
      * supports it. An unrecognised value is rejected at startup.
      *
      * @return the completion mode, or empty for {@link IdempotencyConfig#defaultCompletionMode()}

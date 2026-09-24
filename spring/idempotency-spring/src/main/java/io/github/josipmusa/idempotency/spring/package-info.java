@@ -8,10 +8,11 @@
  * <ul>
  *   <li>{@link io.github.josipmusa.idempotency.spring.Idempotent} — marks a method as running
  *       at most once per key, and is also what the HTTP filter reads for its durations.</li>
- *   <li>{@link io.github.josipmusa.idempotency.spring.IdempotentMethodInterceptor} and
- *       {@link io.github.josipmusa.idempotency.spring.IdempotentAdvisor} — the AOP half: they
- *       resolve the identity from the method's arguments and run the body through the
- *       engine.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.spring.IdempotentMethodInterceptor},
+ *       {@link io.github.josipmusa.idempotency.spring.IdempotentAdvisor} and
+ *       {@link io.github.josipmusa.idempotency.spring.IdempotentBeanPostProcessor} - the AOP
+ *       half: they resolve the identity from the method's arguments and run the body through
+ *       the engine, inside whatever transaction the bean's own advice opened.</li>
  *   <li>{@link io.github.josipmusa.idempotency.spring.OutcomeMapper} — turns the engine's
  *       {@link io.github.josipmusa.idempotency.core.Outcome} into a return value, throwing
  *       {@link io.github.josipmusa.idempotency.spring.IdempotencyInFlightException} when

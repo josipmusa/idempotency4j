@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction-bound connection - `COMPLETE` gets a fresh one like everything else.
   `TransactionalStoreContract` exercises `completeInTransaction` and adds the inverse cases for
   `complete`.
+- **`@Idempotent` methods are advised by a bean post-processor** instead of an advisor bean.
+  `IdempotentBeanPostProcessor` appends the idempotency advice behind whatever advice a bean already
+  has, so it always runs inside the bean's transaction: `@Transactional` with
+  `completion = "join-transaction"` works without `@EnableTransactionManagement(order = ...)`, and the
+  startup check demanding that order is gone. Setting the order anyway is harmless. The starter no
+  longer registers an `IdempotentAdvisor` bean; **breaking** for an application that declared its own,
+  which must be removed or it will be applied a second time. Proxies follow
+  `spring.aop.proxy-target-class`. Inside a transaction every call briefly needs a second pooled
+  connection, so size the pool above the number of concurrent transactional `@Idempotent` calls.
 - `idempotency.completion-mode` is documented as applying to `@Idempotent` methods only. The HTTP
   filter always completed on its own and still does.
 
