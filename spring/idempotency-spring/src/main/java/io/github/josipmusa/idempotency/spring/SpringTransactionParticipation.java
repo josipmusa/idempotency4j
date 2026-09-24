@@ -25,10 +25,10 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * The engine's view of a Spring-managed transaction, read from
  * {@link TransactionSynchronizationManager}.
  *
- * <p>Hand one to {@link io.github.josipmusa.idempotency.core.IdempotencyEngine} to let a
- * context ask for {@link CompletionMode#JOIN_TRANSACTION}: the inbox record is then written
- * inside whatever transaction {@code @Transactional} already opened, and the two commit
- * together.
+ * <p>Hand one to {@link io.github.josipmusa.idempotency.core.IdempotencyEngine} to make it
+ * see the transaction {@code @Transactional} opened. An autonomous completion then waits for
+ * that transaction to commit, and a context may ask for {@link CompletionMode#JOIN_TRANSACTION}:
+ * the inbox record is written inside the transaction, and the two commit together.
  *
  * <p>The instance is stateless and thread-safe - all state it reads is the thread-bound
  * state Spring's transaction infrastructure maintains.

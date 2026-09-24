@@ -25,7 +25,7 @@ import javax.sql.DataSource;
 /**
  * Runs {@link TransactionalStoreContract} against a {@link JdbcIdempotencyStore} whose
  * {@link ConnectionResolver} hands out one held connection - autocommit off - for
- * {@link Operation#COMPLETE}, and a fresh autocommit connection for everything else.
+ * {@link Operation#COMPLETE_IN_TRANSACTION}, and a fresh autocommit connection for everything else.
  *
  * <p>That resolver is the whole of what a transaction manager would otherwise provide, which
  * is the point: the store is unchanged, and only the resolver knows about the transaction.
@@ -58,14 +58,14 @@ abstract class JdbcTransactionalStoreContract extends TransactionalStoreContract
         return new HeldTransaction(held, resolver);
     }
 
-    /** Hands out the held transactional connection for {@code COMPLETE} and nothing else. */
+    /** Hands out the held transactional connection for {@code COMPLETE_IN_TRANSACTION} and nothing else. */
     private final class HeldConnectionResolver implements ConnectionResolver {
 
         private volatile Connection held;
 
         @Override
         public Connection connectionFor(Operation operation) throws SQLException {
-            if (operation == Operation.COMPLETE && held != null) {
+            if (operation == Operation.COMPLETE_IN_TRANSACTION && held != null) {
                 return held;
             }
             return dataSource().getConnection();

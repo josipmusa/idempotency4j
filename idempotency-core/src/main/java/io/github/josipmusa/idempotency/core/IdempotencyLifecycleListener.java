@@ -56,6 +56,13 @@ import java.time.Instant;
  *       it returns {@link Outcome.InFlight}.</li>
  *   <li>A fingerprint mismatch acquires no lease and fires nothing at all - the engine
  *       throws and the action never runs.</li>
+ *   <li>When the completion waits on the caller's transaction - always under
+ *       {@link CompletionMode#JOIN_TRANSACTION}, and under {@link CompletionMode#AUTONOMOUS}
+ *       whenever a transaction is active as the action returns - the terminal callback waits
+ *       with it: {@link #onCompleted} after the commit, or {@link #onFailed} with
+ *       {@link FailurePhase#ROLLBACK} after a rollback. It then fires from the transaction's
+ *       completion callback, still on the calling thread, after the engine has already
+ *       returned.</li>
  *   <li>{@code onAcquired} means the action is about to run. In the one case where
  *       the engine acquires a lease and abandons it before that (it could not start
  *       the heartbeat), it releases the lease and fires nothing at all, rather than
@@ -106,7 +113,8 @@ public interface IdempotencyLifecycleListener {
     /**
      * The store recorded the completion; the idempotent boundary closed cleanly.
      *
-     * <p>Fires after the store confirmed the transition to COMPLETE. Nothing more will
+     * <p>Fires after the store confirmed the transition to COMPLETE and it is durable - after
+     * the caller's transaction committed, when the completion waited on one. Nothing more will
      * happen under this lease.
      *
      * @param ctx     the context this execution ran under

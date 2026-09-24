@@ -32,7 +32,7 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 
 /**
- * What a store must do when {@code complete} runs inside a transaction the caller opened.
+ * What a store must do when it completes a record inside a transaction the caller opened.
  *
  * <p>Only stores whose {@link IdempotencyStore#supportsTransactionalCompletion()} is
  * {@code true} extend this - it is the second contract, not a replacement for
@@ -43,8 +43,13 @@ import org.junit.jupiter.api.Test;
  * completion, and a completion that rolled back never happened - the record goes back to being
  * IN_PROGRESS, exactly as if the action had never returned.
  *
- * <p>A subclass supplies the two halves of the harness: a store whose {@code COMPLETE} runs on
- * the transaction {@link #begin()} opens, and that {@code begin()} itself.
+ * <p>It covers both completions. {@link IdempotencyStore#completeInTransaction} rides the
+ * caller's transaction; plain {@link IdempotencyStore#complete} must not, even while one is open
+ * on the same thread, because the engine calls it once that transaction has already committed.
+ *
+ * <p>A subclass supplies the two halves of the harness: a store whose
+ * {@code completeInTransaction} runs on the transaction {@link #begin()} opens, and that
+ * {@code begin()} itself.
  */
 // Test methods follow the project's When_Context_Expect_Result convention. This class is a
 // JUnit base class that ships as a published artifact, so it lives in main sources and static
@@ -74,8 +79,9 @@ public abstract class TransactionalStoreContract {
     /**
      * Returns the store under test.
      *
-     * <p>It must be wired so that its {@code complete} runs on the transaction {@link #begin()}
-     * opened, and every other operation runs autonomously. The same instance must come back for
+     * <p>It must be wired so that its {@code completeInTransaction} runs on the transaction
+     * {@link #begin()} opened, and every other operation, {@code complete} included, runs
+     * autonomously. The same instance must come back for
      * the whole of one test.
      *
      * @return the store
@@ -83,7 +89,7 @@ public abstract class TransactionalStoreContract {
     protected abstract IdempotencyStore store();
 
     /**
-     * Opens a transaction that {@link #store()}'s {@code complete} will run inside.
+     * Opens a transaction that {@link #store()}'s {@code completeInTransaction} will run inside.
      *
      * @return a handle for finishing it
      * @throws Exception if the transaction could not be started
@@ -123,7 +129,7 @@ public abstract class TransactionalStoreContract {
         String leaseId = acquire(store, context);
 
         try (Transaction tx = begin()) {
-            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+            store.completeInTransaction(context.identity(), leaseId, samplePayload(), TTL);
             tx.commit();
         }
 
@@ -140,7 +146,7 @@ public abstract class TransactionalStoreContract {
         String leaseId = acquire(store, context);
 
         try (Transaction tx = begin()) {
-            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+            store.completeInTransaction(context.identity(), leaseId, samplePayload(), TTL);
             tx.rollback();
         }
 
@@ -156,7 +162,7 @@ public abstract class TransactionalStoreContract {
         String leaseId = acquire(store, context);
 
         try (Transaction tx = begin()) {
-            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+            store.completeInTransaction(context.identity(), leaseId, samplePayload(), TTL);
             tx.rollback();
         }
         store.release(context.identity(), leaseId);
@@ -164,6 +170,39 @@ public abstract class TransactionalStoreContract {
         AcquireResult second = store.tryAcquire(context("rollback-release-key"));
 
         assertThat(second).isInstanceOf(AcquireResult.Acquired.class);
+    }
+
+    @Test
+    void When_PlainCompleteWhileTransactionOpen_Expect_DuplicateVisibleAtOnce() throws Exception {
+        IdempotencyStore store = store();
+        IdempotencyContext context = context("plain-open-key");
+        String leaseId = acquire(store, context);
+
+        try (Transaction tx = begin()) {
+            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+
+            AcquireResult second = store.tryAcquire(contextWithoutWait("plain-open-key"));
+
+            assertThat(second).isInstanceOf(AcquireResult.Duplicate.class);
+            tx.commit();
+        }
+    }
+
+    @Test
+    void When_PlainCompleteWhileTransactionOpenAndRollback_Expect_CompletionSurvives() throws Exception {
+        IdempotencyStore store = store();
+        IdempotencyContext context = context("plain-rollback-key");
+        String leaseId = acquire(store, context);
+
+        try (Transaction tx = begin()) {
+            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+            tx.rollback();
+        }
+
+        AcquireResult second = store.tryAcquire(contextWithoutWait("plain-rollback-key"));
+
+        assertThat(second).isInstanceOf(AcquireResult.Duplicate.class);
+        assertThat(((AcquireResult.Duplicate) second).payload()).isEqualTo(samplePayload());
     }
 
     /**
@@ -182,7 +221,7 @@ public abstract class TransactionalStoreContract {
 
         ExecutorService other = Executors.newSingleThreadExecutor();
         try (Transaction tx = begin()) {
-            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+            store.completeInTransaction(context.identity(), leaseId, samplePayload(), TTL);
 
             Future<AcquireResult> pending = other.submit(() -> store.tryAcquire(contextWithoutWait("uncommitted-key")));
             assertNotDuplicate(resultWithin(pending, UNCOMMITTED_LOOK), "while the transaction was still open");
@@ -217,7 +256,7 @@ public abstract class TransactionalStoreContract {
 
         ExecutorService other = Executors.newSingleThreadExecutor();
         try (Transaction tx = begin()) {
-            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+            store.completeInTransaction(context.identity(), leaseId, samplePayload(), TTL);
 
             Future<AcquireResult> pending = other.submit(() -> store.tryAcquire(waiting));
             AcquireResult result = resultWithin(pending, BOUNDED_WAIT_ANSWER);

@@ -161,13 +161,17 @@ class IdempotencyAutoConfigurationTest {
                         .isInstanceOf(SpringTransactionParticipation.class));
     }
 
+    /**
+     * The participation is not only for joined completion: the engine also uses it to hold an
+     * autonomous completion back until the caller's transaction commits, which any store can do.
+     */
     @Test
-    void When_StoreDoesNotSupportTransactionalCompletion_Expect_NoParticipationAndEngineStillCreated() {
+    void When_StoreDoesNotSupportTransactionalCompletion_Expect_SpringTransactionParticipationStillWiredIn() {
         contextRunner
                 .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
                 .run(context -> {
                     assertThat(context.getBean(TransactionParticipation.class))
-                            .isSameAs(TransactionParticipation.none());
+                            .isInstanceOf(SpringTransactionParticipation.class);
                     assertThat(context).hasSingleBean(IdempotencyEngine.class);
                 });
     }

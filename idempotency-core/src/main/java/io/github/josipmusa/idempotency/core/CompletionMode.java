@@ -27,10 +27,16 @@ public enum CompletionMode {
     /**
      * The completion is recorded on its own, independently of anything the action touched.
      *
-     * <p>The record becomes COMPLETE the moment {@link IdempotencyStore#complete} returns.
-     * This is the default and the only mode a store that cannot enlist in a caller's
+     * <p>The record becomes COMPLETE when {@link IdempotencyStore#complete} returns, on the
+     * store's own connection. With no transaction active when the action returns, that is at
+     * once. With one active, the engine waits for it to commit first - the action's work is not
+     * durable until then, and a completion recorded earlier would replay work a rollback undid.
+     * A rollback releases the lease instead, and fires
+     * {@link IdempotencyLifecycleListener.FailurePhase#ROLLBACK}.
+     *
+     * <p>This is the default and the only mode a store that cannot enlist in a caller's
      * transaction supports. It leaves a window: if the process dies between the action's own
-     * commit and this one, the record stays IN_PROGRESS and a redelivery runs the action
+     * commit and the completion, the record stays IN_PROGRESS and a redelivery runs the action
      * again.
      */
     AUTONOMOUS,
@@ -39,8 +45,9 @@ public enum CompletionMode {
      * The completion is recorded inside the transaction the action is already running in, so
      * the record and the action's writes commit or roll back together.
      *
-     * <p>This closes the window {@link #AUTONOMOUS} leaves: a crash before the commit leaves
-     * neither the business writes nor a completed record, and a crash after it leaves both.
+     * <p>The engine records it through {@link IdempotencyStore#completeInTransaction}. This
+     * closes the window {@link #AUTONOMOUS} leaves: a crash before the commit leaves neither the
+     * business writes nor a completed record, and a crash after it leaves both.
      * It requires an active transaction at
      * {@link IdempotencyEngine#execute(IdempotencyContext, ThrowingSupplier, PayloadCodec)}
      * entry and a store whose

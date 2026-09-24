@@ -27,10 +27,11 @@ import javax.sql.DataSource;
  * itself has no opinion about transactions: it asks for a connection, runs its statement, and
  * hands the connection back. <strong>The resolver decides, the store obeys.</strong>
  *
- * <p>Only {@link Operation#COMPLETE} is expected to ever return a transaction-bound
- * connection. Everything else must run autonomously, because it either has to be visible to
- * other callers immediately ({@code ACQUIRE}, {@code EXTEND}) or runs after the caller's
- * transaction is already finished ({@code RELEASE} after a rollback).
+ * <p>Only {@link Operation#COMPLETE_IN_TRANSACTION} is expected to ever return a
+ * transaction-bound connection. Everything else must run autonomously, because it either has to
+ * be visible to other callers immediately ({@code ACQUIRE}, {@code EXTEND}, {@code COMPLETE}) or
+ * runs after the caller's transaction is already finished ({@code RELEASE} after a rollback,
+ * {@code COMPLETE} after a commit).
  *
  * <p>A store must never close or commit a connection it did not open, so it never calls
  * {@link Connection#close()} directly - it calls {@link #release(Connection)} and lets the
@@ -86,10 +87,18 @@ public interface ConnectionResolver {
         ACQUIRE,
 
         /**
-         * Recording the completion. The one operation that may run on the caller's
-         * transaction, which is what makes the record commit with the caller's own writes.
+         * Recording an autonomous completion. Must be autonomous: the store is told the record
+         * is durable the moment the statement returns, and it may run after the caller's
+         * transaction has already committed.
          */
         COMPLETE,
+
+        /**
+         * Recording a completion inside the caller's transaction. The one operation that may
+         * run on a transaction-bound connection, which is what makes the record commit with the
+         * caller's own writes.
+         */
+        COMPLETE_IN_TRANSACTION,
 
         /** Deleting the record after a failure or a rollback. Must be autonomous. */
         RELEASE,

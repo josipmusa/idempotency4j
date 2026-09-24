@@ -405,7 +405,10 @@ non-HTTP path has no response to replay, so an HTTP duplicate for that key gets 
 
 ## Completing inside your transaction
 
-By default the record is written on its own, the moment the action returns. That leaves a window: if
+By default the record is written on its own. When the method runs inside a transaction - its own
+`@Transactional`, or one a caller opened - the engine waits for that transaction: the record is
+written after the commit, and a rollback frees the key so a retry runs the action again. With no
+transaction, the record is written the moment the method returns. Either way that leaves a window: if
 the process dies between your transaction committing and the record being written, the record stays
 in progress and a redelivery runs the action again.
 
@@ -435,15 +438,17 @@ they are not:
   ordered ahead fails the context at startup with exactly that instruction. A joined context entered
   without an active transaction at runtime is an `IllegalStateException`, not a silent downgrade.
 - **The store needs the caller's connection.** The starter wires a
-  `TransactionAwareConnectionResolver` into the JDBC store for you, which runs `COMPLETE` on the
-  transaction-bound connection and everything else on a connection of its own.
+  `TransactionAwareConnectionResolver` into the JDBC store for you, which runs the joined completion
+  on the transaction-bound connection and everything else, an autonomous completion included, on a
+  connection of its own.
 
 Under joined completion the terminal lifecycle callback moves with the record: `onCompleted` fires
 after the commit, and a rollback releases the lease and fires `onFailed(..., ROLLBACK)`. Exactly one
 terminal still fires per lease, just later.
 
 Set `idempotency.completion-mode=join-transaction` to make it the application-wide default and leave
-`completion` off the individual annotations.
+`completion` off the individual annotations. The property applies to `@Idempotent` methods only: the
+HTTP filter runs outside any transaction a handler opens, so it always completes on its own.
 
 ## Storage backends
 
@@ -562,7 +567,7 @@ idempotency:
   default-ttl: PT24H              # How long a completed record stays replayable. Default: 24h
   default-lease: PT30S            # How long an acquisition is protected. Default: 30s
   default-wait: PT10S             # How long a second caller blocks. PT0S to not block. Default: 10s
-  completion-mode: autonomous     # autonomous | join-transaction. Default: autonomous
+  completion-mode: autonomous     # autonomous | join-transaction, for @Idempotent methods. Default: autonomous
   completion-failure-policy: log-and-return   # log-and-return | propagate. Default: log-and-return
   store-type: auto                # auto | jdbc | in-memory | none. Default: auto
 
@@ -635,8 +640,10 @@ The contract, in short:
   effects happened but a retry will most likely run them again.
 - A fingerprint mismatch acquires no lease and fires nothing. Heartbeat activity is not surfaced
   either.
-- Under `join-transaction`, the terminal callback moves with the record: `onCompleted` fires after
-  the commit, and a rollback fires `onFailed` with `FailurePhase.ROLLBACK`.
+- When the completion waits on a transaction - always under `join-transaction`, and under
+  `autonomous` whenever the method runs inside one - the terminal callback waits with it:
+  `onCompleted` fires after the commit, and a rollback fires `onFailed` with
+  `FailurePhase.ROLLBACK`.
 
 Outside Spring, pass the listeners to the engine directly:
 

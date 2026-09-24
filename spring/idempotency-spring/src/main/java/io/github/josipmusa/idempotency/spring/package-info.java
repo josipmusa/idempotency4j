@@ -18,8 +18,9 @@
  *       another caller holds the key.</li>
  *   <li>{@link io.github.josipmusa.idempotency.spring.SpringTransactionParticipation} and
  *       {@link io.github.josipmusa.idempotency.spring.TransactionAwareConnectionResolver} —
- *       what {@link io.github.josipmusa.idempotency.core.CompletionMode#JOIN_TRANSACTION}
- *       needs to write the inbox record inside the caller's own transaction.</li>
+ *       how the engine sees the caller's transaction: what an autonomous completion waits
+ *       for, and what {@link io.github.josipmusa.idempotency.core.CompletionMode#JOIN_TRANSACTION}
+ *       needs to write the inbox record inside it.</li>
  * </ul>
  */
 package io.github.josipmusa.idempotency.spring;

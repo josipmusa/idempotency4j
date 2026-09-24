@@ -52,7 +52,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 /**
  * The receiving-side guarantee, end to end: an {@code @Transactional} method whose inbox
  * record is written by the engine inside that same transaction, so the record and the
- * business write are one atomic unit.
+ * business write are one atomic unit - and, for an autonomous one, a record that is written
+ * only once that transaction has committed.
  */
 @Testcontainers
 class JoinedCompletionIntegrationTest {
@@ -62,6 +63,7 @@ class JoinedCompletionIntegrationTest {
             new PostgreSQLContainer<>("postgres:16").withDatabaseName("idempotency_joined");
 
     private static final String SCOPE = "OrderInbox.handle";
+    private static final String AUTONOMOUS_SCOPE = "OrderInbox.handleAutonomously";
 
     private ScheduledExecutorService scheduler;
     private AnnotationConfigApplicationContext context;
@@ -128,13 +130,46 @@ class JoinedCompletionIntegrationTest {
         assertThat(verificationStore.tryAcquire(probe("order-3"))).isInstanceOf(AcquireResult.Acquired.class);
     }
 
+    @Test
+    void When_AutonomousCompletionInsideTransactional_Expect_RecordAfterCommit() {
+        OrderInbox inbox = context.getBean(OrderInbox.class);
+
+        inbox.handleAutonomously("order-4");
+        inbox.handleAutonomously("order-4");
+
+        assertThat(inbox.handled()).containsExactly("order-4");
+        assertThat(orderCount("order-4")).isOne();
+        assertThat(verificationStore.tryAcquire(probe(AUTONOMOUS_SCOPE, "order-4")))
+                .isInstanceOf(AcquireResult.Duplicate.class);
+    }
+
+    /**
+     * The rollback undid the work, so the key must be free again at once. Before completions
+     * waited for the transaction, the record joined it, rolled back to IN_PROGRESS with it, and
+     * turned every retry away as in flight until the lease expired.
+     */
+    @Test
+    void When_AutonomousCompletionAndTransactionRollsBack_Expect_KeyRetryable() {
+        OrderInbox inbox = context.getBean(OrderInbox.class);
+
+        inbox.handleAutonomouslyThenRollBack("order-5");
+
+        assertThat(orderCount("order-5")).isZero();
+        assertThat(verificationStore.tryAcquire(probe(AUTONOMOUS_SCOPE, "order-5")))
+                .isInstanceOf(AcquireResult.Acquired.class);
+    }
+
     private int orderCount(String id) {
         Integer count = jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Integer.class, id);
         return count == null ? 0 : count;
     }
 
     private static IdempotencyContext probe(String key) {
-        return IdempotencyContext.builder(SCOPE, key).waitTimeout(Duration.ZERO).build();
+        return probe(SCOPE, key);
+    }
+
+    private static IdempotencyContext probe(String scope, String key) {
+        return IdempotencyContext.builder(scope, key).waitTimeout(Duration.ZERO).build();
     }
 
     @Configuration
@@ -200,6 +235,20 @@ class JoinedCompletionIntegrationTest {
         @Transactional
         @Idempotent(key = "#orderId", scope = SCOPE, completion = "join-transaction", waitTimeout = "PT0S")
         public void handleThenRollBack(String orderId) {
+            jdbc.update("INSERT INTO orders (id) VALUES (?)", orderId);
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+        }
+
+        @Transactional
+        @Idempotent(key = "#orderId", scope = AUTONOMOUS_SCOPE, waitTimeout = "PT0S")
+        public void handleAutonomously(String orderId) {
+            handled.add(orderId);
+            jdbc.update("INSERT INTO orders (id) VALUES (?)", orderId);
+        }
+
+        @Transactional
+        @Idempotent(key = "#orderId", scope = AUTONOMOUS_SCOPE, waitTimeout = "PT0S")
+        public void handleAutonomouslyThenRollBack(String orderId) {
             jdbc.update("INSERT INTO orders (id) VALUES (?)", orderId);
             TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
         }

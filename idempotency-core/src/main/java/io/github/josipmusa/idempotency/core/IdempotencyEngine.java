@@ -53,7 +53,8 @@ import org.slf4j.LoggerFactory;
  * <p>While the action runs, a background task calls {@link IdempotencyStore#extendLock} at
  * half the lease duration (e.g. every 5s for a 10s lease). This prevents the lease from
  * being stolen while the action is legitimately still running. The heartbeat is cancelled
- * in the {@code finally} block regardless of success or failure.
+ * once the lease's fate is settled: when the action fails, when the completion is recorded, or -
+ * for an autonomous completion waiting on the caller's transaction - when that transaction ends.
  *
  * <h2>Failure handling</h2>
  * <p>If the action throws anything at all - including an {@link Error} - the engine calls
@@ -72,13 +73,18 @@ import org.slf4j.LoggerFactory;
  * the engine releases the lease, because the work it guarded is gone with it.
  *
  * <h2>Completion modes</h2>
- * <p>By default the completion is recorded on its own, the moment the action returns. A
- * context asking for {@link CompletionMode#JOIN_TRANSACTION} instead has the engine call
- * {@code complete} inside the transaction the action is already running in, so the record and
- * the action's writes commit together and a crash in between leaves neither. That mode needs
- * an active transaction at entry - the engine throws {@link IllegalStateException} otherwise -
- * and a store that supports it, which the constructor checks. The terminal callback moves with
- * the record: {@code onCompleted} after the commit, or a release plus
+ * <p>By default the completion is recorded on its own. With no transaction active when the
+ * action returns, that happens at once. With one active, the engine waits for it: the record is
+ * written after the commit, and a rollback releases the lease instead - announcing a completion
+ * that a rollback then undid would replay work that never happened. A context asking for
+ * {@link CompletionMode#JOIN_TRANSACTION} instead has the engine call
+ * {@link IdempotencyStore#completeInTransaction} inside the transaction the action is running
+ * in, so the record and the action's writes commit together and a crash in between leaves
+ * neither. That mode needs an active transaction at entry and a store that supports it - the
+ * engine throws {@link IllegalStateException} otherwise, before acquiring anything.
+ *
+ * <p>Whenever the completion waits on a transaction, the terminal callback waits with it:
+ * {@code onCompleted} once the record is durable after the commit, or a release plus
  * {@link FailurePhase#ROLLBACK} after a rollback.
  *
  * <h2>Lifecycle callbacks</h2>
@@ -145,11 +151,11 @@ public final class IdempotencyEngine {
      * @param config       application defaults; the engine reads only
      *                     {@link IdempotencyConfig#completionFailurePolicy()} from it, because
      *                     everything else is already resolved into the context it is handed
-     * @param transactions how the engine sees the caller's transaction, for contexts asking
-     *                     for {@link CompletionMode#JOIN_TRANSACTION};
-     *                     {@link TransactionParticipation#none()} disables joined completion
-     * @throws IllegalArgumentException if a real {@code transactions} is supplied for a store
-     *         whose {@link IdempotencyStore#supportsTransactionalCompletion()} is {@code false}
+     * @param transactions how the engine sees the caller's transaction: it defers an autonomous
+     *                     completion until that transaction commits, and joins it for contexts
+     *                     asking for {@link CompletionMode#JOIN_TRANSACTION};
+     *                     {@link TransactionParticipation#none()} sees no transaction at all, so
+     *                     every completion is immediate and joined completion is unavailable
      */
     public IdempotencyEngine(
             IdempotencyStore store,
@@ -163,12 +169,6 @@ public final class IdempotencyEngine {
         this.completionFailurePolicy =
                 Objects.requireNonNull(config, "config must not be null").completionFailurePolicy();
         this.transactions = Objects.requireNonNull(transactions, "transactions must not be null");
-        if (transactions != TransactionParticipation.none() && !store.supportsTransactionalCompletion()) {
-            throw new IllegalArgumentException("Store " + store.getClass().getName()
-                    + " does not support transactional completion, so it cannot be given a "
-                    + "TransactionParticipation. Use TransactionParticipation.none(), or a store whose "
-                    + "supportsTransactionalCompletion() is true.");
-        }
     }
 
     /**
@@ -275,12 +275,15 @@ public final class IdempotencyEngine {
             value = action.get();
             extendLeaseForCompletion(context, leaseId);
         } catch (Throwable t) {
+            heartbeat.cancel(false);
             releaseQuietly(context, leaseId, t);
             notifyFailed(context, leaseId, t, FailurePhase.ACTION);
             throw t;
-        } finally {
-            heartbeat.cancel(false);
         }
+        if (context.completionMode() == CompletionMode.AUTONOMOUS && transactions.active()) {
+            return completeAfterTransaction(context, leaseId, value, codec, heartbeat);
+        }
+        heartbeat.cancel(false);
         return complete(context, leaseId, value, codec);
     }
 
@@ -295,37 +298,118 @@ public final class IdempotencyEngine {
      * <p>A joined completion failure ignores the policy and always propagates, and the lease is
      * released if the caller's transaction rolls back - see {@link #releaseOnRollback}.
      */
-    private <T> Outcome<T> complete(IdempotencyContext context, String leaseId, T value, PayloadCodec<T> codec) {
+    private <T> Outcome<T> complete(IdempotencyContext context, String leaseId, T value, PayloadCodec<T> codec)
+            throws Exception {
+        boolean joined = context.completionMode() == CompletionMode.JOIN_TRANSACTION;
         Payload payload;
         try {
             payload = codec.encode(value);
-            store.complete(context.identity(), leaseId, payload, context.ttl());
+            if (joined) {
+                store.completeInTransaction(context.identity(), leaseId, payload, context.ttl());
+            } else {
+                store.complete(context.identity(), leaseId, payload, context.ttl());
+            }
         } catch (Exception e) {
             notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
-            if (context.completionMode() == CompletionMode.JOIN_TRANSACTION) {
+            if (joined) {
                 releaseOnRollback(context, leaseId);
                 throw e;
             }
-            if (completionFailurePolicy == CompletionFailurePolicy.PROPAGATE) {
-                throw e;
-            }
-            log.error(
-                    "Action for {} succeeded but its completion could not be recorded; storage state is indeterminate and a later duplicate will re-execute",
-                    context.identity(),
-                    e);
-            return new Outcome.Executed<>(value);
+            return afterCompletionFailure(context, value, e);
         } catch (Throwable t) {
             notifyFailed(context, leaseId, t, FailurePhase.COMPLETION);
-            if (context.completionMode() == CompletionMode.JOIN_TRANSACTION) {
+            if (joined) {
                 releaseOnRollback(context, leaseId);
             }
             throw t;
         }
-        if (context.completionMode() == CompletionMode.JOIN_TRANSACTION) {
+        if (joined) {
             deferTerminalToTransaction(context, leaseId, payload);
         } else {
             notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload));
         }
+        return new Outcome.Executed<>(value);
+    }
+
+    /**
+     * Records an autonomous completion once the caller's transaction has committed.
+     *
+     * <p>The action ran inside that transaction, so its work is not durable yet and a rollback
+     * can still undo it. Recording the completion now would advertise, to every later duplicate,
+     * work that may never happen. So the payload is encoded now - an encoding failure is an
+     * ordinary completion failure, reported while the caller can still see it - and written on
+     * the store's own connection after the commit. A rollback releases the lease instead, and the
+     * key is free to retry.
+     *
+     * <p>The heartbeat keeps running until then. The transaction can outlive the action by any
+     * amount, and a lease that lapsed in between could be stolen, running the action twice.
+     *
+     * <p>{@link Outcome.Executed} comes back straight away: the caller's answer does not change,
+     * only when the record becomes durable does.
+     */
+    private <T> Outcome<T> completeAfterTransaction(
+            IdempotencyContext context, String leaseId, T value, PayloadCodec<T> codec, ScheduledFuture<?> heartbeat)
+            throws Exception {
+        Payload payload;
+        try {
+            payload = codec.encode(value);
+            transactions.afterCommit(() -> recordAfterCommit(context, leaseId, payload, heartbeat));
+            transactions.afterRollback(() -> {
+                heartbeat.cancel(false);
+                releaseAfterRollback(context, leaseId);
+            });
+        } catch (Exception e) {
+            heartbeat.cancel(false);
+            notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
+            return afterCompletionFailure(context, value, e);
+        } catch (Throwable t) {
+            heartbeat.cancel(false);
+            notifyFailed(context, leaseId, t, FailurePhase.COMPLETION);
+            throw t;
+        }
+        return new Outcome.Executed<>(value);
+    }
+
+    /**
+     * Writes a deferred autonomous completion, from the transaction's after-commit callback.
+     *
+     * <p>A failure here has nowhere to propagate - the caller already has its answer - so it is
+     * logged and reported as {@link FailurePhase#COMPLETION} whatever the policy says. The lease
+     * is not released: the work committed, and the record stays IN_PROGRESS until the lease
+     * expires, exactly as for an immediate completion failure.
+     */
+    private void recordAfterCommit(
+            IdempotencyContext context, String leaseId, Payload payload, ScheduledFuture<?> heartbeat) {
+        heartbeat.cancel(false);
+        try {
+            store.complete(context.identity(), leaseId, payload, context.ttl());
+        } catch (Exception e) {
+            log.error(
+                    "Action for {} committed but its completion could not be recorded; a later duplicate will re-execute",
+                    context.identity(),
+                    e);
+            notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
+            return;
+        } catch (Throwable t) {
+            notifyFailed(context, leaseId, t, FailurePhase.COMPLETION);
+            throw t;
+        }
+        notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload));
+    }
+
+    /**
+     * Applies the {@link CompletionFailurePolicy} to an autonomous completion that failed while
+     * the caller is still waiting for its answer. The failure has already been reported.
+     */
+    private <T> Outcome<T> afterCompletionFailure(IdempotencyContext context, T value, Exception exception)
+            throws Exception {
+        if (completionFailurePolicy == CompletionFailurePolicy.PROPAGATE) {
+            throw exception;
+        }
+        log.error(
+                "Action for {} succeeded but its completion could not be recorded; storage state is indeterminate and a later duplicate will re-execute",
+                context.identity(),
+                exception);
         return new Outcome.Executed<>(value);
     }
 
@@ -340,10 +424,10 @@ public final class IdempotencyEngine {
         if (context.completionMode() != CompletionMode.JOIN_TRANSACTION) {
             return;
         }
-        // Ask the store first. A store that cannot enlist in a caller's transaction is wired
-        // with TransactionParticipation.none(), whose active() is always false - so checking
-        // the transaction first would blame the caller for a missing transaction it did in
-        // fact open, and send them hunting advisor ordering for a problem that is not there.
+        // Ask the store first. When both are missing, opening a transaction would not help, so
+        // the store is the problem worth naming. It also keeps the message honest for an engine
+        // built with TransactionParticipation.none(), whose active() is always false even inside
+        // a transaction the caller did open.
         if (!store.supportsTransactionalCompletion()) {
             throw new IllegalStateException("Context for " + context.identity()
                     + " asks for CompletionMode.JOIN_TRANSACTION but "
@@ -387,11 +471,19 @@ public final class IdempotencyEngine {
     private void deferTerminalToTransaction(IdempotencyContext context, String leaseId, Payload payload) {
         transactions.afterCommit(
                 () -> notify("onCompleted", context, listener -> listener.onCompleted(context, leaseId, payload)));
-        transactions.afterRollback(() -> {
-            IdempotencyRollbackException rollback = new IdempotencyRollbackException(context.identity());
-            releaseQuietly(context, leaseId, rollback);
-            notifyFailed(context, leaseId, rollback, FailurePhase.ROLLBACK);
-        });
+        transactions.afterRollback(() -> releaseAfterRollback(context, leaseId));
+    }
+
+    /**
+     * Frees the key of work a rollback undid and reports the lease's terminal.
+     *
+     * <p>Runs after the transaction has finished, so the release reaches the store on a
+     * connection of the store's own - the same autonomous path the action-failure release takes.
+     */
+    private void releaseAfterRollback(IdempotencyContext context, String leaseId) {
+        IdempotencyRollbackException rollback = new IdempotencyRollbackException(context.identity());
+        releaseQuietly(context, leaseId, rollback);
+        notifyFailed(context, leaseId, rollback, FailurePhase.ROLLBACK);
     }
 
     /**

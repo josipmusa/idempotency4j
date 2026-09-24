@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- An autonomous completion inside a transaction now waits for that transaction. The record is
+  written after the commit, on the store's own connection, and `onCompleted` fires then; a rollback
+  releases the lease and fires `onFailed(..., ROLLBACK)`, so the key is retryable at once. Before,
+  the completion quietly joined whatever transaction was bound to the thread: `onCompleted` fired
+  before the commit, and a rollback left the record in progress until its lease expired. This
+  applies to every store, so the starter now wires `SpringTransactionParticipation` whatever the
+  store, and the engine no longer rejects a `TransactionParticipation` for a store that cannot join
+  a transaction. One consequence: calling the same key twice inside one transaction, such as a
+  duplicate within a batch processed in a single transaction, no longer replays the first result.
+  The first record is still in progress when the second call arrives, so that call waits out its
+  `waitTimeout` and then reports in flight.
+- **Breaking for custom stores:** joined completion calls the new
+  `IdempotencyStore.completeInTransaction`, and `complete` always means an autonomous write. The
+  default implementation throws, so a store that cannot enlist in a transaction needs no change; a
+  custom transactional store must override it. `ConnectionResolver.Operation` gains
+  `COMPLETE_IN_TRANSACTION`, the one operation `TransactionAwareConnectionResolver` now runs on the
+  transaction-bound connection - `COMPLETE` gets a fresh one like everything else.
+  `TransactionalStoreContract` exercises `completeInTransaction` and adds the inverse cases for
+  `complete`.
+- `idempotency.completion-mode` is documented as applying to `@Idempotent` methods only. The HTTP
+  filter always completed on its own and still does.
+
 ### Fixed
 
 - A joined completion that the store refuses now always propagates, even under `LOG_AND_RETURN` -
