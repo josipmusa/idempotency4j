@@ -25,6 +25,11 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyRollbackException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyStoreException;
 import java.time.Duration;
@@ -37,6 +42,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.slf4j.LoggerFactory;
 
 /**
  * {@link CompletionMode#JOIN_TRANSACTION}: the completion rides the caller's transaction, and
@@ -159,6 +165,33 @@ class IdempotencyEngineTransactionTest {
 
         verify(store, never()).release(any(), any());
         assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
+    }
+
+    /**
+     * The completion was refused because another caller stole the lease. After the rollback that
+     * caller owns the key, so there is nothing to release and nothing to warn about.
+     */
+    @Test
+    void When_JoinedCompletionLostItsLeaseAndTransactionRollsBack_Expect_NoWarning() {
+        IdempotencyContext context = joinedContext("stolen-rollback-key");
+        doThrow(new IdempotencyLeaseLostException("stolen")).when(store).complete(any(), any(), any(), any());
+        doThrow(new IdempotencyLeaseLostException("stolen")).when(store).release(any(), any());
+        transaction.begin();
+        Logger engineLogger = (Logger) LoggerFactory.getLogger(IdempotencyEngine.class);
+        ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.start();
+        engineLogger.setLevel(Level.DEBUG);
+        engineLogger.addAppender(logs);
+        try {
+            assertThatThrownBy(() -> engine(store, transaction).execute(context, () -> {}))
+                    .isInstanceOf(IdempotencyLeaseLostException.class);
+            transaction.rollback();
+        } finally {
+            engineLogger.detachAppender(logs);
+            engineLogger.setLevel(Level.OFF);
+        }
+
+        assertThat(logs.list).noneMatch(event -> event.getLevel().isGreaterOrEqual(Level.WARN));
     }
 
     @Test

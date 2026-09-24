@@ -17,6 +17,7 @@ package io.github.josipmusa.idempotency.core;
 
 import io.github.josipmusa.idempotency.core.IdempotencyLifecycleListener.FailurePhase;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyFingerprintMismatchException;
+import io.github.josipmusa.idempotency.core.exception.IdempotencyLeaseLostException;
 import io.github.josipmusa.idempotency.core.exception.IdempotencyRollbackException;
 import java.time.Duration;
 import java.time.Instant;
@@ -406,6 +407,10 @@ public final class IdempotencyEngine {
         transactions.afterRollback(() -> {
             try {
                 store.release(context.identity(), leaseId);
+            } catch (IdempotencyLeaseLostException leaseLost) {
+                // The refusal was a lost lease, so another caller owns the key now: there is
+                // nothing of ours to release.
+                log.debug("Lease on {} was taken over before its transaction rolled back", context.identity());
             } catch (Exception releaseFailure) {
                 log.warn(
                         "Could not release {} after its transaction rolled back; it stays in flight until its lease expires",
