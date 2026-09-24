@@ -35,6 +35,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -112,6 +113,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
+
+    private static final long NANOS_PER_SECOND = TimeUnit.SECONDS.toNanos(1);
 
     private static final String DELETE_EXPIRED = "DELETE FROM idempotency_records "
             + "WHERE scope = ? AND idempotency_key = ? AND expires_at < ? AND status = 'COMPLETE'";
@@ -349,10 +352,20 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Every statement runs under a query timeout drawn from what is left of the wait budget,
+     * because a row can be locked by more than another acquirer: a completion inside a caller's
+     * transaction holds it until that transaction ends, and nothing bounds how long that is.
+     * JDBC counts query timeouts in whole seconds, so the wait may overshoot {@code waitTimeout}
+     * by up to one second.
+     */
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
         long startedAtNanos = System.nanoTime();
         long waitNanos = context.waitTimeout().toNanos();
+        long deadlineNanos = startedAtNanos + waitNanos;
         String leaseId = UUID.randomUUID().toString();
 
         // Fast path: evict any expired COMPLETE record for this identity, then insert a fresh
@@ -360,17 +373,19 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         // no explicit transaction. If a concurrent caller inserts between our DELETE and
         // INSERT, the INSERT throws a duplicate-key violation. The poll loop below handles
         // that correctly, so the lack of an explicit transaction here is intentional.
-        if (tryInsert(context, leaseId)) {
+        InsertResult inserted = tryInsert(context, leaseId, deadlineNanos);
+        if (inserted == InsertResult.INSERTED) {
             return AcquireResult.acquired(leaseId);
         }
 
         // Duplicate key — poll until we can acquire, the operation completes, or the wait
-        // budget runs out. A zero wait still takes one look: the loop body runs at least once.
-        boolean firstAttempt = true;
+        // budget runs out. A zero wait still takes one look: the loop body runs at least once,
+        // unless the insert already spent that look waiting on a locked row.
+        boolean firstAttempt = inserted == InsertResult.EXISTS;
         Duration remainingLease = Duration.ZERO;
         while (firstAttempt || System.nanoTime() - startedAtNanos < waitNanos) {
             firstAttempt = false;
-            RowInspection inspection = inspectRow(context, leaseId);
+            RowInspection inspection = inspectRow(context, leaseId, deadlineNanos);
 
             if (inspection.result() != null) {
                 return inspection.result();
@@ -379,7 +394,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             if (inspection.rowGone()) {
                 // Row disappeared between our INSERT attempt and the SELECT FOR UPDATE.
                 // Retry the insert immediately — no sleep needed, the slot is free.
-                if (tryInsert(context, leaseId)) return AcquireResult.acquired(leaseId);
+                if (tryInsert(context, leaseId, deadlineNanos) == InsertResult.INSERTED) {
+                    return AcquireResult.acquired(leaseId);
+                }
                 continue; // someone else inserted first, loop back to poll
             }
 
@@ -528,28 +545,43 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
+    /** What the fast-path insert found. */
+    private enum InsertResult {
+        /** The row was inserted and the lease is ours. */
+        INSERTED,
+        /** A row already exists, or the insert lost a race; the poll loop takes a look. */
+        EXISTS,
+        /**
+         * The row is locked by an open transaction and the insert timed out waiting for it. That
+         * wait was the look a zero-wait caller is owed, so the poll loop need not take another.
+         */
+        LOCKED
+    }
+
     /**
      * Evicts an expired COMPLETE record for this identity, then attempts an INSERT of a fresh
      * IN_PROGRESS row.
      *
-     * @return {@code true} if the row was inserted (lock acquired), {@code false} if a row
-     *     already exists (duplicate key)
+     * @return whether the row was inserted, already exists, or is locked past the wait budget
      */
-    private boolean tryInsert(IdempotencyContext context, String leaseId) {
+    private InsertResult tryInsert(IdempotencyContext context, String leaseId, long deadlineNanos) {
         IdempotencyIdentity identity = context.identity();
         try {
             return using(Operation.ACQUIRE, conn -> {
                 Instant now = currentTime(conn);
-                try (PreparedStatement del = conn.prepareStatement(DELETE_EXPIRED)) {
+                try (PreparedStatement del = boundedStatement(conn, DELETE_EXPIRED, deadlineNanos)) {
                     bindIdentity(del, 1, identity);
                     setTimestamp(del, 3, now);
                     del.executeUpdate();
                 }
-                return insertRow(conn, context, leaseId, now);
+                return insertRow(conn, context, leaseId, now, deadlineNanos);
             });
         } catch (SQLException e) {
+            if (isLockWaitTimeout(e)) {
+                return InsertResult.LOCKED;
+            }
             if (isTransientRollback(e)) {
-                return false;
+                return InsertResult.EXISTS;
             }
             throw unavailable("perform initial acquire for " + identity, e);
         }
@@ -563,10 +595,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * concurrent delete of the same primary key. Both are a lost race, reported as
      * {@code false} so the poll loop re-inspects the row within the caller's wait timeout.
      *
-     * @return {@code true} if the row was inserted, {@code false} if the race was lost
+     * <p>A timeout means the existing row is held by an open transaction for longer than the
+     * wait budget allows, which the caller reports as in flight.
+     *
+     * @return whether the row was inserted, the race was lost, or the row is locked
      */
-    private boolean insertRow(Connection conn, IdempotencyContext context, String leaseId, Instant now) {
-        try (PreparedStatement ins = conn.prepareStatement(INSERT)) {
+    private InsertResult insertRow(
+            Connection conn, IdempotencyContext context, String leaseId, Instant now, long deadlineNanos)
+            throws SQLException {
+        try (PreparedStatement ins = boundedStatement(conn, INSERT, deadlineNanos)) {
             bindIdentity(ins, 1, context.identity());
             setTimestamp(ins, 3, now.plus(context.leaseDuration()));
             setTimestamp(ins, 4, now.plus(context.ttl()));
@@ -574,12 +611,15 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             ins.setString(6, leaseId);
             setTimestamp(ins, 7, now);
             ins.executeUpdate();
-            return true;
+            return InsertResult.INSERTED;
         } catch (SQLException e) {
+            if (isLockWaitTimeout(e)) {
+                return InsertResult.LOCKED;
+            }
             if (!isDuplicateKeyViolation(e) && !isTransientRollback(e)) {
                 throw unavailable("insert record for " + context.identity(), e);
             }
-            return false;
+            return InsertResult.EXISTS;
         }
     }
 
@@ -587,11 +627,11 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * Opens a {@code SELECT FOR UPDATE} transaction to inspect the current row state and
      * decide what to do next.
      */
-    private RowInspection inspectRow(IdempotencyContext context, String leaseId) {
+    private RowInspection inspectRow(IdempotencyContext context, String leaseId, long deadlineNanos) {
         try {
             return using(Operation.ACQUIRE, conn -> {
                 conn.setAutoCommit(false);
-                return inspectRowInTransaction(conn, context, leaseId);
+                return inspectRowInTransaction(conn, context, leaseId, deadlineNanos);
             });
         } catch (SQLException e) {
             throw unavailable("get connection for " + context.identity(), e);
@@ -601,11 +641,14 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     /**
      * Runs the inspection and commits it, translating a failure of the transaction itself. A
      * transient rollback (a deadlock or lock-wait timeout against a concurrent writer) is a
-     * lost race rather than a broken store, so the caller simply polls again.
+     * lost race rather than a broken store, so the caller simply polls again. So is a timeout
+     * waiting for the row lock: the row is held by an open transaction, and the poll loop decides
+     * whether the wait budget allows another look.
      */
-    private RowInspection inspectRowInTransaction(Connection conn, IdempotencyContext context, String leaseId) {
+    private RowInspection inspectRowInTransaction(
+            Connection conn, IdempotencyContext context, String leaseId, long deadlineNanos) {
         try {
-            RowInspection inspection = doInspectRow(conn, context, leaseId);
+            RowInspection inspection = doInspectRow(conn, context, leaseId, deadlineNanos);
             conn.commit();
             return inspection;
         } catch (IdempotencyStoreException e) {
@@ -613,7 +656,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             throw e;
         } catch (SQLException e) {
             rollbackQuietly(conn);
-            if (isTransientRollback(e)) {
+            if (isTransientRollback(e) || isLockWaitTimeout(e)) {
                 return RowInspection.keepPolling(Duration.ZERO);
             }
             throw unavailable("poll " + context.identity(), e);
@@ -622,9 +665,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    private RowInspection doInspectRow(Connection conn, IdempotencyContext context, String leaseId)
+    private RowInspection doInspectRow(Connection conn, IdempotencyContext context, String leaseId, long deadlineNanos)
             throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(SELECT_FOR_UPDATE)) {
+        try (PreparedStatement ps = boundedStatement(conn, SELECT_FOR_UPDATE, deadlineNanos)) {
             bindIdentity(ps, 1, context.identity());
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
@@ -645,7 +688,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
                 Instant now = currentTime(conn);
                 if (isStale(leaseExpiresTs, now)) {
-                    boolean stolen = tryStealLease(conn, context, leaseId, now);
+                    boolean stolen = tryStealLease(conn, context, leaseId, now, deadlineNanos);
                     return stolen
                             ? RowInspection.resolved(AcquireResult.acquired(leaseId))
                             : RowInspection.keepPolling(Duration.ZERO);
@@ -660,9 +703,10 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    private boolean tryStealLease(Connection conn, IdempotencyContext context, String leaseId, Instant now)
+    private boolean tryStealLease(
+            Connection conn, IdempotencyContext context, String leaseId, Instant now, long deadlineNanos)
             throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(STEAL_LEASE)) {
+        try (PreparedStatement ps = boundedStatement(conn, STEAL_LEASE, deadlineNanos)) {
             setTimestamp(ps, 1, now.plus(context.leaseDuration()));
             ps.setString(2, context.requestFingerprint());
             ps.setString(3, leaseId);
@@ -766,6 +810,39 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
     private static boolean isTransientRollback(SQLException e) {
         return e instanceof SQLTransactionRollbackException
                 || (e.getSQLState() != null && e.getSQLState().startsWith("40"));
+    }
+
+    /**
+     * Prepares an acquire-path statement that gives up once the wait budget is spent.
+     *
+     * <p>The timeout is what is left of the budget, rounded up to whole seconds - the only unit
+     * JDBC offers - and never less than one, because zero means no timeout at all.
+     */
+    private static PreparedStatement boundedStatement(Connection conn, String sql, long deadlineNanos)
+            throws SQLException {
+        PreparedStatement ps = conn.prepareStatement(sql);
+        try {
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            long seconds = Math.max(1, (remainingNanos + NANOS_PER_SECOND - 1) / NANOS_PER_SECOND);
+            ps.setQueryTimeout((int) Math.min(seconds, Integer.MAX_VALUE));
+            return ps;
+        } catch (SQLException e) {
+            ps.close();
+            throw e;
+        }
+    }
+
+    /**
+     * Whether an acquire-path statement gave up waiting for a lock - its query timeout fired, or
+     * the database's own lock timeout did.
+     *
+     * <p>Drivers disagree on how they say so: MySQL and H2 raise {@link SQLTimeoutException},
+     * PostgreSQL cancels the statement with SQL state {@code 57014}. Either way the row is held
+     * by an open transaction - typically a completion that has not committed yet - so the key is
+     * in flight, not the store unreachable.
+     */
+    private static boolean isLockWaitTimeout(SQLException e) {
+        return e instanceof SQLTimeoutException || "57014".equals(e.getSQLState());
     }
 
     private boolean isDuplicateKeyViolation(SQLException e) {

@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the starter's default - which used to return `Executed` and let the transaction commit the business
   writes without the inbox record. When that transaction rolls back, the lease is released, so the
   key is retryable at once instead of staying in flight until the lease expires.
+- The JDBC store no longer waits past `waitTimeout` for a record whose row another transaction holds,
+  typically a joined completion that has not committed yet. Every acquire statement now runs under a
+  query timeout drawn from the remaining wait budget, and a caller that runs out answers in flight.
+  JDBC counts query timeouts in whole seconds, so the wait can overshoot by up to one second. Before,
+  such a caller blocked until the other transaction finished, without limit on PostgreSQL, and H2's
+  own lock timeout surfaced as `IdempotencyStoreUnavailableException`.
 
 ## [0.4.0] - 2026-09-15
 

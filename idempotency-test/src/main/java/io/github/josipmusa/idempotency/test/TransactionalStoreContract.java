@@ -65,6 +65,13 @@ public abstract class TransactionalStoreContract {
     private static final Duration UNCOMMITTED_LOOK = Duration.ofMillis(500);
 
     /**
+     * How long a caller with a one-second wait budget may take to be answered while another
+     * transaction holds its record: the budget, up to a second of statement-timeout rounding,
+     * and slack for a loaded build machine.
+     */
+    private static final Duration BOUNDED_WAIT_ANSWER = Duration.ofSeconds(3);
+
+    /**
      * Returns the store under test.
      *
      * <p>It must be wired so that its {@code complete} runs on the transaction {@link #begin()}
@@ -183,6 +190,45 @@ public abstract class TransactionalStoreContract {
             tx.rollback();
 
             assertNotDuplicate(resultWithin(pending, Duration.ofSeconds(10)), "after the transaction rolled back");
+        } finally {
+            other.shutdownNow();
+        }
+    }
+
+    /**
+     * A caller that meets an uncommitted completion must still get its answer within its wait
+     * budget.
+     *
+     * <p>The open transaction holds the record's row, and nothing says when it will finish, so
+     * blocking on it until it does would let one slow transaction hold every duplicate far past
+     * the {@code waitTimeout} it asked for. The store may overshoot by a little - JDBC can only
+     * bound a statement in whole seconds - but it must come back, and it must say in flight.
+     */
+    @Test
+    void When_CompleteInsideOpenTransaction_Expect_OtherCallerAnsweredInFlightWithinItsWaitTimeout() throws Exception {
+        IdempotencyStore store = store();
+        IdempotencyContext context = context("bounded-wait-key");
+        String leaseId = acquire(store, context);
+        IdempotencyContext waiting = IdempotencyContext.builder(SCOPE, "bounded-wait-key")
+                .ttl(TTL)
+                .leaseDuration(Duration.ofSeconds(30))
+                .waitTimeout(Duration.ofSeconds(1))
+                .build();
+
+        ExecutorService other = Executors.newSingleThreadExecutor();
+        try (Transaction tx = begin()) {
+            store.complete(context.identity(), leaseId, samplePayload(), TTL);
+
+            Future<AcquireResult> pending = other.submit(() -> store.tryAcquire(waiting));
+            AcquireResult result = resultWithin(pending, BOUNDED_WAIT_ANSWER);
+
+            assertThat(result)
+                    .withFailMessage(
+                            "A caller with a 1s wait budget was still blocked on the open transaction after %s",
+                            BOUNDED_WAIT_ANSWER)
+                    .isNotNull();
+            assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
+            tx.rollback();
         } finally {
             other.shutdownNow();
         }
