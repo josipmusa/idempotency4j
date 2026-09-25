@@ -19,7 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a transaction. One consequence: calling the same key twice inside one transaction, such as a
   duplicate within a batch processed in a single transaction, no longer replays the first result.
   The first record is still in progress when the second call arrives, so that call waits out its
-  `waitTimeout` and then reports in flight.
+  `waitTimeout` and then reports in flight. When the method is itself `@Transactional`, that
+  exception also passes through its transaction interceptor, which marks the shared transaction
+  rollback-only: catching it does not save the batch, whose commit then fails with
+  `UnexpectedRollbackException`. Declare
+  `@Transactional(noRollbackFor = IdempotencyInFlightException.class)` on the method to keep the
+  rest of the batch.
 - **Breaking for custom stores:** joined completion calls the new
   `IdempotencyStore.completeInTransaction`, and `complete` always means an autonomous write. The
   default implementation throws, so a store that cannot enlist in a transaction needs no change; a
@@ -50,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The JDBC store no longer waits past `waitTimeout` for a record whose row another transaction holds,
   typically a joined completion that has not committed yet. Every acquire statement now runs under a
   query timeout drawn from the remaining wait budget, and a caller that runs out answers in flight.
-  JDBC counts query timeouts in whole seconds, so the wait can overshoot by up to one second. Before,
+  JDBC counts query timeouts in whole seconds, so the wait can overshoot by up to one second. H2
+  ignores the query timeout while it waits for a row lock and applies its own two-second lock
+  timeout instead, so on H2 the overshoot can reach two seconds, even with a zero wait. Before,
   such a caller blocked until the other transaction finished, without limit on PostgreSQL, and H2's
   own lock timeout surfaced as `IdempotencyStoreUnavailableException`.
 - A caller turned away because another transaction holds the record's row now gets the holder's

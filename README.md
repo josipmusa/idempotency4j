@@ -425,6 +425,13 @@ transaction, the record is written the moment the method returns. Either way tha
 the process dies between your transaction committing and the record being written, the record stays
 in progress and a redelivery runs the action again.
 
+Because the record is only complete after the commit, calling the same key twice inside one
+transaction - a duplicate within a batch processed in a single transaction - does not replay the
+first result: the second call waits out its `waitTimeout` and reports in flight. If the method is
+itself `@Transactional`, that exception marks the shared transaction rollback-only on its way out,
+so the batch's commit fails even when the caller catches it. Declare
+`@Transactional(noRollbackFor = IdempotencyInFlightException.class)` to keep the rest of the batch.
+
 `completion = "join-transaction"` closes it. The engine writes the record inside the transaction the
 method is already running in, so the record and your business writes commit together - a crash
 before the commit leaves neither, a crash after it leaves both.
