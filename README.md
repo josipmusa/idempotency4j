@@ -96,14 +96,14 @@ Add the Spring Boot starter and one storage backend:
 <dependency>
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency-spring-boot-starter</artifactId>
-    <version>0.4.0</version>
+    <version>0.5.0</version>
 </dependency>
 
 <!-- Pick one storage backend -->
 <dependency>
     <groupId>io.github.josipmusa</groupId>
     <artifactId>idempotency-jdbc</artifactId>
-    <version>0.4.0</version>
+    <version>0.5.0</version>
 </dependency>
 ```
 
@@ -115,7 +115,7 @@ Or import the BOM and omit the versions:
         <dependency>
             <groupId>io.github.josipmusa</groupId>
             <artifactId>idempotency-bom</artifactId>
-            <version>0.4.0</version>
+            <version>0.5.0</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
