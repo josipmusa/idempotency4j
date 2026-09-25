@@ -135,6 +135,9 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
             "SELECT status, lease_expires_at, payload_type, payload, attributes, completed_at, fingerprint "
                     + "FROM idempotency_records WHERE scope = ? AND idempotency_key = ? FOR UPDATE";
 
+    private static final String SELECT_LEASE =
+            "SELECT lease_expires_at FROM idempotency_records WHERE scope = ? AND idempotency_key = ?";
+
     private static final String SELECT_STATUS_AND_LEASE =
             "SELECT status, lease_id FROM idempotency_records WHERE scope = ? AND idempotency_key = ?";
 
@@ -167,7 +170,8 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      *   <li>{@code rowGone} true — row disappeared; retry insert immediately, no sleep</li>
      *   <li>both null/false — row is active IN_PROGRESS; sleep and poll again.
      *       {@code remainingLease} is how long the holder's lease still has to run, which
-     *       becomes {@code InFlight.retryAfter} if the wait budget runs out.</li>
+     *       becomes {@code InFlight.retryAfter} if the wait budget runs out, or {@code null}
+     *       when the row could not be read because another transaction holds it.</li>
      * </ul>
      */
     private record RowInspection(AcquireResult result, boolean rowGone, Duration remainingLease) {
@@ -181,6 +185,10 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
 
         static RowInspection keepPolling(Duration remainingLease) {
             return new RowInspection(null, false, remainingLease);
+        }
+
+        static RowInspection unreadable() {
+            return new RowInspection(null, false, null);
         }
     }
 
@@ -360,6 +368,10 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
      * transaction holds it until that transaction ends, and nothing bounds how long that is.
      * JDBC counts query timeouts in whole seconds, so the wait may overshoot {@code waitTimeout}
      * by up to one second.
+     *
+     * <p>When that transaction is what turned the caller away, {@code retryAfter} comes from the
+     * row's last committed version, read without waiting for the lock - see
+     * {@link #readRemainingLease}.
      */
     @Override
     public AcquireResult tryAcquire(IdempotencyContext context) {
@@ -382,7 +394,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         // budget runs out. A zero wait still takes one look: the loop body runs at least once,
         // unless the insert already spent that look waiting on a locked row.
         boolean firstAttempt = inserted == InsertResult.EXISTS;
-        Duration remainingLease = Duration.ZERO;
+        Duration remainingLease = null;
         while (firstAttempt || System.nanoTime() - startedAtNanos < waitNanos) {
             firstAttempt = false;
             RowInspection inspection = inspectRow(context, leaseId, deadlineNanos);
@@ -410,11 +422,39 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
                 TimeUnit.NANOSECONDS.sleep(Math.min(remainingNanos, TimeUnit.MILLISECONDS.toNanos(pollIntervalMs)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return AcquireResult.inFlight(remainingLease);
+                return AcquireResult.inFlight(remainingLease != null ? remainingLease : Duration.ZERO);
             }
         }
 
-        return AcquireResult.inFlight(remainingLease);
+        return AcquireResult.inFlight(remainingLease != null ? remainingLease : readRemainingLease(context));
+    }
+
+    /**
+     * Reads what is left of the holder's lease for a caller that could not lock the row to see it.
+     *
+     * <p>The row is held by an open transaction, typically a joined completion that has not
+     * committed yet. A plain read does not queue behind it: every database this store supports
+     * returns the row's last committed version, which carries the lease the holder took into its
+     * completion. The read is only a hint, so it is bounded to one second and any failure answers
+     * {@link Duration#ZERO}, as {@link AcquireResult.InFlight} allows a store that cannot tell.
+     */
+    private Duration readRemainingLease(IdempotencyContext context) {
+        try {
+            return using(Operation.ACQUIRE, conn -> {
+                try (PreparedStatement ps = conn.prepareStatement(SELECT_LEASE)) {
+                    ps.setQueryTimeout(1);
+                    bindIdentity(ps, 1, context.identity());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        return rs.next()
+                                ? remainingLease(getTimestamp(rs, "lease_expires_at"), currentTime(conn))
+                                : Duration.ZERO;
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            // The caller is in flight either way; losing the hint only costs it the back-off.
+            return Duration.ZERO;
+        }
     }
 
     @Override
@@ -672,7 +712,7 @@ public class JdbcIdempotencyStore implements IdempotencyStore {
         } catch (SQLException e) {
             rollbackQuietly(conn);
             if (isTransientRollback(e) || isLockWaitTimeout(e)) {
-                return RowInspection.keepPolling(Duration.ZERO);
+                return RowInspection.unreadable();
             }
             throw unavailable("poll " + context.identity(), e);
         } finally {

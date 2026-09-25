@@ -69,6 +69,7 @@ class JdbcAcquireRetryTest {
         PreparedStatement selectForUpdate = mock(PreparedStatement.class);
         when(selectForUpdate.executeQuery()).thenReturn(noRow);
         PreparedStatement other = mock(PreparedStatement.class);
+        when(other.executeQuery()).thenReturn(noRow);
         when(conn.prepareStatement(anyString())).thenAnswer(invocation -> {
             String sql = invocation.getArgument(0);
             if (sql.startsWith("INSERT")) {
