@@ -274,6 +274,41 @@ public abstract class TransactionalStoreContract {
     }
 
     /**
+     * A caller turned away by an uncommitted completion is told how much of the holder's lease is
+     * left, not zero.
+     *
+     * <p>The open transaction holds the row, so the store cannot lock it to read the lease. The
+     * committed version is still readable, and it carries the lease the holder took into its
+     * completion. Reporting zero instead would tell a consumer that feeds {@code retryAfter} into
+     * its back-off to come straight back, and it would keep coming back until the transaction
+     * ended.
+     */
+    @Test
+    void When_CompleteInsideOpenTransaction_Expect_InFlightCarriesHoldersRemainingLease() throws Exception {
+        IdempotencyStore store = store();
+        IdempotencyContext context = context("locked-lease-key");
+        String leaseId = acquire(store, context);
+
+        ExecutorService other = Executors.newSingleThreadExecutor();
+        try (Transaction tx = begin()) {
+            store.completeInTransaction(context.identity(), leaseId, samplePayload(), TTL);
+
+            Future<AcquireResult> pending =
+                    other.submit(() -> store.tryAcquire(contextWithoutWait("locked-lease-key")));
+            AcquireResult result = resultWithin(pending, BOUNDED_WAIT_ANSWER);
+
+            assertThat(result).isInstanceOf(AcquireResult.InFlight.class);
+            assertThat(((AcquireResult.InFlight) result).retryAfter())
+                    .as("retryAfter is what is left of the holder's 30s lease, read past the open transaction")
+                    .isPositive()
+                    .isLessThanOrEqualTo(Duration.ofSeconds(30));
+            tx.rollback();
+        } finally {
+            other.shutdownNow();
+        }
+    }
+
+    /**
      * Returns what the pending acquisition produced, or {@code null} if it is still blocked.
      *
      * <p>Still blocked is a pass, not a failure: a store is free to make the second caller wait

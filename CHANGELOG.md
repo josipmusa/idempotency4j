@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JDBC counts query timeouts in whole seconds, so the wait can overshoot by up to one second. Before,
   such a caller blocked until the other transaction finished, without limit on PostgreSQL, and H2's
   own lock timeout surfaced as `IdempotencyStoreUnavailableException`.
+- A caller turned away because another transaction holds the record's row now gets the holder's
+  remaining lease as `retryAfter`, read from the row's last committed version, instead of zero. A
+  consumer that used `retryAfter` as its back-off would otherwise redeliver immediately, over and
+  over, until that transaction ended.
 
 ## [0.4.0] - 2026-09-15
 
