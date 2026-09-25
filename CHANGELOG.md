@@ -7,63 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Completions now follow the caller's transaction: nothing is recorded as complete until the work
+commits, and a rollback frees the key. Two changes are breaking, for applications that declared
+their own `IdempotentAdvisor` bean and for custom transactional stores.
+
 ### Changed
 
-- An autonomous completion inside a transaction now waits for that transaction. The record is
-  written after the commit, on the store's own connection, and `onCompleted` fires then; a rollback
-  releases the lease and fires `onFailed(..., ROLLBACK)`, so the key is retryable at once. Before,
-  the completion quietly joined whatever transaction was bound to the thread: `onCompleted` fired
-  before the commit, and a rollback left the record in progress until its lease expired. This
-  applies to every store, so the starter now wires `SpringTransactionParticipation` whatever the
-  store, and the engine no longer rejects a `TransactionParticipation` for a store that cannot join
-  a transaction. One consequence: calling the same key twice inside one transaction, such as a
-  duplicate within a batch processed in a single transaction, no longer replays the first result.
-  The first record is still in progress when the second call arrives, so that call waits out its
-  `waitTimeout` and then reports in flight. When the method is itself `@Transactional`, that
-  exception also passes through its transaction interceptor, which marks the shared transaction
-  rollback-only: catching it does not save the batch, whose commit then fails with
-  `UnexpectedRollbackException`. Declare
-  `@Transactional(noRollbackFor = IdempotencyInFlightException.class)` on the method to keep the
-  rest of the batch.
+- **Breaking:** the starter no longer registers an `IdempotentAdvisor` bean, and an
+  `IdempotentAdvisor` declared as a bean now fails the context at startup. Remove it; without the
+  starter, register `IdempotentBeanPostProcessor` instead.
 - **Breaking for custom stores:** joined completion calls the new
   `IdempotencyStore.completeInTransaction`, and `complete` always means an autonomous write. The
-  default implementation throws, so a store that cannot enlist in a transaction needs no change; a
+  default implementation throws, so a store that cannot join a transaction needs no change, but a
   custom transactional store must override it. `ConnectionResolver.Operation` gains
-  `COMPLETE_IN_TRANSACTION`, the one operation `TransactionAwareConnectionResolver` now runs on the
-  transaction-bound connection - `COMPLETE` gets a fresh one like everything else.
-  `TransactionalStoreContract` exercises `completeInTransaction` and adds the inverse cases for
-  `complete`.
-- **`@Idempotent` methods are advised by a bean post-processor** instead of an advisor bean.
-  `IdempotentBeanPostProcessor` appends the idempotency advice behind whatever advice a bean already
-  has, so it always runs inside the bean's transaction: `@Transactional` with
-  `completion = "join-transaction"` works without `@EnableTransactionManagement(order = ...)`, and the
-  startup check demanding that order is gone. Setting the order anyway is harmless. The starter no
-  longer registers an `IdempotentAdvisor` bean, and an `IdempotentAdvisor` registered as a bean now
-  fails the context at startup; **breaking** for an application that declared its own, which must
-  remove it (or, without the starter, register `IdempotentBeanPostProcessor` instead). Proxies follow
-  `spring.aop.proxy-target-class`. Inside a transaction every call briefly needs a second pooled
-  connection, so size the pool above the number of concurrent transactional `@Idempotent` calls.
-- `idempotency.completion-mode` is documented as applying to `@Idempotent` methods only. The HTTP
-  filter always completed on its own and still does.
+  `COMPLETE_IN_TRANSACTION`, and `TransactionalStoreContract` covers the new method.
+- An autonomous completion inside a transaction is now written after that transaction commits, and
+  `onCompleted` fires then. A rollback releases the lease and fires `onFailed(..., ROLLBACK)`, so the
+  key can be retried at once. Before, the record was written inside whatever transaction was open,
+  so `onCompleted` fired before the commit and a rollback left the key in flight until its lease
+  expired. This applies to every store.
+- As a result, a second call with the same key inside one transaction no longer replays the first:
+  it waits out its `waitTimeout` and reports in flight. If the method is itself `@Transactional`,
+  declare `noRollbackFor = IdempotencyInFlightException.class`, or that exception rolls back the
+  whole transaction.
+- `@Idempotent` methods are advised by `IdempotentBeanPostProcessor`, which places the idempotency
+  advice inside the bean's own transaction. Joined completion on a `@Transactional` method no longer
+  needs `@EnableTransactionManagement(order = ...)`; keeping it is harmless. Inside a transaction
+  each call briefly uses a second pooled connection, so size the pool above the number of concurrent
+  transactional `@Idempotent` calls.
 
 ### Fixed
 
-- A joined completion that the store refuses now always propagates, even under `LOG_AND_RETURN` -
-  the starter's default - which used to return `Executed` and let the transaction commit the business
-  writes without the inbox record. When that transaction rolls back, the lease is released, so the
-  key is retryable at once instead of staying in flight until the lease expires.
-- The JDBC store no longer waits past `waitTimeout` for a record whose row another transaction holds,
-  typically a joined completion that has not committed yet. Every acquire statement now runs under a
-  query timeout drawn from the remaining wait budget, and a caller that runs out answers in flight.
-  JDBC counts query timeouts in whole seconds, so the wait can overshoot by up to one second. H2
-  ignores the query timeout while it waits for a row lock and applies its own two-second lock
-  timeout instead, so on H2 the overshoot can reach two seconds, even with a zero wait. Before,
-  such a caller blocked until the other transaction finished, without limit on PostgreSQL, and H2's
-  own lock timeout surfaced as `IdempotencyStoreUnavailableException`.
-- A caller turned away because another transaction holds the record's row now gets the holder's
-  remaining lease as `retryAfter`, read from the row's last committed version, instead of zero. A
-  consumer that used `retryAfter` as its back-off would otherwise redeliver immediately, over and
-  over, until that transaction ended.
+- A joined completion that the store refuses now always propagates, even under `LOG_AND_RETURN`,
+  the starter's default. Before, the caller got its result and the transaction committed the
+  business writes without the record. If the transaction then rolls back, the key is released at
+  once.
+- The JDBC store no longer blocks past `waitTimeout` when another transaction holds the record's
+  row, typically a joined completion that has not committed yet. The caller gets in flight, with the
+  holder's remaining lease as `retryAfter`. Query timeouts are whole seconds, so the wait can
+  overshoot by up to one second, or two on H2. Before, the caller waited for that transaction,
+  without limit on PostgreSQL, and H2 reported `IdempotencyStoreUnavailableException`.
 
 ## [0.4.0] - 2026-09-15
 
