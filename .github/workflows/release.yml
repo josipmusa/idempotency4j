@@ -31,9 +31,8 @@ jobs:
           java-version: 21
           distribution: temurin
           cache: maven
-          server-id: central
-          server-username: CENTRAL_USERNAME
-          server-password: CENTRAL_TOKEN
+          settings-path: .github/maven
+          overwrite-settings: false
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
@@ -45,7 +44,7 @@ jobs:
 
       - name: Deploy to Maven Central
         run: |
-          ./mvnw deploy -Prelease \
+          ./mvnw deploy -s .github/maven/settings.xml -Prelease \
             -DskipTests=true \
             --batch-mode \
             --no-transfer-progress
