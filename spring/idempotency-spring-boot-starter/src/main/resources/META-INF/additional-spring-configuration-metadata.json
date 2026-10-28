@@ -38,7 +38,7 @@
     },
     {
       "name": "idempotency.jdbc.initialize-schema",
-      "type": "org.springframework.boot.sql.init.DatabaseInitializationMode",
+      "type": "io.github.josipmusa.idempotency.springboot.IdempotencyProperties$SchemaInitialization",
       "description": "Whether the starter creates the idempotency_records table on startup. embedded creates it only on an embedded database, so a real one never gets DDL from a library; use the idempotency-schema-postgresql.sql or idempotency-schema-mysql.sql shipped in the provider jar instead.",
       "defaultValue": "embedded"
     },
