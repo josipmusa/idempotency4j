@@ -20,6 +20,7 @@ import static org.mockito.Mockito.mock;
 
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
+import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
 import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
 import org.junit.jupiter.api.Test;
@@ -36,7 +37,10 @@ class IdempotencyWebAutoConfigurationTest {
     private final WebApplicationContextRunner contextRunner = new WebApplicationContextRunner()
             .withConfiguration(
                     AutoConfigurations.of(IdempotencyAutoConfiguration.class, IdempotencyWebAutoConfiguration.class))
-            .withBean(RequestMappingHandlerMapping.class, () -> mock(RequestMappingHandlerMapping.class));
+            .withBean(
+                    "requestMappingHandlerMapping",
+                    RequestMappingHandlerMapping.class,
+                    () -> mock(RequestMappingHandlerMapping.class));
 
     @Test
     void When_ServletWebApplicationWithStore_Expect_FilterCreatedAndRegistered() {
@@ -45,6 +49,21 @@ class IdempotencyWebAutoConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasSingleBean(IdempotencyFilter.class);
                     assertThat(context).hasSingleBean(FilterRegistrationBean.class);
+                });
+    }
+
+    @Test
+    void When_ActuatorRegistersASecondHandlerMapping_Expect_SpringMvcMappingUsed() {
+        RequestMappingHandlerMapping actuatorMapping = mock(RequestMappingHandlerMapping.class);
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .withBean("controllerEndpointHandlerMapping", RequestMappingHandlerMapping.class, () -> actuatorMapping)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(IdempotencyFilter.class);
+                    assertThat(context.getBean(IdempotentHandlerRegistry.class))
+                            .extracting("handlerMapping")
+                            .isSameAs(context.getBean("requestMappingHandlerMapping"));
                 });
     }
 

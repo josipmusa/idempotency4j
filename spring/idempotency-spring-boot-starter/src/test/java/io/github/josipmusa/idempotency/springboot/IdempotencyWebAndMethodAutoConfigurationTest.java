@@ -49,7 +49,10 @@ class IdempotencyWebAndMethodAutoConfigurationTest {
                     IdempotencyAutoConfiguration.class,
                     IdempotencyWebAutoConfiguration.class,
                     IdempotencyMethodAutoConfiguration.class))
-            .withBean(RequestMappingHandlerMapping.class, () -> mock(RequestMappingHandlerMapping.class))
+            .withBean(
+                    "requestMappingHandlerMapping",
+                    RequestMappingHandlerMapping.class,
+                    () -> mock(RequestMappingHandlerMapping.class))
             .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class));
 
     @Test
