@@ -7,6 +7,13 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    ignore:
+      # spring-boot.version is the oldest supported Boot line, not the newest: only its patches
+      # are taken here. The newer line is tested through the CI matrix, raised by hand.
+      - dependency-name: org.springframework.boot:spring-boot-dependencies
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: github-actions
     directory: /

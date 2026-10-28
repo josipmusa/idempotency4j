@@ -68,7 +68,7 @@ Servlet-only.
 |---|---|---|
 | Java | 21+ | Compiled to 21, tested on 21 and 25 |
 | `idempotency-core` | No framework | Plain Java, plus SLF4J |
-| Spring Boot | 4.0.x, 4.1.x | Built against 4.0.8, for the adapters and the starter |
+| Spring Boot | 4.0.x, 4.1.x | Built against 4.0.9, for the adapters and the starter |
 | Annotated methods | Spring AOP | No web stack needed - works in a consumer or a batch job |
 | Spring MVC (Servlet) | Yes | The HTTP filter activates only for Servlet web applications |
 | Spring WebFlux | No | Nothing registers, and no error is raised |
