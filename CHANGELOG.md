@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   autoconfiguration injected the mapping by type, so the context failed with
   `NoUniqueBeanDefinitionException`. It now injects Spring MVC's `requestMappingHandlerMapping` by
   name, and the workaround of marking that bean `@Primary` is no longer needed.
+- An application without `spring-boot-sql` on the classpath, typically one using the Redis or
+  in-memory store, no longer fails at startup with `NoClassDefFoundError:
+  DatabaseInitializationMode`. `idempotency.jdbc.initialize-schema` is now bound to the starter's
+  own `IdempotencyProperties.SchemaInitialization` enum, with the same values (`always`,
+  `embedded`, `never`) and the same default, so configuration does not change. Code that called
+  `IdempotencyProperties.Jdbc.getInitializeSchema()` gets the new enum type.
 
 ## [0.5.0] - 2026-09-25
 

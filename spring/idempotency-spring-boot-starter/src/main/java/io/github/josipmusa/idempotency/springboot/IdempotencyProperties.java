@@ -19,7 +19,6 @@ import io.github.josipmusa.idempotency.core.CompletionFailurePolicy;
 import io.github.josipmusa.idempotency.core.CompletionMode;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.sql.init.DatabaseInitializationMode;
 
 /**
  * Everything the starter can be configured with, under the {@code idempotency} prefix.
@@ -177,15 +176,32 @@ public class IdempotencyProperties {
          * {@code idempotency-schema-postgresql.sql} or {@code idempotency-schema-mysql.sql},
          * shipped in the provider jar, when this is {@code never}.
          */
-        private DatabaseInitializationMode initializeSchema = DatabaseInitializationMode.EMBEDDED;
+        private SchemaInitialization initializeSchema = SchemaInitialization.EMBEDDED;
 
-        public DatabaseInitializationMode getInitializeSchema() {
+        public SchemaInitialization getInitializeSchema() {
             return initializeSchema;
         }
 
-        public void setInitializeSchema(DatabaseInitializationMode initializeSchema) {
+        public void setInitializeSchema(SchemaInitialization initializeSchema) {
             this.initializeSchema = initializeSchema;
         }
+    }
+
+    /**
+     * When the starter creates the {@code idempotency_records} table. Same values as Spring Boot's
+     * {@code DatabaseInitializationMode}, declared here so binding these properties does not need
+     * {@code spring-boot-sql} on the classpath of an application that uses another store.
+     */
+    public enum SchemaInitialization {
+
+        /** Always create the table if it does not exist. */
+        ALWAYS,
+
+        /** Create the table only on an embedded database. */
+        EMBEDDED,
+
+        /** Never create the table. */
+        NEVER
     }
 
     /** Settings that only make sense for the HTTP filter. */

@@ -37,7 +37,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnSingleCandi
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.jdbc.EmbeddedDatabaseConnection;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
-import org.springframework.boot.sql.init.DatabaseInitializationMode;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
@@ -123,7 +122,8 @@ public class IdempotencyStoreAutoConfiguration {
             };
         }
 
-        private static boolean shouldInitSchema(DatabaseInitializationMode mode, DataSource dataSource) {
+        private static boolean shouldInitSchema(
+                IdempotencyProperties.SchemaInitialization mode, DataSource dataSource) {
             return switch (mode) {
                 case ALWAYS -> true;
                 case NEVER -> false;
