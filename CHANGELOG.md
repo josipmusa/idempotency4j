@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The starter now starts with Spring Boot Actuator on the classpath. Actuator registers a second
+  `RequestMappingHandlerMapping`, `controllerEndpointHandlerMapping`, and the HTTP
+  autoconfiguration injected the mapping by type, so the context failed with
+  `NoUniqueBeanDefinitionException`. It now injects Spring MVC's `requestMappingHandlerMapping` by
+  name, and the workaround of marking that bean `@Primary` is no longer needed.
+
 ## [0.5.0] - 2026-09-25
 
 Completions now follow the caller's transaction: nothing is recorded as complete until the work

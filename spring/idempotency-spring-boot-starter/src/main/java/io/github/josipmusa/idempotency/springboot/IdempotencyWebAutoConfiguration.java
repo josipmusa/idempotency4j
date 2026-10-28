@@ -21,6 +21,7 @@ import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
 import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -37,12 +38,19 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
  * <p>Active only in a Servlet web application with Spring MVC on the classpath, so a
  * message-driven application that depends on this starter gets an engine and a method
  * interceptor without a filter it has no use for.
+ *
+ * <p>Spring MVC's handler mapping is injected by its bean name: Actuator registers a second
+ * {@link RequestMappingHandlerMapping}, {@code controllerEndpointHandlerMapping}, so injecting by
+ * type alone would find two candidates.
  */
 @AutoConfiguration(after = IdempotencyAutoConfiguration.class)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 @ConditionalOnClass({IdempotencyFilter.class, RequestMappingHandlerMapping.class})
 @EnableConfigurationProperties(IdempotencyProperties.class)
 public class IdempotencyWebAutoConfiguration {
+
+    /** The name Spring MVC registers its {@link RequestMappingHandlerMapping} under. */
+    static final String REQUEST_MAPPING_HANDLER_MAPPING = "requestMappingHandlerMapping";
 
     @Bean
     @ConditionalOnMissingBean
@@ -64,7 +72,8 @@ public class IdempotencyWebAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public IdempotentHandlerRegistry idempotentHandlerRegistry(
-            RequestMappingHandlerMapping handlerMapping, IdempotencyConfig config) {
+            @Qualifier(REQUEST_MAPPING_HANDLER_MAPPING) RequestMappingHandlerMapping handlerMapping,
+            IdempotencyConfig config) {
         return new IdempotentHandlerRegistry(handlerMapping, config);
     }
 
@@ -74,7 +83,7 @@ public class IdempotencyWebAutoConfiguration {
     public IdempotencyFilter idempotencyFilter(
             IdempotencyEngine engine,
             WebIdempotencyConfig webConfig,
-            RequestMappingHandlerMapping handlerMapping,
+            @Qualifier(REQUEST_MAPPING_HANDLER_MAPPING) RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             IdempotencyProperties properties,
             ResponseSanitizer sanitizer) {
