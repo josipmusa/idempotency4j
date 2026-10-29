@@ -396,7 +396,7 @@ can rely on a retry replaying it.
 ### Status codes the filter can return
 
 These come from the filter itself, before or instead of your handler. Each carries a
-`{"error": "..."}` JSON body.
+`{"error": "..."}` JSON body, unless you [render them yourself](#custom-rejection-responses).
 
 | Status | When |
 |---|---|
@@ -410,6 +410,57 @@ These come from the filter itself, before or instead of your handler. Each carri
 lease when that is shorter, in whole seconds, rounded up, minimum 1. It paces retries; it does not
 predict when the holder finishes, so a retry can get another in-flight response. Earlier retries
 pick up the result sooner, at the cost of more duplicate requests while the holder is still running.
+
+### Custom rejection responses
+
+An API with its own error format can render these responses itself by declaring an
+`IdempotencyRejectionHandler` bean (`io.github.josipmusa.idempotency.spring.web`). The handler gets
+an `IdempotencyRejection`, a sealed type with one record per case: `MissingKey`,
+`KeyTooLong(maxLength)`, `BodyTooLarge(maxBytes)`, `FingerprintMismatch` and
+`InFlight(retryAfter, suggestedStatus)`. Nothing runs or is stored for a rejected request, whatever
+the handler writes.
+
+Handle every case with an exhaustive `switch`; the compiler tells you when you miss one:
+
+```java
+@Bean
+IdempotencyRejectionHandler idempotencyRejectionHandler() {
+    return (rejection, request, response) -> {
+        switch (rejection) {
+            case IdempotencyRejection.MissingKey m -> writeApiError(response, 400, "IDEMPOTENCY_KEY_REQUIRED");
+            case IdempotencyRejection.KeyTooLong t -> writeApiError(response, 400, "IDEMPOTENCY_KEY_TOO_LONG");
+            case IdempotencyRejection.BodyTooLarge b -> writeApiError(response, 413, "BODY_TOO_LARGE");
+            case IdempotencyRejection.FingerprintMismatch f -> writeApiError(response, 409, "IDEMPOTENCY_KEY_REUSED");
+            case IdempotencyRejection.InFlight i -> writeApiError(response, i.suggestedStatus(), "IN_FLIGHT");
+        }
+    };
+}
+```
+
+Or render the cases you care about and delegate the rest to `DefaultIdempotencyRejectionHandler`,
+which writes the responses in the table above:
+
+```java
+@Bean
+IdempotencyRejectionHandler idempotencyRejectionHandler() {
+    IdempotencyRejectionHandler defaults = new DefaultIdempotencyRejectionHandler();
+    return (rejection, request, response) -> {
+        if (rejection instanceof IdempotencyRejection.InFlight inFlight) {
+            writeApiError(response, inFlight.suggestedStatus(), "IN_FLIGHT");
+        } else {
+            defaults.handle(rejection, request, response);
+        }
+    };
+}
+```
+
+For `InFlight`, the filter sets `Retry-After` before the handler runs, so a handler that only
+changes the body keeps it; set the header yourself to send another value. `suggestedStatus` is
+`idempotency.web.in-flight-status`: use it to stay consistent with the configuration, or choose
+your own status.
+
+A `switch` over every case stops compiling if a later release adds one, so a new kind of rejection
+is treated as a compatibility-sensitive change.
 
 ### Response headers on a replay
 

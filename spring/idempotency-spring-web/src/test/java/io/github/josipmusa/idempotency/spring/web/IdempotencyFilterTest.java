@@ -29,6 +29,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -541,6 +542,192 @@ class IdempotencyFilterTest {
         assertThat(response.getHeader("Idempotent-Replayed")).isEqualTo("true");
         assertThat(response.getContentAsByteArray()).isEmpty();
         verify(filterChain, never()).doFilter(any(), any());
+    }
+
+    @Test
+    void When_CustomRejectionHandlerAndMissingKey_Expect_HandlerWritesResponse() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation());
+        List<IdempotencyRejection> seen = new ArrayList<>();
+
+        filterWithRejections(apiErrors(seen), WebIdempotencyConfig.defaults(), -1)
+                .doFilter(request, response, filterChain);
+
+        assertThat(seen).containsExactly(new IdempotencyRejection.MissingKey());
+        assertThat(response.getStatus()).isEqualTo(400);
+        assertThat(response.getContentAsString()).isEqualTo("{\"code\":\"MissingKey\"}");
+        assertThat(response.getHeader("X-Api-Error")).isEqualTo("idempotency");
+        verifyNoInteractions(engine);
+        verify(filterChain, never()).doFilter(any(), any());
+    }
+
+    @Test
+    void When_CustomRejectionHandlerAndKeyTooLong_Expect_MaxLengthPassed() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation());
+        request.addHeader("Idempotency-Key", "k".repeat(IdempotencyIdentity.MAX_KEY_LENGTH + 1));
+        List<IdempotencyRejection> seen = new ArrayList<>();
+
+        filterWithRejections(apiErrors(seen), WebIdempotencyConfig.defaults(), -1)
+                .doFilter(request, response, filterChain);
+
+        assertThat(seen).containsExactly(new IdempotencyRejection.KeyTooLong(IdempotencyIdentity.MAX_KEY_LENGTH));
+        assertThat(response.getStatus()).isEqualTo(400);
+        verifyNoInteractions(engine);
+    }
+
+    @Test
+    void When_CustomRejectionHandlerAndBodyTooLarge_Expect_MaxBytesPassed() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation());
+        request.addHeader("Idempotency-Key", "key-123");
+        request.setContent("this body is definitely longer than ten bytes".getBytes());
+        List<IdempotencyRejection> seen = new ArrayList<>();
+
+        filterWithRejections(apiErrors(seen), WebIdempotencyConfig.defaults(), 10)
+                .doFilter(request, response, filterChain);
+
+        assertThat(seen).containsExactly(new IdempotencyRejection.BodyTooLarge(10));
+        assertThat(response.getStatus()).isEqualTo(400);
+        verifyNoInteractions(engine);
+    }
+
+    @Test
+    void When_CustomRejectionHandlerAndFingerprintMismatch_Expect_HandlerWritesResponse() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation());
+        request.addHeader("Idempotency-Key", "key-1");
+        when(engine.execute(any(), any(), any()))
+                .thenThrow(new IdempotencyFingerprintMismatchException(
+                        new IdempotencyIdentity("PaymentController.create", "key-1"), "stored-hash", "received-hash"));
+        List<IdempotencyRejection> seen = new ArrayList<>();
+
+        filterWithRejections(apiErrors(seen), WebIdempotencyConfig.defaults(), -1)
+                .doFilter(request, response, filterChain);
+
+        assertThat(seen).containsExactly(new IdempotencyRejection.FingerprintMismatch());
+        assertThat(response.getContentAsString()).isEqualTo("{\"code\":\"FingerprintMismatch\"}");
+    }
+
+    @Test
+    void When_CustomRejectionHandlerChangesOnlyTheInFlightBody_Expect_RetryAfterAndSuggestedStatusKept()
+            throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation());
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any(), any())).thenReturn(new Outcome.InFlight<>(Duration.ofMillis(2400)));
+        IdempotencyRejectionHandler bodyOnly = (rejection, req, res) -> {
+            IdempotencyRejection.InFlight inFlight = (IdempotencyRejection.InFlight) rejection;
+            res.setStatus(inFlight.suggestedStatus());
+            res.getWriter().write("{\"code\":\"InFlight\"}");
+        };
+
+        filterWithRejections(
+                        bodyOnly,
+                        WebIdempotencyConfig.builder().inFlightStatus(503).build(),
+                        -1)
+                .doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(503);
+        assertThat(response.getHeader("Retry-After")).isEqualTo("3");
+        assertThat(response.getContentAsString()).isEqualTo("{\"code\":\"InFlight\"}");
+    }
+
+    @Test
+    void When_CustomRejectionHandlerOverridesRetryAfter_Expect_HandlerValueSent() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation());
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any(), any())).thenReturn(new Outcome.InFlight<>(Duration.ofSeconds(3)));
+        List<IdempotencyRejection> seen = new ArrayList<>();
+        IdempotencyRejectionHandler override = (rejection, req, res) -> {
+            seen.add(rejection);
+            res.setStatus(429);
+            res.setHeader("Retry-After", "1");
+        };
+
+        filterWithRejections(override, WebIdempotencyConfig.defaults(), -1).doFilter(request, response, filterChain);
+
+        assertThat(seen).containsExactly(new IdempotencyRejection.InFlight(Duration.ofSeconds(3), 409));
+        assertThat(response.getStatus()).isEqualTo(429);
+        assertThat(response.getHeaders("Retry-After")).containsExactly("1");
+    }
+
+    @Test
+    void When_InFlightWithLeaseLongerThanWaitTimeout_Expect_HandlerGetsTheCappedRetryAfter() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation("", "PT120S", "PT2S"));
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any(), any())).thenReturn(new Outcome.InFlight<>(Duration.ofSeconds(118)));
+        List<IdempotencyRejection> seen = new ArrayList<>();
+
+        filterWithRejections(apiErrors(seen), WebIdempotencyConfig.defaults(), -1)
+                .doFilter(request, response, filterChain);
+
+        assertThat(seen).containsExactly(new IdempotencyRejection.InFlight(Duration.ofSeconds(2), 409));
+        assertThat(response.getHeader("Retry-After")).isEqualTo("2");
+    }
+
+    @Test
+    void When_CustomRejectionHandlerDelegatesToDefault_Expect_DefaultResponseForTheRest() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation());
+        IdempotencyRejectionHandler defaults = new DefaultIdempotencyRejectionHandler();
+        IdempotencyRejectionHandler inFlightOnly = (rejection, req, res) -> {
+            if (rejection instanceof IdempotencyRejection.InFlight) {
+                res.setStatus(429);
+            } else {
+                defaults.handle(rejection, req, res);
+            }
+        };
+
+        filterWithRejections(inFlightOnly, WebIdempotencyConfig.defaults(), -1)
+                .doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(422);
+        assertThat(response.getContentAsString()).isEqualTo("{\"error\": \"Idempotency-Key header is required\"}");
+    }
+
+    @Test
+    void When_ExhaustiveSwitchOverRejections_Expect_EveryCaseCompiles() {
+        List<IdempotencyRejection> all = List.of(
+                new IdempotencyRejection.MissingKey(),
+                new IdempotencyRejection.KeyTooLong(255),
+                new IdempotencyRejection.BodyTooLarge(10),
+                new IdempotencyRejection.FingerprintMismatch(),
+                new IdempotencyRejection.InFlight(Duration.ofSeconds(1), 409));
+
+        List<String> codes = all.stream()
+                .map(rejection -> switch (rejection) {
+                    case IdempotencyRejection.MissingKey ignored -> "missing";
+                    case IdempotencyRejection.KeyTooLong ignored -> "too-long";
+                    case IdempotencyRejection.BodyTooLarge ignored -> "too-large";
+                    case IdempotencyRejection.FingerprintMismatch ignored -> "mismatch";
+                    case IdempotencyRejection.InFlight ignored -> "in-flight";
+                })
+                .toList();
+
+        assertThat(codes).containsExactly("missing", "too-long", "too-large", "mismatch", "in-flight");
+    }
+
+    @Test
+    void When_InFlightRetryAfterIsNull_Expect_Rejected() {
+        assertThatThrownBy(() -> new IdempotencyRejection.InFlight(null, 409)).isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void When_RejectionHandlerIsNull_Expect_Rejected() {
+        assertThatThrownBy(() -> new IdempotencyFilter(
+                        engine, WebIdempotencyConfig.defaults(), handlerMapping, registry, -1, r -> r, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("rejectionHandler");
+    }
+
+    /** A handler in the style of an API with its own error contract, recording what it was given. */
+    private static IdempotencyRejectionHandler apiErrors(List<IdempotencyRejection> seen) {
+        return (rejection, req, res) -> {
+            seen.add(rejection);
+            res.setStatus(400);
+            res.setHeader("X-Api-Error", "idempotency");
+            res.getWriter().write("{\"code\":\"" + rejection.getClass().getSimpleName() + "\"}");
+        };
+    }
+
+    private IdempotencyFilter filterWithRejections(
+            IdempotencyRejectionHandler handler, WebIdempotencyConfig config, long maxBodyBytes) {
+        return new IdempotencyFilter(engine, config, handlerMapping, registry, maxBodyBytes, r -> r, handler);
     }
 
     private IdempotencyFilter filterWithRequired(boolean required) {

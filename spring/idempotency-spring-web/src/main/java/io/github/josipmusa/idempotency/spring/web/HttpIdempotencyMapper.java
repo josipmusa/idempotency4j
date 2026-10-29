@@ -126,23 +126,19 @@ final class HttpIdempotencyMapper {
     }
 
     /**
-     * Rejects a request whose key another caller is still holding.
+     * Sets {@code Retry-After} on the response to a request whose key another caller is still holding.
      *
-     * <p>{@code Retry-After} carries {@code retryAfter} in whole seconds, rounded up, and
-     * floored at 1 so a store that cannot tell still gets a usable hint rather than an
-     * immediate retry.
+     * <p>The header carries {@code retryAfter} in whole seconds, rounded up, and floored at 1 so a
+     * store that cannot tell still gets a usable hint rather than an immediate retry. Set before
+     * the {@link IdempotencyRejectionHandler} runs, so a handler that only changes the body keeps
+     * it.
      *
-     * @param response   the response to write to
-     * @param status     the configured in-flight status
+     * @param response   the response to set the header on
      * @param retryAfter when to retry, from {@link #retryAfter(Duration, Duration)}
-     * @param message    the human-readable error message
-     * @throws IOException if the body cannot be written
      */
-    static void writeInFlight(HttpServletResponse response, int status, Duration retryAfter, String message)
-            throws IOException {
+    static void setRetryAfter(HttpServletResponse response, Duration retryAfter) {
         long seconds = Math.max(1, (retryAfter.toMillis() + 999) / 1000);
         response.setHeader("Retry-After", Long.toString(seconds));
-        writeJsonError(response, status, message);
     }
 
     /**

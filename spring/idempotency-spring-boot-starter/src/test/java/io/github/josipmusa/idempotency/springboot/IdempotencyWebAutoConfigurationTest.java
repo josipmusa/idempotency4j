@@ -19,7 +19,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import io.github.josipmusa.idempotency.core.IdempotencyStore;
+import io.github.josipmusa.idempotency.spring.web.DefaultIdempotencyRejectionHandler;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
+import io.github.josipmusa.idempotency.spring.web.IdempotencyRejectionHandler;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
 import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
@@ -160,6 +162,34 @@ class IdempotencyWebAutoConfigurationTest {
             assertThat(context).hasSingleBean(ResponseSanitizer.class);
             assertThat(context.getBean(ResponseSanitizer.class)).isSameAs(custom);
         });
+    }
+
+    @Test
+    void When_NoCustomRejectionHandlerBean_Expect_DefaultHandlerUsedByTheFilter() {
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .run(context -> {
+                    assertThat(context).hasSingleBean(IdempotencyRejectionHandler.class);
+                    assertThat(context.getBean(IdempotencyRejectionHandler.class))
+                            .isInstanceOf(DefaultIdempotencyRejectionHandler.class);
+                    assertThat(context.getBean(IdempotencyFilter.class))
+                            .extracting("rejectionHandler")
+                            .isSameAs(context.getBean(IdempotencyRejectionHandler.class));
+                });
+    }
+
+    @Test
+    void When_CustomRejectionHandlerBean_Expect_AutoConfiguredHandlerSkippedAndCustomUsed() {
+        IdempotencyRejectionHandler custom = (rejection, request, response) -> response.setStatus(400);
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .withBean(IdempotencyRejectionHandler.class, () -> custom)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(IdempotencyRejectionHandler.class);
+                    assertThat(context.getBean(IdempotencyFilter.class))
+                            .extracting("rejectionHandler")
+                            .isSameAs(custom);
+                });
     }
 
     @Test

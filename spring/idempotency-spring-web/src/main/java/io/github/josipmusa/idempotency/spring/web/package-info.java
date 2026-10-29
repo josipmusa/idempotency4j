@@ -27,6 +27,11 @@
  *       settings: the key header, the in-flight status, and whether a key is required.</li>
  *   <li>{@link io.github.josipmusa.idempotency.spring.web.ResponseSanitizer} — SPI for
  *       scrubbing sensitive data from responses before they are persisted.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.spring.web.IdempotencyRejectionHandler} — SPI
+ *       that writes the responses the filter answers itself, one
+ *       {@link io.github.josipmusa.idempotency.spring.web.IdempotencyRejection} case each;
+ *       {@link io.github.josipmusa.idempotency.spring.web.DefaultIdempotencyRejectionHandler}
+ *       writes the {@code {"error": "..."}} bodies.</li>
  * </ul>
  *
  * <p>The engine owns the record's whole lifecycle, completion included; the filter never
