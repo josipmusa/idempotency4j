@@ -378,6 +378,144 @@ class IdempotencyEngineTransactionTest {
         assertThat(listener.events).containsExactly("onAcquired", "onCompleted");
     }
 
+    private static Outcome<Void> declined(IdempotencyEngine engine, IdempotencyContext context) throws Exception {
+        return engine.execute(context, () -> null, PayloadCodec.none(), value -> false);
+    }
+
+    @Test
+    void When_DeclinedInsideTransaction_Expect_ReleasedOnlyAfterCommit() throws Exception {
+        IdempotencyContext context = autonomousContext("declined-commit-key", Duration.ofSeconds(5));
+        transaction.begin();
+
+        Outcome<Void> outcome = declined(engine(store, transaction), context);
+
+        assertThat(outcome).isInstanceOf(Outcome.Executed.class);
+        verify(store, never()).release(any(), any());
+        assertThat(listener.events).containsExactly("onAcquired");
+
+        transaction.commit();
+
+        verify(store).release(context.identity(), LEASE_ID);
+        verify(store, never()).complete(any(), any(), any(), any());
+        assertThat(listener.events).containsExactly("onAcquired", "onReleased");
+    }
+
+    @Test
+    void When_DeclinedInsideTransactionAndRollback_Expect_ReleasedAndOnFailedRollback() throws Exception {
+        IdempotencyContext context = autonomousContext("declined-rollback-key", Duration.ofSeconds(5));
+        transaction.begin();
+
+        declined(engine(store, transaction), context);
+        transaction.rollback();
+
+        verify(store).release(context.identity(), LEASE_ID);
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:ROLLBACK");
+        assertThat(listener.lastCause).isInstanceOf(IdempotencyRollbackException.class);
+    }
+
+    @Test
+    void When_DeclinedUnderJoinedMode_Expect_NothingCompletedAndReleasedAfterCommit() throws Exception {
+        IdempotencyContext context = joinedContext("declined-joined-key");
+        transaction.begin();
+
+        declined(engine(store, transaction), context);
+
+        verify(store, never()).completeInTransaction(any(), any(), any(), any());
+        verify(store, never()).release(any(), any());
+
+        transaction.commit();
+
+        verify(store).release(context.identity(), LEASE_ID);
+        assertThat(listener.events).containsExactly("onAcquired", "onReleased");
+    }
+
+    @Test
+    void When_DeclinedUnderJoinedModeAndRollback_Expect_ReleasedAndOnFailedRollback() throws Exception {
+        IdempotencyContext context = joinedContext("declined-joined-rollback-key");
+        transaction.begin();
+
+        declined(engine(store, transaction), context);
+        transaction.rollback();
+
+        verify(store).release(context.identity(), LEASE_ID);
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:ROLLBACK");
+    }
+
+    @Test
+    void When_DeclinedInsideTransaction_Expect_HeartbeatAliveUntilCommit() throws Exception {
+        AtomicInteger extensions = new AtomicInteger();
+        doAnswer(invocation -> extensions.incrementAndGet()).when(store).extendLock(any(), any(), any());
+        IdempotencyContext context = autonomousContext("declined-heartbeat-key", Duration.ofMillis(100));
+        transaction.begin();
+
+        declined(engine(store, transaction), context);
+        int afterReturn = extensions.get();
+        Thread.sleep(300);
+
+        assertThat(extensions.get())
+                .as("heartbeats while the transaction is still open")
+                .isGreaterThan(afterReturn);
+
+        transaction.commit();
+        int afterCommit = extensions.get();
+        Thread.sleep(300);
+
+        assertThat(extensions.get()).as("heartbeats after the commit").isEqualTo(afterCommit);
+    }
+
+    @Test
+    void When_DeclinedInsideTransactionAndReleaseFailsAfterCommit_Expect_OnFailedRelease() throws Exception {
+        IdempotencyContext context = autonomousContext("declined-release-fails-key", Duration.ofSeconds(5));
+        IdempotencyStoreException down = new IdempotencyStoreException("store down");
+        doThrow(down).when(store).release(any(), any());
+        transaction.begin();
+
+        declined(engine(store, transaction), context);
+        transaction.commit();
+
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:RELEASE");
+        assertThat(listener.lastCause).isSameAs(down);
+    }
+
+    @Test
+    void When_PolicyThrowsUnderJoinedMode_Expect_PropagatedAndReleasedOnlyOnRollback() {
+        IdempotencyContext context = joinedContext("policy-throws-joined-key");
+        IllegalStateException broken = new IllegalStateException("policy broke");
+        transaction.begin();
+
+        assertThatThrownBy(() -> engine(store, transaction, CompletionFailurePolicy.LOG_AND_RETURN)
+                        .execute(context, () -> null, PayloadCodec.none(), value -> {
+                            throw broken;
+                        }))
+                .isSameAs(broken);
+        verify(store, never()).release(any(), any());
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
+
+        transaction.rollback();
+
+        verify(store).release(context.identity(), LEASE_ID);
+        assertThat(listener.events).containsExactly("onAcquired", "onFailed:COMPLETION");
+    }
+
+    @Test
+    void When_DeclinedAfterTheActionEndedItsTransaction_Expect_ReleasedImmediately() throws Exception {
+        IdempotencyContext context = autonomousContext("declined-self-committing-key", Duration.ofSeconds(5));
+
+        engine(store, transaction)
+                .execute(
+                        context,
+                        () -> {
+                            transaction.begin();
+                            transaction.commit();
+                            return null;
+                        },
+                        PayloadCodec.none(),
+                        value -> false);
+
+        verify(store).release(context.identity(), LEASE_ID);
+        assertThat(listener.events).containsExactly("onAcquired", "onReleased");
+    }
+
     private static IdempotencyContext autonomousContext(String key, Duration lease) {
         return IdempotencyContext.builder(SCOPE, key)
                 .ttl(Duration.ofHours(1))
@@ -401,6 +539,11 @@ class IdempotencyEngineTransactionTest {
         @Override
         public void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {
             events.add("onCompleted");
+        }
+
+        @Override
+        public void onReleased(IdempotencyContext ctx, String leaseId) {
+            events.add("onReleased");
         }
 
         @Override

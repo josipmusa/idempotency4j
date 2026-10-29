@@ -16,6 +16,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DefaultIdempotencyRejectionHandler`. The in-flight `Retry-After` is set before the handler runs,
   so it survives a handler that only changes the body. Without a bean the responses are unchanged,
   and the existing `IdempotencyFilter` constructors keep working.
+- A `ResponseStoragePolicy` bean decides, per fresh response, whether it is stored or the key is
+  released so the client can retry, with any body. The client gets the handler's response either
+  way. Return `false` only for responses that mean nothing happened, typically from a request
+  attribute set by your exception handler; the default stores everything, as before. The policy
+  sees the response before the `ResponseSanitizer` and is never asked for replays or for the
+  filter's own rejections.
+- `IdempotencyEngine.execute(context, action, codec, policy)` takes a core `StoragePolicy`: a
+  declined result releases the lease, fires the new `IdempotencyLifecycleListener.onReleased`
+  terminal callback, and still returns `Outcome.Executed`. With a transaction active as the action
+  returns, the release waits for the commit, with the heartbeat still running; a rollback releases
+  and fires `FailurePhase.ROLLBACK` as before. Only an explicit `false` releases: a policy that
+  throws is a completion failure and keeps the record. A failed release is logged and fires
+  `onFailed` with the new `FailurePhase.RELEASE`.
+
+### Changed
+
+- Every acquired lease still gets exactly one terminal callback, now one of `onCompleted`,
+  `onReleased` or `onFailed`. `onReleased` has an empty default and fires only when a storage
+  policy is in use, so nothing changes until you declare one; a listener that cleans up in its
+  terminal callbacks must then handle it too. `FailurePhase` gains `RELEASE`, so an exhaustive
+  `switch` over it needs a new case.
 
 ### Fixed
 

@@ -388,7 +388,42 @@ A handler that *throws* is different: the engine releases the lease, which delet
 the next request with that key sees a key that was never used and runs the handler again.
 
 If you want a failed request to be retriable, throw. If you return an error status, you are telling
-the library that error is the final answer for that key.
+the library that error is the final answer for that key - unless a `ResponseStoragePolicy` says
+otherwise.
+
+#### Releasing the key instead of storing
+
+Some responses mean nothing happened: a 503 because a downstream system was unreachable before
+anything was sent to it, a 400 from validation the client will fix, a 429. Declare a
+`ResponseStoragePolicy` bean (`io.github.josipmusa.idempotency.spring.web`) and return `false` for
+those: the client still gets the response, once, but the record is deleted instead of stored, and
+the next request with that key runs the handler again - with any body, so a corrected request is
+not refused as a mismatch.
+
+A status alone rarely tells you that nothing happened: a 504 after the downstream system received
+the request must be stored, or the retry runs the operation twice. Let the code that knows mark the
+request, typically your exception handler, and have the policy read the mark:
+
+```java
+@Bean
+ResponseStoragePolicy responseStoragePolicy() {
+    return (request, response) -> request.getAttribute("idempotency.release") == null;
+}
+
+@ExceptionHandler(DownstreamUnreachableException.class)
+ResponseEntity<ApiError> unreachable(DownstreamUnreachableException e, HttpServletRequest request) {
+    request.setAttribute("idempotency.release", true);   // nothing was sent: let the client retry
+    return ResponseEntity.status(503).body(ApiError.of("DOWNSTREAM_UNAVAILABLE"));
+}
+```
+
+`false` is permission to run the operation again; it does not undo anything the handler did and does
+not roll back a transaction. The policy sees the handler's response before the `ResponseSanitizer`
+and is asked only for fresh executions, never for a replay or for the filter's own rejections. Only
+an explicit `false` releases the key: a policy that throws counts as a failure to record the
+completion, so the record is kept and `idempotency.completion-failure-policy` applies. A release the
+store refuses is logged, the client keeps its response, and the key stays in flight until its lease
+expires. Lifecycle listeners see a release as `onReleased`.
 
 The record is durable before the response body reaches the client, so a client that sees a response
 can rely on a retry replaying it.
@@ -690,6 +725,11 @@ public IdempotencyLifecycleListener auditListener(AuditService audit) {
         }
 
         @Override
+        public void onReleased(IdempotencyContext ctx, String leaseId) {
+            audit.released(ctx.key());   // a storage policy declined the result; the key is free
+        }
+
+        @Override
         public void onFailed(IdempotencyContext ctx, String leaseId, Throwable cause, FailurePhase phase) {
             audit.abandon(ctx.key(), phase);
         }
@@ -704,9 +744,11 @@ The contract, in short:
   blocks blocks the call.
 - Exceptions thrown by a listener are logged at WARN and swallowed. They never change the stored
   payload, the return value, or the exception the engine is propagating.
-- Every acquired lease gets **exactly one** terminal callback: `onCompleted` **or** `onFailed`,
-  always preceded by `onAcquired` with the same lease. Use the pair to unbind whatever `onAcquired`
-  bound.
+- Every acquired lease gets **exactly one** terminal callback: `onCompleted`, `onReleased` **or**
+  `onFailed`, always preceded by `onAcquired` with the same lease. Use the pair to unbind whatever
+  `onAcquired` bound. `onReleased` fires only when a storage policy declined the result, so a
+  listener that cleans up in `onCompleted` and `onFailed` must clean up there too once you declare
+  one. A release the store refuses fires `onFailed` with `FailurePhase.RELEASE` instead.
 - `onDuplicate` and `onInFlight` stand alone - neither acquires a lease, so no terminal callback
   follows.
 - `onCompleted` fires only once the store has confirmed the completion. An unconfirmed durability
@@ -717,7 +759,8 @@ The contract, in short:
 - When the completion waits on a transaction - always under `join-transaction`, and under
   `autonomous` whenever the method runs inside one - the terminal callback waits with it:
   `onCompleted` fires after the commit, and a rollback fires `onFailed` with
-  `FailurePhase.ROLLBACK`.
+  `FailurePhase.ROLLBACK`. A declined result waits the same way: the release, and `onReleased`,
+  happen after the commit.
 
 Outside Spring, pass the listeners to the engine directly:
 

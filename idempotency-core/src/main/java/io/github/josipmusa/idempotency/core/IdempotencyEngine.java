@@ -72,6 +72,18 @@ import org.slf4j.LoggerFactory;
  * the one outcome joined completion exists to rule out. If that transaction then rolls back,
  * the engine releases the lease, because the work it guarded is gone with it.
  *
+ * <h2>Declining to store</h2>
+ * <p>An adapter can pass a {@link StoragePolicy} that looks at the fresh result and returns
+ * {@code false} when nothing should be kept - for example a refusal before any downstream call.
+ * The engine then releases the lease instead of recording a completion, fires
+ * {@link IdempotencyLifecycleListener#onReleased}, and still returns {@link Outcome.Executed}
+ * with the result, so the caller answers once. A release is permission to run the action again;
+ * it undoes nothing. With a transaction active as the action returns, the release waits for it,
+ * with the heartbeat still running, exactly as an autonomous completion would: a commit releases
+ * the lease and fires {@code onReleased}, a rollback releases it and fires
+ * {@link FailurePhase#ROLLBACK}. A policy that throws is a completion failure, and a release that
+ * fails is logged and reported as {@link FailurePhase#RELEASE} while the caller keeps its result.
+ *
  * <h2>Completion modes</h2>
  * <p>By default the completion is recorded on its own. With no transaction active when the
  * action returns, that happens at once. With one active, the engine waits for it: the record is
@@ -85,7 +97,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Whenever the completion waits on a transaction, the terminal callback waits with it:
  * {@code onCompleted} once the record is durable after the commit, or a release plus
- * {@link FailurePhase#ROLLBACK} after a rollback.
+ * {@link FailurePhase#ROLLBACK} after a rollback. A declined result waits the same way, with
+ * {@code onReleased} after the commit.
  *
  * <h2>Lifecycle callbacks</h2>
  * <p>Registered {@link IdempotencyLifecycleListener}s observe each execution synchronously
@@ -196,12 +209,43 @@ public final class IdempotencyEngine {
      */
     public <T> Outcome<T> execute(IdempotencyContext context, ThrowingSupplier<T> action, PayloadCodec<T> codec)
             throws Exception {
+        return execute(context, action, codec, StoragePolicy.always());
+    }
+
+    /**
+     * Executes the given action at most once per identity, storing its result only when
+     * {@code policy} agrees.
+     *
+     * <p>Behaves like {@link #execute(IdempotencyContext, ThrowingSupplier, PayloadCodec)}, except
+     * that a fresh result {@code policy} declines is not recorded: the lease is released instead,
+     * {@link IdempotencyLifecycleListener#onReleased} fires, and {@link Outcome.Executed} still
+     * comes back with the result. The next caller under the key runs the action again. See the
+     * class documentation for how a release interacts with an active transaction.
+     *
+     * @param context fully resolved idempotency context (identity, ttl, lease, wait)
+     * @param action  the business logic to execute - only runs for a new key
+     * @param codec   translates the action's result to and from the stored payload
+     * @param policy  decides whether a fresh result is stored or the key released; asked only
+     *                after the action returned, before encoding
+     * @param <T>     what the action produces
+     * @return what happened; never {@code null}
+     * @throws IdempotencyFingerprintMismatchException if the key was already used with a
+     *         different request body
+     * @throws Exception if the action throws, as for the three-argument method. A policy that
+     *         throws is a completion failure: it propagates under
+     *         {@link CompletionFailurePolicy#PROPAGATE} and always under
+     *         {@link CompletionMode#JOIN_TRANSACTION}, and the record is kept either way
+     */
+    public <T> Outcome<T> execute(
+            IdempotencyContext context, ThrowingSupplier<T> action, PayloadCodec<T> codec, StoragePolicy<T> policy)
+            throws Exception {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(action, "action must not be null");
         Objects.requireNonNull(codec, "codec must not be null");
+        Objects.requireNonNull(policy, "policy must not be null");
         requireTransactionForJoinedMode(context);
         return switch (store.tryAcquire(context)) {
-            case AcquireResult.Acquired(String leaseId) -> runWithHeartbeat(context, leaseId, action, codec);
+            case AcquireResult.Acquired(String leaseId) -> runWithHeartbeat(context, leaseId, action, codec, policy);
             case AcquireResult.Duplicate(Payload payload, Instant completedAt) -> {
                 notify("onDuplicate", context, listener -> listener.onDuplicate(context, payload, completedAt));
                 yield new Outcome.Replayed<>(codec.decode(payload), completedAt);
@@ -260,7 +304,11 @@ public final class IdempotencyEngine {
      * terminal callback to release it.
      */
     private <T> Outcome<T> runWithHeartbeat(
-            IdempotencyContext context, String leaseId, ThrowingSupplier<T> action, PayloadCodec<T> codec)
+            IdempotencyContext context,
+            String leaseId,
+            ThrowingSupplier<T> action,
+            PayloadCodec<T> codec,
+            StoragePolicy<T> policy)
             throws Exception {
         ScheduledFuture<?> heartbeat;
         try {
@@ -280,11 +328,89 @@ public final class IdempotencyEngine {
             notifyFailed(context, leaseId, t, FailurePhase.ACTION);
             throw t;
         }
+        boolean joined = context.completionMode() == CompletionMode.JOIN_TRANSACTION;
+        boolean storeResult;
+        try {
+            storeResult = policy.shouldStore(value);
+        } catch (Exception e) {
+            heartbeat.cancel(false);
+            notifyFailed(context, leaseId, e, FailurePhase.COMPLETION);
+            if (joined) {
+                releaseOnRollback(context, leaseId);
+                throw e;
+            }
+            return afterCompletionFailure(context, value, e);
+        } catch (Throwable t) {
+            heartbeat.cancel(false);
+            notifyFailed(context, leaseId, t, FailurePhase.COMPLETION);
+            if (joined) {
+                releaseOnRollback(context, leaseId);
+            }
+            throw t;
+        }
+        if (!storeResult) {
+            return releaseInsteadOfStoring(context, leaseId, value, heartbeat);
+        }
         if (context.completionMode() == CompletionMode.AUTONOMOUS && transactions.active()) {
             return completeAfterTransaction(context, leaseId, value, codec, heartbeat);
         }
         heartbeat.cancel(false);
         return complete(context, leaseId, value, codec);
+    }
+
+    /**
+     * Releases the lease of an action whose result the {@link StoragePolicy} declined.
+     *
+     * <p>With no transaction active, the release happens now. With one active, the action's
+     * work is not settled yet, so the release waits for the transaction like an autonomous
+     * completion does, and the heartbeat keeps the lease until then: releasing early would let a
+     * second caller run the action while the first one's transaction is still open. A commit
+     * releases the lease and fires {@code onReleased}; a rollback releases it through the
+     * ordinary rollback path and fires {@link FailurePhase#ROLLBACK}.
+     *
+     * <p>The caller gets {@link Outcome.Executed} either way: what the action produced is its
+     * answer, whatever happens to the record.
+     */
+    private <T> Outcome<T> releaseInsteadOfStoring(
+            IdempotencyContext context, String leaseId, T value, ScheduledFuture<?> heartbeat) {
+        if (transactions.active()) {
+            transactions.afterCommit(() -> {
+                heartbeat.cancel(false);
+                releaseIntentionally(context, leaseId);
+            });
+            transactions.afterRollback(() -> {
+                heartbeat.cancel(false);
+                releaseAfterRollback(context, leaseId);
+            });
+        } else {
+            heartbeat.cancel(false);
+            releaseIntentionally(context, leaseId);
+        }
+        return new Outcome.Executed<>(value);
+    }
+
+    /**
+     * Deletes the record of a declined result and reports the lease's terminal.
+     *
+     * <p>A release that fails is logged and reported as {@link FailurePhase#RELEASE}, and
+     * {@code onReleased} does not fire: the record stays IN_PROGRESS until its lease expires, so
+     * a retry before then is refused as in flight. The caller's answer is not affected.
+     */
+    private void releaseIntentionally(IdempotencyContext context, String leaseId) {
+        try {
+            store.release(context.identity(), leaseId);
+        } catch (Exception e) {
+            log.warn(
+                    "Could not release {} after its result was declined for storage; it stays in flight until its lease expires",
+                    context.identity(),
+                    e);
+            notifyFailed(context, leaseId, e, FailurePhase.RELEASE);
+            return;
+        } catch (Throwable t) {
+            notifyFailed(context, leaseId, t, FailurePhase.RELEASE);
+            throw t;
+        }
+        notify("onReleased", context, listener -> listener.onReleased(context, leaseId));
     }
 
     /**

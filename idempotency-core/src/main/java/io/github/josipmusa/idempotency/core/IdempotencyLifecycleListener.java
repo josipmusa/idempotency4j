@@ -40,10 +40,12 @@ import java.time.Instant;
  * <h2>Callback invariants</h2>
  * <ul>
  *   <li>Every acquired lease gets <strong>exactly one</strong> terminal callback:
- *       {@link #onCompleted} or {@link #onFailed}, never both and never neither.
- *       {@link #onAcquired} always precedes it, with the same {@code leaseId}.
+ *       {@link #onCompleted}, {@link #onReleased} or {@link #onFailed}, never two and never
+ *       none. {@link #onAcquired} always precedes it, with the same {@code leaseId}.
  *       Consumers use this pair to unbind per-request state, so the engine treats
- *       it as load-bearing.</li>
+ *       it as load-bearing. {@link #onReleased} fires only for an adapter that passes a
+ *       {@link StoragePolicy}; a listener that cleans up in the terminal callbacks must
+ *       handle it too.</li>
  *   <li>{@link #onDuplicate} stands alone. No lease was acquired, so no terminal
  *       callback follows and {@code onAcquired} did not precede it.</li>
  *   <li>{@link #onCompleted} fires only after the store confirmed completion. An
@@ -60,7 +62,8 @@ import java.time.Instant;
  *       {@link CompletionMode#JOIN_TRANSACTION}, and under {@link CompletionMode#AUTONOMOUS}
  *       whenever a transaction is active as the action returns - the terminal callback waits
  *       with it: {@link #onCompleted} after the commit, or {@link #onFailed} with
- *       {@link FailurePhase#ROLLBACK} after a rollback. It then fires from the transaction's
+ *       {@link FailurePhase#ROLLBACK} after a rollback. A result the {@link StoragePolicy}
+ *       declined waits the same way, with {@link #onReleased} after the commit. It then fires from the transaction's
  *       completion callback, still on the calling thread, after the engine has already
  *       returned.</li>
  *   <li>{@code onAcquired} means the action is about to run. In the one case where
@@ -90,6 +93,11 @@ import java.time.Instant;
  *     }
  *
  *     @Override
+ *     public void onReleased(IdempotencyContext ctx, String leaseId) {
+ *         CURRENT_KEY.remove();
+ *     }
+ *
+ *     @Override
  *     public void onFailed(IdempotencyContext ctx, String leaseId, Throwable cause, FailurePhase phase) {
  *         CURRENT_KEY.remove();
  *     }
@@ -102,8 +110,8 @@ public interface IdempotencyLifecycleListener {
      * The lock was acquired and the action is about to run on this thread.
      *
      * <p>Fires before the action, once per acquired lease, and is always followed
-     * by exactly one of {@link #onCompleted} or {@link #onFailed} carrying the
-     * same {@code leaseId}.
+     * by exactly one of {@link #onCompleted}, {@link #onReleased} or {@link #onFailed}
+     * carrying the same {@code leaseId}.
      *
      * @param ctx     the context this execution is running under
      * @param leaseId the ownership lease for this acquisition
@@ -123,6 +131,20 @@ public interface IdempotencyLifecycleListener {
      *                {@link Payload#none()} when there was nothing
      */
     default void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {}
+
+    /**
+     * The action ran, its {@link StoragePolicy} declined to store the result, and the record was
+     * deleted; the key is free and the next caller runs the action again.
+     *
+     * <p>Fires only after the store confirmed the release - after the caller's transaction
+     * committed, when one was active as the action returned. A release that fails fires
+     * {@link #onFailed} with {@link FailurePhase#RELEASE} instead. Nothing more will happen under
+     * this lease.
+     *
+     * @param ctx     the context this execution ran under
+     * @param leaseId the lease that was released
+     */
+    default void onReleased(IdempotencyContext ctx, String leaseId) {}
 
     /**
      * The execution ended without a recorded completion.
@@ -187,6 +209,14 @@ public interface IdempotencyLifecycleListener {
          * key is reclaimable and a retry will execute the action again - correctly,
          * because the action's own writes rolled back too.
          */
-        ROLLBACK
+        ROLLBACK,
+
+        /**
+         * The action succeeded and its {@link StoragePolicy} declined to store the result, but
+         * the store could not release the lease. The caller still got the action's result. The
+         * record stays IN_PROGRESS until its lease expires: a retry before then is refused as in
+         * flight, and one after it runs the action again.
+         */
+        RELEASE
     }
 }

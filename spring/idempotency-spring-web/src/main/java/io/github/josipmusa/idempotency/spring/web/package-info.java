@@ -32,6 +32,8 @@
  *       {@link io.github.josipmusa.idempotency.spring.web.IdempotencyRejection} case each;
  *       {@link io.github.josipmusa.idempotency.spring.web.DefaultIdempotencyRejectionHandler}
  *       writes the {@code {"error": "..."}} bodies.</li>
+ *   <li>{@link io.github.josipmusa.idempotency.spring.web.ResponseStoragePolicy} — SPI that
+ *       decides whether a fresh response is stored or the key released for a retry.</li>
  * </ul>
  *
  * <p>The engine owns the record's whole lifecycle, completion included; the filter never

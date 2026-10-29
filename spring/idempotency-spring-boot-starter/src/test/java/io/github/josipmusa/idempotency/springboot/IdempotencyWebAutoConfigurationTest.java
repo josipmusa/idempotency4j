@@ -24,6 +24,7 @@ import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyRejectionHandler;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
 import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
+import io.github.josipmusa.idempotency.spring.web.ResponseStoragePolicy;
 import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -179,6 +180,18 @@ class IdempotencyWebAutoConfigurationTest {
     }
 
     @Test
+    void When_NoCustomStoragePolicyBean_Expect_AlwaysStoreUsedByTheFilter() {
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .run(context -> {
+                    assertThat(context.getBean(ResponseStoragePolicy.class)).isSameAs(ResponseStoragePolicy.ALWAYS);
+                    assertThat(context.getBean(IdempotencyFilter.class))
+                            .extracting("storagePolicy")
+                            .isSameAs(ResponseStoragePolicy.ALWAYS);
+                });
+    }
+
+    @Test
     void When_CustomRejectionHandlerBean_Expect_AutoConfiguredHandlerSkippedAndCustomUsed() {
         IdempotencyRejectionHandler custom = (rejection, request, response) -> response.setStatus(400);
         contextRunner
@@ -188,6 +201,20 @@ class IdempotencyWebAutoConfigurationTest {
                     assertThat(context).hasSingleBean(IdempotencyRejectionHandler.class);
                     assertThat(context.getBean(IdempotencyFilter.class))
                             .extracting("rejectionHandler")
+                            .isSameAs(custom);
+                });
+    }
+
+    @Test
+    void When_CustomStoragePolicyBean_Expect_AutoConfiguredPolicySkippedAndCustomUsed() {
+        ResponseStoragePolicy custom = (request, response) -> response.statusCode() != 503;
+        contextRunner
+                .withBean(IdempotencyStore.class, () -> mock(IdempotencyStore.class))
+                .withBean(ResponseStoragePolicy.class, () -> custom)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(ResponseStoragePolicy.class);
+                    assertThat(context.getBean(IdempotencyFilter.class))
+                            .extracting("storagePolicy")
                             .isSameAs(custom);
                 });
     }

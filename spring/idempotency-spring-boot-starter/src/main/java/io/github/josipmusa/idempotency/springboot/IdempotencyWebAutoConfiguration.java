@@ -22,6 +22,7 @@ import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyRejectionHandler;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
 import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
+import io.github.josipmusa.idempotency.spring.web.ResponseStoragePolicy;
 import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -79,6 +80,12 @@ public class IdempotencyWebAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    ResponseStoragePolicy responseStoragePolicy() {
+        return ResponseStoragePolicy.ALWAYS;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public IdempotentHandlerRegistry idempotentHandlerRegistry(
             @Qualifier(REQUEST_MAPPING_HANDLER_MAPPING) RequestMappingHandlerMapping handlerMapping,
             IdempotencyConfig config) {
@@ -95,7 +102,8 @@ public class IdempotencyWebAutoConfiguration {
             IdempotentHandlerRegistry registry,
             IdempotencyProperties properties,
             ResponseSanitizer sanitizer,
-            IdempotencyRejectionHandler rejectionHandler) {
+            IdempotencyRejectionHandler rejectionHandler,
+            ResponseStoragePolicy storagePolicy) {
         return new IdempotencyFilter(
                 engine,
                 webConfig,
@@ -103,7 +111,8 @@ public class IdempotencyWebAutoConfiguration {
                 registry,
                 properties.getWeb().getMaxBodyBytes(),
                 sanitizer,
-                rejectionHandler);
+                rejectionHandler,
+                storagePolicy);
     }
 
     @Bean
