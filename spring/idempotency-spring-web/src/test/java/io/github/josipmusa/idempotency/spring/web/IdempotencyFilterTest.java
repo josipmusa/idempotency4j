@@ -249,6 +249,18 @@ class IdempotencyFilterTest {
     }
 
     @Test
+    void When_InFlightWithLeaseLongerThanWaitTimeout_Expect_RetryAfterIsWaitTimeout() throws Exception {
+        setupAnnotatedHandler(AnnotationHelper.annotation("", "PT120S", "PT2S"));
+        request.addHeader("Idempotency-Key", "test-key");
+        when(engine.execute(any(), any(), any())).thenReturn(new Outcome.InFlight<>(Duration.ofSeconds(118)));
+
+        filter.doFilter(request, response, filterChain);
+
+        assertThat(response.getStatus()).isEqualTo(409);
+        assertThat(response.getHeader("Retry-After")).isEqualTo("2");
+    }
+
+    @Test
     void When_InFlightWithNoRemainingLease_Expect_RetryAfterAtLeastOneSecond() throws Exception {
         setupAnnotatedHandler(AnnotationHelper.annotation());
         request.addHeader("Idempotency-Key", "test-key");

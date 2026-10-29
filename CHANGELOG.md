@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own `IdempotencyProperties.SchemaInitialization` enum, with the same values (`always`,
   `embedded`, `never`) and the same default, so configuration does not change. Code that called
   `IdempotencyProperties.Jdbc.getInitializeSchema()` gets the new enum type.
+- The in-flight `Retry-After` is the request's `waitTimeout`, or the holder's remaining lease when
+  that is shorter. It was the whole remaining lease, so with a long lease a client was told to wait
+  minutes for a key that replays as soon as the holder completes.
 
 ## [0.5.0] - 2026-09-25
 
