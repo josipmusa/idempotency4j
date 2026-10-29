@@ -406,6 +406,11 @@ These come from the filter itself, before or instead of your handler. Each carri
 | `422 Unprocessable Entity` | Key reused with a different request body |
 | `409 Conflict` | Another request still holds the key after `waitTimeout`; carries `Retry-After`. Configurable through `idempotency.web.in-flight-status` |
 
+`Retry-After` on an in-flight response is the request's `waitTimeout`, or the holder's remaining
+lease when that is shorter, in whole seconds, rounded up, minimum 1. It paces retries; it does not
+predict when the holder finishes, so a retry can get another in-flight response. Earlier retries
+pick up the result sooner, at the cost of more duplicate requests while the holder is still running.
+
 ### Response headers on a replay
 
 | Header | Value |

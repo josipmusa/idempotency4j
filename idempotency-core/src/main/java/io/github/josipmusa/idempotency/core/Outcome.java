@@ -76,9 +76,9 @@ public sealed interface Outcome<T> permits Outcome.Executed, Outcome.Replayed, O
      * The action did not run - another caller holds the key and did not finish within this
      * context's {@code waitTimeout}.
      *
-     * @param retryAfter how much of the holder's lease was left when the store gave up: an
-     *                   upper bound on how long the key can stay in-flight before it becomes
-     *                   stealable. Never negative
+     * @param retryAfter how much of the holder's lease was left when the store gave up: unless
+     *                   the lease is renewed, an upper bound on how long the key can stay
+     *                   in-flight before it becomes stealable. Never negative
      * @param <T>        what the guarded action produces
      */
     record InFlight<T>(Duration retryAfter) implements Outcome<T> {

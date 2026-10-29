@@ -22,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IdempotencyProperties.Jdbc.getInitializeSchema()` gets the new enum type.
 - The in-flight `Retry-After` is the request's `waitTimeout`, or the holder's remaining lease when
   that is shorter. It was the whole remaining lease, so with a long lease a client was told to wait
-  minutes for a key that replays as soon as the holder completes.
+  minutes for a key that replays as soon as the holder completes. It is a pacing heuristic: a retry
+  can still get another in-flight response, and earlier retries can mean more duplicate requests
+  while the holder is still running.
 
 ## [0.5.0] - 2026-09-25
 
