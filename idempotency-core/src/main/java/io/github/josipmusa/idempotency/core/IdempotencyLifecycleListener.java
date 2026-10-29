@@ -213,9 +213,10 @@ public interface IdempotencyLifecycleListener {
 
         /**
          * The action succeeded and its {@link StoragePolicy} declined to store the result, but
-         * the store could not release the lease. The caller still got the action's result. The
-         * record stays IN_PROGRESS until its lease expires: a retry before then is refused as in
-         * flight, and one after it runs the action again.
+         * the store could not release the lease. When the release failed with an exception, the
+         * caller still got the action's result; an {@link Error} propagates after this callback.
+         * The record stays IN_PROGRESS until its lease expires: a retry before then is refused as
+         * in flight, and one after it runs the action again.
          */
         RELEASE
     }

@@ -422,11 +422,16 @@ not roll back a transaction. The policy sees the handler's response before the `
 and is asked only for fresh executions, never for a replay or for the filter's own rejections. Only
 an explicit `false` releases the key: a policy that throws counts as a failure to record the
 completion, so the record is kept and `idempotency.completion-failure-policy` applies. A release the
-store refuses is logged, the client keeps its response, and the key stays in flight until its lease
-expires. Lifecycle listeners see a release as `onReleased`.
+store refuses with an exception is logged, the client keeps its response, and the key stays in flight
+until its lease expires. An `Error` from the release fires `onFailed` with `FailurePhase.RELEASE` and
+propagates, as an `Error` does everywhere else in the engine. Lifecycle listeners see a release as
+`onReleased`.
 
 The record is durable before the response body reaches the client, so a client that sees a response
-can rely on a retry replaying it.
+can usually rely on a retry replaying it. That does not hold in two cases: when a storage policy
+declines the response, the key is released and a retry runs the handler again; and when recording the
+completion fails and the failure is only logged (`LOG_AND_RETURN`, or a completion deferred to a
+commit), the client still gets the response but no completion was recorded.
 
 ### Status codes the filter can return
 

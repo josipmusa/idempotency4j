@@ -81,8 +81,9 @@ import org.slf4j.LoggerFactory;
  * it undoes nothing. With a transaction active as the action returns, the release waits for it,
  * with the heartbeat still running, exactly as an autonomous completion would: a commit releases
  * the lease and fires {@code onReleased}, a rollback releases it and fires
- * {@link FailurePhase#ROLLBACK}. A policy that throws is a completion failure, and a release that
- * fails is logged and reported as {@link FailurePhase#RELEASE} while the caller keeps its result.
+ * {@link FailurePhase#ROLLBACK}. A policy that throws is a completion failure. A release that
+ * fails with an exception is logged and reported as {@link FailurePhase#RELEASE} while the caller
+ * keeps its result; an {@link Error} is reported the same way and then propagates.
  *
  * <h2>Completion modes</h2>
  * <p>By default the completion is recorded on its own. With no transaction active when the
@@ -392,9 +393,11 @@ public final class IdempotencyEngine {
     /**
      * Deletes the record of a declined result and reports the lease's terminal.
      *
-     * <p>A release that fails is logged and reported as {@link FailurePhase#RELEASE}, and
-     * {@code onReleased} does not fire: the record stays IN_PROGRESS until its lease expires, so
-     * a retry before then is refused as in flight. The caller's answer is not affected.
+     * <p>A release that fails with an exception is logged and reported as
+     * {@link FailurePhase#RELEASE}, and {@code onReleased} does not fire: the record stays
+     * IN_PROGRESS until its lease expires, so a retry before then is refused as in flight. The
+     * caller's answer is not affected. An {@link Error} is reported as {@code RELEASE} too and
+     * then propagates.
      */
     private void releaseIntentionally(IdempotencyContext context, String leaseId) {
         try {

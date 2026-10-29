@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal callback, and still returns `Outcome.Executed`. With a transaction active as the action
   returns, the release waits for the commit, with the heartbeat still running; a rollback releases
   and fires `FailurePhase.ROLLBACK` as before. Only an explicit `false` releases: a policy that
-  throws is a completion failure and keeps the record. A failed release is logged and fires
-  `onFailed` with the new `FailurePhase.RELEASE`.
+  throws is a completion failure and keeps the record. A release that fails with an exception is
+  logged, fires `onFailed` with the new `FailurePhase.RELEASE`, and the caller keeps its result; an
+  `Error` fires the same callback and propagates.
 
 ### Changed
 
