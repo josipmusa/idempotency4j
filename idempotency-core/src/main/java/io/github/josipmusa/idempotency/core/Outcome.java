@@ -51,7 +51,9 @@ public sealed interface Outcome<T> permits Outcome.Executed, Outcome.Replayed, O
      *
      * <p>With {@link CompletionFailurePolicy#LOG_AND_RETURN} this is also what the engine
      * returns when the action ran but the completion could not be recorded; the failure is
-     * logged and reported to {@link IdempotencyLifecycleListener#onFailed}.
+     * logged and reported to {@link IdempotencyLifecycleListener#onFailed}. It is also what
+     * comes back when a {@link StoragePolicy} declined the result: the action ran and
+     * {@code value} is its answer, but the key was released instead of recorded.
      *
      * @param value what the action returned; {@code null} when it produces nothing
      * @param <T>   what the guarded action produces

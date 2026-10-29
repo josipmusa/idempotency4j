@@ -43,8 +43,9 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
  *
  * <p>Uses {@link RequestMappingHandlerMapping} to resolve the handler for each request, then checks
  * for the {@link Idempotent} annotation. If present, it hands the engine a supplier that runs the
- * rest of the chain into a buffering wrapper and returns what the handler wrote. The engine owns
- * the record from there; the filter only turns the {@link Outcome} back into a Servlet response -
+ * rest of the chain into a buffering wrapper and returns what the handler wrote, and a
+ * {@link ResponseStoragePolicy} the engine asks before storing it. The engine owns the record
+ * from there; the filter only turns the {@link Outcome} back into a Servlet response -
  * flush the fresh body, replay the stored one, or reject an in-flight duplicate. All Servlet-level
  * translation lives in {@link HttpIdempotencyMapper}; the requests the filter rejects itself are
  * written by an {@link IdempotencyRejectionHandler}.
@@ -73,6 +74,36 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private final long maxBodyBytes;
     private final StoredResponseCodec codec;
     private final IdempotencyRejectionHandler rejectionHandler;
+    private final ResponseStoragePolicy storagePolicy;
+
+    /**
+     * @param engine           the engine that owns each record
+     * @param config           the HTTP settings
+     * @param handlerMapping   Spring MVC's handler mapping
+     * @param registry         the resolved {@code @Idempotent} handlers
+     * @param maxBodyBytes     the largest request body buffered, or {@code -1} for no limit
+     * @param sanitizer        applied to a response before it is stored
+     * @param rejectionHandler writes the responses for the requests the filter rejects itself
+     * @param storagePolicy    decides whether a fresh response is stored or the key released
+     */
+    public IdempotencyFilter(
+            IdempotencyEngine engine,
+            WebIdempotencyConfig config,
+            RequestMappingHandlerMapping handlerMapping,
+            IdempotentHandlerRegistry registry,
+            long maxBodyBytes,
+            ResponseSanitizer sanitizer,
+            IdempotencyRejectionHandler rejectionHandler,
+            ResponseStoragePolicy storagePolicy) {
+        this.engine = Objects.requireNonNull(engine, "engine must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
+        this.registry = Objects.requireNonNull(registry, "registry must not be null");
+        this.maxBodyBytes = maxBodyBytes;
+        this.codec = new StoredResponseCodec(Objects.requireNonNull(sanitizer, "sanitizer must not be null"));
+        this.rejectionHandler = Objects.requireNonNull(rejectionHandler, "rejectionHandler must not be null");
+        this.storagePolicy = Objects.requireNonNull(storagePolicy, "storagePolicy must not be null");
+    }
 
     /**
      * @param engine           the engine that owns each record
@@ -91,13 +122,15 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             long maxBodyBytes,
             ResponseSanitizer sanitizer,
             IdempotencyRejectionHandler rejectionHandler) {
-        this.engine = Objects.requireNonNull(engine, "engine must not be null");
-        this.config = Objects.requireNonNull(config, "config must not be null");
-        this.handlerMapping = Objects.requireNonNull(handlerMapping, "handlerMapping must not be null");
-        this.registry = Objects.requireNonNull(registry, "registry must not be null");
-        this.maxBodyBytes = maxBodyBytes;
-        this.codec = new StoredResponseCodec(Objects.requireNonNull(sanitizer, "sanitizer must not be null"));
-        this.rejectionHandler = Objects.requireNonNull(rejectionHandler, "rejectionHandler must not be null");
+        this(
+                engine,
+                config,
+                handlerMapping,
+                registry,
+                maxBodyBytes,
+                sanitizer,
+                rejectionHandler,
+                ResponseStoragePolicy.ALWAYS);
     }
 
     public IdempotencyFilter(
@@ -114,7 +147,8 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                 registry,
                 maxBodyBytes,
                 sanitizer,
-                new DefaultIdempotencyRejectionHandler());
+                new DefaultIdempotencyRejectionHandler(),
+                ResponseStoragePolicy.ALWAYS);
     }
 
     public IdempotencyFilter(
@@ -190,7 +224,8 @@ public class IdempotencyFilter extends OncePerRequestFilter {
                         chain.doFilter(wrappedRequest, wrappedResponse);
                         return HttpIdempotencyMapper.capture(wrappedResponse);
                     },
-                    replayCodec(context));
+                    replayCodec(context),
+                    captured -> storagePolicy.shouldStore(wrappedRequest, captured));
         } catch (IdempotencyFingerprintMismatchException e) {
             rejectionHandler.handle(new IdempotencyRejection.FingerprintMismatch(), request, response);
             return;

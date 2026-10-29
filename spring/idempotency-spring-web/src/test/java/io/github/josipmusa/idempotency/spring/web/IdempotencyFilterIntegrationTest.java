@@ -28,6 +28,7 @@ import io.github.josipmusa.idempotency.core.IdempotencyStore;
 import io.github.josipmusa.idempotency.core.Payload;
 import io.github.josipmusa.idempotency.spring.Idempotent;
 import jakarta.servlet.Filter;
+import jakarta.servlet.http.HttpServletRequest;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -44,6 +45,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockServletContext;
 import org.springframework.test.web.servlet.MockMvc;
@@ -66,6 +68,13 @@ class IdempotencyFilterIntegrationTest {
     private static final String KEY_HEADER = "Idempotency-Key";
     private static final String ECHO_SCOPE = "EchoController.echo";
     private static final String OTHER_SCOPE = "EchoController.other";
+    private static final String PAY_SCOPE = "EchoController.pay";
+    private static final String RELEASE_ATTRIBUTE = "idempotency.release";
+
+    /** Releases the key of a request the handler marked as having done nothing. */
+    private static final ResponseStoragePolicy RELEASE_WHEN_MARKED =
+            (request, response) -> request.getAttribute(RELEASE_ATTRIBUTE) == null;
+
     private static final AtomicInteger invocations = new AtomicInteger();
 
     /** Shared timeline so listener callbacks can be ordered against the controller invocation. */
@@ -313,7 +322,7 @@ class IdempotencyFilterIntegrationTest {
             response.setContentType("application/json");
             response.getWriter().write("{\"code\":\"IN_FLIGHT\",\"message\":\"retry later\"}");
         };
-        MockMvc mockMvc = mockMvc(null, List.of(listener), apiErrors);
+        MockMvc mockMvc = mockMvc(null, List.of(listener), apiErrors, ResponseStoragePolicy.ALWAYS);
         store.inFlight.set(Duration.ofMillis(4200));
 
         MvcResult result = mockMvc.perform(post("/echo")
@@ -329,18 +338,92 @@ class IdempotencyFilterIntegrationTest {
         assertThat(invocations).hasValue(0);
     }
 
+    @Test
+    void When_HandlerMarksTheRequestForRelease_Expect_ResponseSentOnceAndKeyReleased() throws Exception {
+        MockMvc mockMvc =
+                mockMvc(null, List.of(listener), new DefaultIdempotencyRejectionHandler(), RELEASE_WHEN_MARKED);
+
+        MvcResult refused = mockMvc.perform(post("/payments")
+                        .header(KEY_HEADER, "pay-1")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("invalid"))
+                .andReturn();
+
+        assertThat(refused.getResponse().getStatus()).isEqualTo(400);
+        assertThat(refused.getResponse().getContentAsString()).isEqualTo("invalid amount");
+        assertThat(refused.getResponse().getHeader("Idempotent-Replayed")).isNull();
+        IdempotencyIdentity identity = new IdempotencyIdentity(PAY_SCOPE, "pay-1");
+        assertThat(store.released).containsExactly(identity);
+        assertThat(store.completed).doesNotContainKey(identity);
+        assertThat(events).contains("onReleased:pay-1");
+    }
+
+    @Test
+    void When_ReleasedKeyRetriedWithACorrectedBody_Expect_RetryRunsAndIsStored() throws Exception {
+        MockMvc mockMvc =
+                mockMvc(null, List.of(listener), new DefaultIdempotencyRejectionHandler(), RELEASE_WHEN_MARKED);
+
+        mockMvc.perform(post("/payments")
+                .header(KEY_HEADER, "pay-2")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("invalid"));
+        MvcResult corrected = mockMvc.perform(post("/payments")
+                        .header(KEY_HEADER, "pay-2")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("10.00"))
+                .andReturn();
+        MvcResult duplicate = mockMvc.perform(post("/payments")
+                        .header(KEY_HEADER, "pay-2")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("10.00"))
+                .andReturn();
+
+        assertThat(corrected.getResponse().getStatus()).isEqualTo(201);
+        assertThat(corrected.getResponse().getContentAsString()).isEqualTo("paid:10.00");
+        assertThat(duplicate.getResponse().getContentAsString()).isEqualTo("paid:10.00");
+        assertThat(duplicate.getResponse().getHeader("Idempotent-Replayed")).isEqualTo("true");
+        assertThat(invocations).hasValue(2);
+    }
+
+    @Test
+    void When_ReplayedOrInFlight_Expect_PolicyNotAsked() throws Exception {
+        AtomicInteger asked = new AtomicInteger();
+        MockMvc mockMvc = mockMvc(
+                null,
+                List.of(listener),
+                new DefaultIdempotencyRejectionHandler(),
+                (request, response) -> asked.incrementAndGet() > 0);
+
+        mockMvc.perform(post("/echo")
+                .header(KEY_HEADER, "asked")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("a"));
+        mockMvc.perform(post("/echo")
+                .header(KEY_HEADER, "asked")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("a"));
+        store.inFlight.set(Duration.ofSeconds(5));
+        mockMvc.perform(post("/echo")
+                .header(KEY_HEADER, "busy")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("a"));
+
+        assertThat(asked).as("asked once, for the fresh execution").hasValue(1);
+    }
+
     private MockMvc mockMvc(Long maxBodyBytes) {
         return mockMvc(maxBodyBytes, List.of(listener));
     }
 
     private MockMvc mockMvc(Long maxBodyBytes, List<IdempotencyLifecycleListener> listeners) {
-        return mockMvc(maxBodyBytes, listeners, null);
+        return mockMvc(maxBodyBytes, listeners, new DefaultIdempotencyRejectionHandler(), ResponseStoragePolicy.ALWAYS);
     }
 
     private MockMvc mockMvc(
             Long maxBodyBytes,
             List<IdempotencyLifecycleListener> listeners,
-            IdempotencyRejectionHandler rejectionHandler) {
+            IdempotencyRejectionHandler rejectionHandler,
+            ResponseStoragePolicy storagePolicy) {
         AnnotationConfigWebApplicationContext wac = new AnnotationConfigWebApplicationContext();
         wac.setServletContext(new MockServletContext());
         wac.register(WebConfig.class, EchoController.class);
@@ -352,18 +435,15 @@ class IdempotencyFilterIntegrationTest {
         IdempotencyEngine engine = new IdempotencyEngine(store, scheduler, listeners);
         IdempotentHandlerRegistry registry = new IdempotentHandlerRegistry(mapping, config);
         registry.afterSingletonsInstantiated();
-        IdempotencyFilter filter = rejectionHandler != null
-                ? new IdempotencyFilter(
-                        engine,
-                        webConfig,
-                        mapping,
-                        registry,
-                        maxBodyBytes == null ? -1 : maxBodyBytes,
-                        response -> response,
-                        rejectionHandler)
-                : maxBodyBytes == null
-                        ? new IdempotencyFilter(engine, webConfig, mapping, registry)
-                        : new IdempotencyFilter(engine, webConfig, mapping, registry, maxBodyBytes);
+        IdempotencyFilter filter = new IdempotencyFilter(
+                engine,
+                webConfig,
+                mapping,
+                registry,
+                maxBodyBytes == null ? -1 : maxBodyBytes,
+                response -> response,
+                rejectionHandler,
+                storagePolicy);
 
         Filter capture = (servletRequest, servletResponse, chain) -> {
             outerResponse.set((MockHttpServletResponse) servletResponse);
@@ -386,6 +466,18 @@ class IdempotencyFilterIntegrationTest {
             events.add("controller");
             controllerThread.set(Thread.currentThread());
             return "echo:" + body;
+        }
+
+        /** Marks the request when it refuses before doing anything, as an exception handler would. */
+        @PostMapping(value = "/payments", consumes = MediaType.TEXT_PLAIN_VALUE)
+        @Idempotent
+        public ResponseEntity<String> pay(@RequestBody String body, HttpServletRequest request) {
+            invocations.incrementAndGet();
+            if (body.equals("invalid")) {
+                request.setAttribute(RELEASE_ATTRIBUTE, true);
+                return ResponseEntity.badRequest().body("invalid amount");
+            }
+            return ResponseEntity.status(201).body("paid:" + body);
         }
 
         @PostMapping(value = "/other", consumes = MediaType.TEXT_PLAIN_VALUE)
@@ -413,6 +505,11 @@ class IdempotencyFilterIntegrationTest {
         public void onCompleted(IdempotencyContext ctx, String leaseId, Payload payload) {
             events.add("onCompleted:" + ctx.key());
             completed.add(payload);
+        }
+
+        @Override
+        public void onReleased(IdempotencyContext ctx, String leaseId) {
+            events.add("onReleased:" + ctx.key());
         }
 
         @Override
@@ -449,6 +546,8 @@ class IdempotencyFilterIntegrationTest {
         private final Map<IdempotencyIdentity, Payload> completed = new ConcurrentHashMap<>();
         private final Map<IdempotencyIdentity, Instant> completedAt = new ConcurrentHashMap<>();
 
+        private final List<IdempotencyIdentity> released = new CopyOnWriteArrayList<>();
+
         /** When set, every acquisition is answered as in-flight with this much lease left. */
         private final AtomicReference<Duration> inFlight = new AtomicReference<>();
 
@@ -479,7 +578,7 @@ class IdempotencyFilterIntegrationTest {
 
         @Override
         public void release(IdempotencyIdentity identity, String leaseId) {
-            // Not needed
+            released.add(identity);
         }
 
         @Override
