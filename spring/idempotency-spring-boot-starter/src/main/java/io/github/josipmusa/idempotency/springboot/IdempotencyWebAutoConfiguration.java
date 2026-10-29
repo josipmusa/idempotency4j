@@ -17,7 +17,9 @@ package io.github.josipmusa.idempotency.springboot;
 
 import io.github.josipmusa.idempotency.core.IdempotencyConfig;
 import io.github.josipmusa.idempotency.core.IdempotencyEngine;
+import io.github.josipmusa.idempotency.spring.web.DefaultIdempotencyRejectionHandler;
 import io.github.josipmusa.idempotency.spring.web.IdempotencyFilter;
+import io.github.josipmusa.idempotency.spring.web.IdempotencyRejectionHandler;
 import io.github.josipmusa.idempotency.spring.web.IdempotentHandlerRegistry;
 import io.github.josipmusa.idempotency.spring.web.ResponseSanitizer;
 import io.github.josipmusa.idempotency.spring.web.WebIdempotencyConfig;
@@ -71,6 +73,12 @@ public class IdempotencyWebAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    IdempotencyRejectionHandler idempotencyRejectionHandler() {
+        return new DefaultIdempotencyRejectionHandler();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public IdempotentHandlerRegistry idempotentHandlerRegistry(
             @Qualifier(REQUEST_MAPPING_HANDLER_MAPPING) RequestMappingHandlerMapping handlerMapping,
             IdempotencyConfig config) {
@@ -86,9 +94,16 @@ public class IdempotencyWebAutoConfiguration {
             @Qualifier(REQUEST_MAPPING_HANDLER_MAPPING) RequestMappingHandlerMapping handlerMapping,
             IdempotentHandlerRegistry registry,
             IdempotencyProperties properties,
-            ResponseSanitizer sanitizer) {
+            ResponseSanitizer sanitizer,
+            IdempotencyRejectionHandler rejectionHandler) {
         return new IdempotencyFilter(
-                engine, webConfig, handlerMapping, registry, properties.getWeb().getMaxBodyBytes(), sanitizer);
+                engine,
+                webConfig,
+                handlerMapping,
+                registry,
+                properties.getWeb().getMaxBodyBytes(),
+                sanitizer,
+                rejectionHandler);
     }
 
     @Bean

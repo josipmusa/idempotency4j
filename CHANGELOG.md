@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `IdempotencyRejectionHandler` renders the responses the HTTP filter writes itself: missing key,
+  key too long, body too large, key reused with a different body, and in flight. Declare a bean to
+  replace the `{"error": "..."}` bodies with your API's own errors, handling each
+  `IdempotencyRejection` case in an exhaustive `switch` or delegating the rest to the public
+  `DefaultIdempotencyRejectionHandler`. The in-flight `Retry-After` is set before the handler runs,
+  so it survives a handler that only changes the body. Without a bean the responses are unchanged,
+  and the existing `IdempotencyFilter` constructors keep working.
+
 ### Fixed
 
 - The starter now starts with Spring Boot Actuator on the classpath. Actuator registers a second

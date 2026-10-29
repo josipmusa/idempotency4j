@@ -306,11 +306,41 @@ class IdempotencyFilterIntegrationTest {
         assertThat(events).containsExactly("onInFlight:in-flight");
     }
 
+    @Test
+    void When_InFlightWithCustomRejectionHandler_Expect_CustomBodyWithRetryAfter() throws Exception {
+        IdempotencyRejectionHandler apiErrors = (rejection, request, response) -> {
+            response.setStatus(((IdempotencyRejection.InFlight) rejection).suggestedStatus());
+            response.setContentType("application/json");
+            response.getWriter().write("{\"code\":\"IN_FLIGHT\",\"message\":\"retry later\"}");
+        };
+        MockMvc mockMvc = mockMvc(null, List.of(listener), apiErrors);
+        store.inFlight.set(Duration.ofMillis(4200));
+
+        MvcResult result = mockMvc.perform(post("/echo")
+                        .header(KEY_HEADER, "in-flight")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("hello-body"))
+                .andReturn();
+
+        assertThat(result.getResponse().getStatus()).isEqualTo(409);
+        assertThat(result.getResponse().getHeader("Retry-After")).isEqualTo("5");
+        assertThat(result.getResponse().getContentAsString())
+                .isEqualTo("{\"code\":\"IN_FLIGHT\",\"message\":\"retry later\"}");
+        assertThat(invocations).hasValue(0);
+    }
+
     private MockMvc mockMvc(Long maxBodyBytes) {
         return mockMvc(maxBodyBytes, List.of(listener));
     }
 
     private MockMvc mockMvc(Long maxBodyBytes, List<IdempotencyLifecycleListener> listeners) {
+        return mockMvc(maxBodyBytes, listeners, null);
+    }
+
+    private MockMvc mockMvc(
+            Long maxBodyBytes,
+            List<IdempotencyLifecycleListener> listeners,
+            IdempotencyRejectionHandler rejectionHandler) {
         AnnotationConfigWebApplicationContext wac = new AnnotationConfigWebApplicationContext();
         wac.setServletContext(new MockServletContext());
         wac.register(WebConfig.class, EchoController.class);
@@ -322,9 +352,18 @@ class IdempotencyFilterIntegrationTest {
         IdempotencyEngine engine = new IdempotencyEngine(store, scheduler, listeners);
         IdempotentHandlerRegistry registry = new IdempotentHandlerRegistry(mapping, config);
         registry.afterSingletonsInstantiated();
-        IdempotencyFilter filter = maxBodyBytes == null
-                ? new IdempotencyFilter(engine, webConfig, mapping, registry)
-                : new IdempotencyFilter(engine, webConfig, mapping, registry, maxBodyBytes);
+        IdempotencyFilter filter = rejectionHandler != null
+                ? new IdempotencyFilter(
+                        engine,
+                        webConfig,
+                        mapping,
+                        registry,
+                        maxBodyBytes == null ? -1 : maxBodyBytes,
+                        response -> response,
+                        rejectionHandler)
+                : maxBodyBytes == null
+                        ? new IdempotencyFilter(engine, webConfig, mapping, registry)
+                        : new IdempotencyFilter(engine, webConfig, mapping, registry, maxBodyBytes);
 
         Filter capture = (servletRequest, servletResponse, chain) -> {
             outerResponse.set((MockHttpServletResponse) servletResponse);
