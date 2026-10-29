@@ -103,15 +103,38 @@ final class HttpIdempotencyMapper {
     }
 
     /**
+     * How long a client should wait before retrying a key another caller is still holding.
+     *
+     * <p>A pacing heuristic, not an estimate of when the holder will finish. The key replays as
+     * soon as the holder completes, and a retry waits up to its own {@code waitTimeout} on the
+     * server, so pacing retries at the wait timeout lets a client pick up the result soon after
+     * it exists. A retry can still find the key in flight, and get another in-flight response,
+     * when the holder runs longer. The holder's remaining lease is the bound before the key can
+     * be taken over from a holder that died, unless the lease is renewed, so a shorter remaining
+     * lease wins.
+     *
+     * <p>The tradeoff: earlier retries make the API more responsive, but can send more duplicate
+     * requests while the holder is still running. The whole remaining lease, used before, sent
+     * fewer duplicates but kept clients waiting long after the result was ready.
+     *
+     * @param remainingLease the holder's remaining lease
+     * @param waitTimeout    the rejected request's wait timeout
+     * @return the smaller of the two
+     */
+    static Duration retryAfter(Duration remainingLease, Duration waitTimeout) {
+        return remainingLease.compareTo(waitTimeout) < 0 ? remainingLease : waitTimeout;
+    }
+
+    /**
      * Rejects a request whose key another caller is still holding.
      *
-     * <p>{@code Retry-After} carries the holder's remaining lease in whole seconds, rounded
-     * up so a client never retries before the key could possibly be free, and floored at 1
-     * so a store that cannot tell still gets a usable hint rather than an immediate retry.
+     * <p>{@code Retry-After} carries {@code retryAfter} in whole seconds, rounded up, and
+     * floored at 1 so a store that cannot tell still gets a usable hint rather than an
+     * immediate retry.
      *
      * @param response   the response to write to
      * @param status     the configured in-flight status
-     * @param retryAfter the holder's remaining lease
+     * @param retryAfter when to retry, from {@link #retryAfter(Duration, Duration)}
      * @param message    the human-readable error message
      * @throws IOException if the body cannot be written
      */

@@ -177,8 +177,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         switch (outcome) {
             case Outcome.Executed<StoredResponse> ignored -> wrappedResponse.copyBodyToResponse();
             case Outcome.Replayed(StoredResponse stored, Instant ignoredCompletedAt) -> replay(stored, response);
-            case Outcome.InFlight(Duration retryAfter) ->
-                HttpIdempotencyMapper.writeInFlight(response, config.inFlightStatus(), retryAfter, ERROR_IN_FLIGHT);
+            case Outcome.InFlight(Duration remainingLease) ->
+                HttpIdempotencyMapper.writeInFlight(
+                        response,
+                        config.inFlightStatus(),
+                        HttpIdempotencyMapper.retryAfter(remainingLease, context.waitTimeout()),
+                        ERROR_IN_FLIGHT);
         }
     }
 

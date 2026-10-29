@@ -75,8 +75,9 @@ public sealed interface AcquireResult
      * executed. The caller should return an appropriate error (e.g. 409 or 503).
      *
      * <p>{@code retryAfter} is how much of the holder's lease was left when the store
-     * gave up — an upper bound on how long the identity can stay in-flight before it
-     * becomes stealable. It is never negative; a store that cannot tell reports
+     * gave up — unless the lease is renewed, an upper bound on how long the identity can stay
+     * in-flight before it becomes stealable. A live holder's heartbeat renews it, so the identity
+     * can stay in flight longer. It is never negative; a store that cannot tell reports
      * {@link Duration#ZERO}.
      */
     record InFlight(Duration retryAfter) implements AcquireResult {
