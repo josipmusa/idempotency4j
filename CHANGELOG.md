@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Most of this release is the work of Vinícius Ribeiro ([@vinirib](https://github.com/vinirib)). He
+reported the Actuator and `spring-boot-sql` startup failures and the overlong in-flight
+`Retry-After`, fixed each of them, and designed and built the rejection handler and storage policy
+SPIs. Thank you, Vinícius.
+
 ### Added
 
 - `IdempotencyRejectionHandler` renders the responses the HTTP filter writes itself: missing key,
